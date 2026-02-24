@@ -14,6 +14,7 @@
 		<Platforms>AnyCPU;x64</Platforms>
 		<IsPublishable>True</IsPublishable>
 		<TrimMode>partial</TrimMode>
+		<CETCompat>false</CETCompat>
 	</PropertyGroup>
 	
 	<PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
