@@ -16,8 +16,11 @@ namespace UmamusumeResponseAnalyzer.Tests
     public sealed class PluginAnalyzerTests
     {
         const string AccountIndexPath = "/umamusume/account/index";
+        const string AccountIndexPathWithoutPrefix = "/account/index";
         const string AccountIndexAbsoluteUrl = "https://example.test/umamusume/account/index?viewer_id=1#fragment";
+        const string AccountIndexAbsoluteUrlWithoutPrefix = "https://l18-prod-all-gs-uma.komoejoy.com/account/index?viewer_id=1#fragment";
         const string AccountIndexUrlWithQuery = AccountIndexPath + "?viewer_id=1";
+        const string LegendLoadAbsoluteUrlWithoutPrefix = "https://l18-prod-all-gs-uma.komoejoy.com/single_mode_legend/load";
         static GameHttpHeaders TestHeaders => new(
             "sid-1",
             "app-2026.07.03",
@@ -148,13 +151,33 @@ namespace UmamusumeResponseAnalyzer.Tests
             Assert.Equal(typeof(GameApi.Account.Index), descriptor.EndpointType);
         }
 
-        [Theory]
-        [InlineData("/account/index")]
-        [InlineData("/umamusume/account/index/")]
-        [InlineData("/unknown/path")]
-        public void ResolveEndpoint_FailsFastForUnknownPath(string canonicalUrl)
+        [Fact]
+        public void ResolveEndpoint_AcceptsPathWithoutUmamusumePrefixWhenCatalogPathExists()
         {
-            Assert.Throws<KeyNotFoundException>(() => Server.ResolveEndpoint(canonicalUrl));
+            var descriptor = Server.ResolveEndpoint(AccountIndexPathWithoutPrefix);
+
+            Assert.Equal(typeof(GameApi.Account.Index), descriptor.EndpointType);
+            Assert.Equal(AccountIndexPath, descriptor.Path);
+        }
+
+        [Theory]
+        [InlineData(LegendLoadAbsoluteUrlWithoutPrefix, typeof(GameApi.SingleModeLegend.Load))]
+        [InlineData(AccountIndexAbsoluteUrlWithoutPrefix, typeof(GameApi.Account.Index))]
+        public void ResolveEndpoint_AcceptsAbsoluteCanonicalUrlWithoutUmamusumePrefix(string canonicalUrl, Type endpointType)
+        {
+            var descriptor = Server.ResolveEndpoint(canonicalUrl);
+
+            Assert.Equal(endpointType, descriptor.EndpointType);
+        }
+
+        [Theory]
+        [InlineData("/umamusume/account/index/", "triedPaths=/umamusume/account/index/, /account/index/")]
+        [InlineData("/unknown/path", "triedPaths=/umamusume/unknown/path, /unknown/path")]
+        public void ResolveEndpoint_FailsFastForUnknownPath(string canonicalUrl, string expectedTriedPaths)
+        {
+            var ex = Assert.Throws<KeyNotFoundException>(() => Server.ResolveEndpoint(canonicalUrl));
+
+            Assert.Contains(expectedTriedPaths, ex.Message);
         }
 
         [Theory]
@@ -185,6 +208,28 @@ namespace UmamusumeResponseAnalyzer.Tests
             Assert.Equal(1, plugin.RawCalls);
             Assert.Equal(["raw", "dto"], plugin.CallOrder);
             Assert.Equal("2026-06-30", plugin.LastResponse?.data.open_date);
+            Assert.Equal(payload, plugin.LastPayload);
+        }
+
+        [Fact]
+        public async Task DispatchResponse_AcceptsCanonicalUrlWithoutUmamusumePrefix()
+        {
+            var plugin = new ResponseDispatchPlugin();
+            PluginManager.RegisterMethods(plugin);
+            var payload = MessagePackSerializer.Serialize(new DataLinkIndexResponse
+            {
+                data = new DataLinkIndexResponse.CommonResponse
+                {
+                    open_date = "2026-07-05",
+                },
+            });
+
+            await Server.DispatchResponse(AccountIndexAbsoluteUrlWithoutPrefix, payload);
+
+            Assert.Equal(1, plugin.DtoCalls);
+            Assert.Equal(1, plugin.RawCalls);
+            Assert.Equal(["raw", "dto"], plugin.CallOrder);
+            Assert.Equal("2026-07-05", plugin.LastResponse?.data.open_date);
             Assert.Equal(payload, plugin.LastPayload);
         }
 

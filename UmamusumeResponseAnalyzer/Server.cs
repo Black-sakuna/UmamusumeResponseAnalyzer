@@ -52,6 +52,7 @@ namespace UmamusumeResponseAnalyzer
 
     public static class Server
     {
+        const string GameEndpointPathPrefix = "/umamusume";
         internal const string CanonicalUrlHeaderName = "X-Hachimi-Game-Url";
         internal const string SidHeaderName = "X-Hachimi-sid";
         internal const string AppVerHeaderName = "X-Hachimi-app-ver";
@@ -109,11 +110,21 @@ namespace UmamusumeResponseAnalyzer
         internal static GameEndpointDescriptor ResolveEndpoint(string canonicalUrl)
         {
             var path = ExtractEndpointPath(canonicalUrl);
-            if (GameEndpointCatalog.ByPath.TryGetValue(path, out var descriptor))
-                return descriptor;
+            var triedPaths = ResolveEndpointPathCandidates(path);
+            foreach (var triedPath in triedPaths)
+            {
+                if (GameEndpointCatalog.ByPath.TryGetValue(triedPath, out var descriptor))
+                    return descriptor;
+            }
 
-            throw new KeyNotFoundException($"未识别 Gallop endpoint: url={canonicalUrl}, path={path}");
+            throw new KeyNotFoundException(
+                $"未识别 Gallop endpoint: url={canonicalUrl}, path={path}, triedPaths={string.Join(", ", triedPaths)}");
         }
+
+        static string[] ResolveEndpointPathCandidates(string path)
+            => path.StartsWith(GameEndpointPathPrefix + "/", StringComparison.Ordinal)
+                ? [path, path[GameEndpointPathPrefix.Length..]]
+                : [GameEndpointPathPrefix + path, path];
 
         static string ExtractEndpointPath(string canonicalUrl)
         {

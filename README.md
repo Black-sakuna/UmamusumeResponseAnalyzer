@@ -4,7 +4,7 @@ UmamusumeResponseAnalyzer 是本地运行的 TUI 宿主。它接收游戏请求/
 
 # 前置 Prerequisite
 
-* 任意可以把游戏请求/响应 MessagePack payload 发送到宿主 `/notify/request` / `/notify/response` 的 sender。请求必须带 `X-Hachimi-Game-Url` header，值为游戏原始 canonical URL；该 URL 的 path 必须命中 Gallop endpoint catalog。推荐 [ura-core](https://github.com/UmamusumeResponseAnalyzer/ura-core)。
+* 任意可以把游戏请求/响应 MessagePack payload 发送到宿主 `/notify/request` / `/notify/response` 的 sender。请求必须带 `X-Hachimi-Game-Url` header，值为游戏原始 canonical URL；该 URL 的 path 必须命中 Gallop endpoint catalog，或能在带/不带 `/umamusume` 前缀两种形式之间切换后命中 catalog。推荐 [ura-core](https://github.com/UmamusumeResponseAnalyzer/ura-core)。
 * sender 的目标地址默认设置为 `http://127.0.0.1:4693`。如果游戏在手机或其他设备上运行，首次运行向导可把监听地址改为 `0.0.0.0`；启动时按控制台提示放行防火墙。
 * Windows 版主菜单提供 `自动安装ura-core`。该入口会查找本机游戏目录，选择安装 Hachimi 或 umamusume-localify，并在启用 DLL redirection 时请求管理员权限。
 * (可选，如果需要脱离 DMM 启动游戏) DMM Game Player β 及 HTTPS proxy，比如 [Fiddler](https://www.telerik.com/fiddler/fiddler-classic) 或 [mitmproxy](https://mitmproxy.org/)。
@@ -49,7 +49,7 @@ UmamusumeResponseAnalyzer 是本地运行的 TUI 宿主。它接收游戏请求/
 * 请求/响应 analyzer 使用 endpoint attribute，例如 `[ResponseAnalyzer<GameApi.Account.Index>] ValueTask Analyze(DataLinkIndexResponse response)`；唯一 payload 参数为 `byte[]` 时收到原始 MessagePack payload，其他 payload 参数类型必须精确匹配 Gallop descriptor 的 request/response DTO。analyzer 可声明第二参数 `GameHttpHeaders headers` 接收 sender 转发的游戏 HTTP header；缺失 header 为 `null`。同一个方法可以挂多个 analyzer attribute，但这些 attribute 必须要求同一个 payload 参数类型。
 * 插件也可以在 `Initialize(IPluginContext context)` 中通过 `context.Analyzers.RegisterRequest(...)` / `context.Analyzers.RegisterResponse(...)` 程序化注册 analyzer；raw handler 使用单泛型 overload，DTO handler 使用双泛型 overload，二参 handler 的第二参数为 `GameHttpHeaders`。
 * analyzer handler 返回 `ValueTask`。动态注册返回的 `IDisposable` 可注销对应 analyzer；注销只影响后续分发。
-* 宿主按 `X-Hachimi-Game-Url` header 中的 canonical game URL 解析 path，并要求 path 精确命中 `GameEndpointCatalog.ByPath`。sender 可附带 `X-Hachimi-sid`、`X-Hachimi-app-ver`、`X-Hachimi-res-ver`、`X-Hachimi-viewerid`、`X-Hachimi-device`、`X-Hachimi-device-subtype`；raw analyzer 收到的是原始 MessagePack payload bytes。
+* 宿主按 `X-Hachimi-Game-Url` header 中的 canonical game URL 解析 path，并要求 path 命中 `GameEndpointCatalog.ByPath`；未命中时会在带/不带 `/umamusume` 前缀两种形式之间切换后再查 catalog。sender 可附带 `X-Hachimi-sid`、`X-Hachimi-app-ver`、`X-Hachimi-res-ver`、`X-Hachimi-viewerid`、`X-Hachimi-device`、`X-Hachimi-device-subtype`；raw analyzer 收到的是原始 MessagePack payload bytes。
 * 分发以 raw payload 为基础；DTO analyzer 在执行点按 Gallop descriptor 反序列化，同一分发中的 DTO analyzer 共享反序列化结果。raw analyzer 和 DTO analyzer 都按 priority 顺序执行。
 * 插件 HTTP route 使用 `[Route]` attribute。方法签名必须是 `Task Handler(HttpContextBase ctx)`，最终路径为 `/<PluginName>/<RoutePath>`。
 * 插件必须实现 `Initialize(IPluginContext context)`。`context.LiveDisplay` 提供 LiveDisplay 输出；`SetPanel(...)` 默认在 panel 更新时切到目标 workspace，需要静默刷新时调用带 `switchToWorkspace: false` 的 overload。`context.Events.OnStarted(...)` 用于订阅宿主启动事件；宿主按当前 ABI 调用初始化入口。`Initialize` 抛异常时，宿主记录插件失败并清理该插件的 analyzer、route、事件订阅和快捷键归属；热重载或卸载插件时也会做同样清理。
