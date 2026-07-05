@@ -595,7 +595,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
 
         [Fact]
-        public void BootstrapWorkspace_IsRemovedWhenAnotherWorkspaceRegisters()
+        public void BootstrapWorkspace_IsRemovedWhenAnotherWorkspaceOutputsSwitchingPanel()
         {
             var uiHost = new UiHost();
             var bootstrap = new BootstrapWorkspace(uiHost);
@@ -607,6 +607,36 @@ namespace UmamusumeResponseAnalyzer.Tests
                 Assert.Contains("启动状态", Render(uiHost, width: 120, height: 35));
 
                 var pluginWorkspace = uiHost.CreateWorkspace("插件");
+                var outputAfterWorkspaceCreate = Render(uiHost, width: 120, height: 35);
+
+                Assert.Contains("启动状态", outputAfterWorkspaceCreate);
+                Assert.Contains("已读取 config.yaml", outputAfterWorkspaceCreate);
+                Assert.Equal(bootstrap.Workspace, LiveDisplayConsole.DefaultLogWorkspace);
+
+                uiHost.SetPanel(new LiveDisplayPanel(
+                    pluginWorkspace,
+                    "Plugin",
+                    "main",
+                    "插件",
+                    new Panel("QuietPluginBody").Expand(),
+                    DateTimeOffset.Now,
+                    FullBleed: false),
+                    switchToWorkspace: false);
+                var outputAfterQuietPanel = Render(uiHost, width: 120, height: 35);
+
+                Assert.Contains("启动状态", outputAfterQuietPanel);
+                Assert.DoesNotContain("QuietPluginBody", outputAfterQuietPanel);
+                Assert.Equal(bootstrap.Workspace, LiveDisplayConsole.DefaultLogWorkspace);
+
+                uiHost.SwitchWorkspace(pluginWorkspace);
+                var outputAfterManualSwitch = Render(uiHost, width: 120, height: 35);
+
+                Assert.Contains("QuietPluginBody", outputAfterManualSwitch);
+                Assert.Equal(bootstrap.Workspace, LiveDisplayConsole.DefaultLogWorkspace);
+
+                uiHost.SwitchWorkspace(bootstrap.Workspace);
+                Assert.Contains("启动状态", Render(uiHost, width: 120, height: 35));
+
                 uiHost.SetPanel(new LiveDisplayPanel(
                     pluginWorkspace,
                     "Plugin",
@@ -615,7 +645,6 @@ namespace UmamusumeResponseAnalyzer.Tests
                     new Panel("PluginBody").Expand(),
                     DateTimeOffset.Now,
                     FullBleed: false));
-
                 var output = Render(uiHost, width: 120, height: 35);
 
                 Assert.Contains("PluginBody", output);
@@ -641,6 +670,32 @@ namespace UmamusumeResponseAnalyzer.Tests
                 LiveDisplayConsole.DefaultLogWorkspace = null;
                 LiveDisplayConsole.Unbind(uiHost);
             }
+        }
+
+        [Fact]
+        public async Task WorkspaceCommand_ListIncludesBootstrapBeforeSwitchingPanelOutput()
+        {
+            var uiHost = new UiHost();
+            KeyboardManager.OverlaySink = uiHost;
+            var bootstrap = new BootstrapWorkspace(uiHost);
+            var pluginWorkspace = uiHost.CreateWorkspace("插件");
+            uiHost.SetPanel(new LiveDisplayPanel(
+                pluginWorkspace,
+                "Plugin",
+                "main",
+                "插件",
+                new Panel("QuietPluginBody").Expand(),
+                DateTimeOffset.Now),
+                switchToWorkspace: false);
+            Render(uiHost, width: 120, height: 35);
+
+            await uiHost.HandleCommandAsync("/workspace list");
+            var output = Render(uiHost, width: 120, height: 35);
+
+            Assert.Contains("Workspaces", output);
+            Assert.Contains("启动", output);
+            Assert.Contains("插件", output);
+            Assert.Equal(bootstrap.Workspace, uiHost.CurrentWorkspace);
         }
 
         [Fact]
@@ -1191,6 +1246,7 @@ namespace UmamusumeResponseAnalyzer.Tests
             Assert.Contains("Command Mode", visibleOutput);
             Assert.Contains("❯ /status", visibleOutput);
         }
+
         [Fact]
         public void UiHost_RendersKeyboardCommandInputCompletionCandidates()
         {
@@ -1237,6 +1293,112 @@ namespace UmamusumeResponseAnalyzer.Tests
             finally
             {
                 PluginManager.Metadatas.Remove("CompletionPlugin");
+            }
+        }
+
+        [Fact]
+        public async Task UiHost_RunAsync_ClearsConsoleBeforeFirstLiveRender()
+        {
+            var uiHost = new UiHost();
+            var recording = new StringWriter();
+            var originalConsole = AnsiConsole.Console;
+            AnsiConsole.Console = AnsiConsole.Create(new AnsiConsoleSettings { Out = new FixedSizeConsoleOutput(recording, 120, 35) });
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            UiHost.HasInteractiveConsoleOverrideForTests = true;
+            UiHost.ClearConsoleOverrideForTests = () => AnsiConsole.WriteLine("CLEAR_BEFORE_LIVE");
+            UiHost.RunLiveDisplayUntilConsoleInteractionOverrideForTests = _ =>
+            {
+                AnsiConsole.WriteLine("LIVE_RENDER_START");
+                cts.Cancel();
+                return Task.CompletedTask;
+            };
+
+            try
+            {
+                AnsiConsole.WriteLine("STALE_STARTUP_TEXT");
+                await IgnoreCancellationAsync(uiHost.RunAsync(cts.Token));
+
+                var output = recording.ToString();
+                Assert.Contains("STALE_STARTUP_TEXT", output);
+                Assert.Contains("CLEAR_BEFORE_LIVE", output);
+                Assert.Contains("LIVE_RENDER_START", output);
+                var staleIndex = output.IndexOf("STALE_STARTUP_TEXT", StringComparison.Ordinal);
+                var clearIndex = output.IndexOf("CLEAR_BEFORE_LIVE", staleIndex, StringComparison.Ordinal);
+                var liveIndex = output.IndexOf("LIVE_RENDER_START", clearIndex, StringComparison.Ordinal);
+                Assert.True(clearIndex > staleIndex, output);
+                Assert.True(liveIndex > clearIndex, output);
+            }
+            finally
+            {
+                UiHost.HasInteractiveConsoleOverrideForTests = null;
+                UiHost.ClearConsoleOverrideForTests = null;
+                UiHost.RunLiveDisplayUntilConsoleInteractionOverrideForTests = null;
+                AnsiConsole.Console = originalConsole;
+            }
+        }
+
+        [Fact]
+        public async Task UiHost_RunAsync_FirstRenderGateRunsConsoleInteractionBeforeLiveRender()
+        {
+            var uiHost = new UiHost();
+            var recording = new StringWriter();
+            var originalConsole = AnsiConsole.Console;
+            AnsiConsole.Console = AnsiConsole.Create(new AnsiConsoleSettings { Out = new FixedSizeConsoleOutput(recording, 120, 35) });
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            var firstRenderGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            UiHost.HasInteractiveConsoleOverrideForTests = true;
+            UiHost.ClearConsoleOverrideForTests = () => AnsiConsole.WriteLine("CLEAR_CONSOLE");
+            UiHost.RunLiveDisplayUntilConsoleInteractionOverrideForTests = _ =>
+            {
+                AnsiConsole.WriteLine("LIVE_RENDER_START");
+                cts.Cancel();
+                return Task.CompletedTask;
+            };
+            LiveDisplayConsole.Bind(uiHost);
+
+            try
+            {
+                AnsiConsole.WriteLine("STALE_STARTUP_TEXT");
+                var runTask = uiHost.RunAsync(cts.Token, firstRenderGate.Task);
+                while (!uiHost.IsRunning)
+                    await Task.Delay(10, cts.Token);
+
+                await LiveDisplayConsole.RunAsync(() =>
+                {
+                    AnsiConsole.WriteLine("PLUGIN_INIT_PROMPT");
+                    return Task.CompletedTask;
+                }).WaitAsync(cts.Token);
+
+                var outputBeforeGate = recording.ToString();
+                Assert.Contains("PLUGIN_INIT_PROMPT", outputBeforeGate);
+                Assert.DoesNotContain("LIVE_RENDER_START", outputBeforeGate);
+
+                firstRenderGate.TrySetResult();
+                await IgnoreCancellationAsync(runTask);
+
+                var output = recording.ToString();
+                Assert.Contains("STALE_STARTUP_TEXT", output);
+                Assert.Contains("CLEAR_CONSOLE", output);
+                Assert.Contains("PLUGIN_INIT_PROMPT", output);
+                Assert.Contains("LIVE_RENDER_START", output);
+                var staleIndex = output.IndexOf("STALE_STARTUP_TEXT", StringComparison.Ordinal);
+                var firstClearIndex = output.IndexOf("CLEAR_CONSOLE", staleIndex, StringComparison.Ordinal);
+                var promptIndex = output.IndexOf("PLUGIN_INIT_PROMPT", firstClearIndex, StringComparison.Ordinal);
+                var liveIndex = output.IndexOf("LIVE_RENDER_START", promptIndex, StringComparison.Ordinal);
+                Assert.True(firstClearIndex > staleIndex, output);
+                Assert.True(promptIndex > firstClearIndex, output);
+                Assert.True(liveIndex > promptIndex, output);
+            }
+            finally
+            {
+                firstRenderGate.TrySetResult();
+                uiHost.RequestShutdown();
+                cts.Cancel();
+                LiveDisplayConsole.Unbind(uiHost);
+                UiHost.HasInteractiveConsoleOverrideForTests = null;
+                UiHost.ClearConsoleOverrideForTests = null;
+                UiHost.RunLiveDisplayUntilConsoleInteractionOverrideForTests = null;
+                AnsiConsole.Console = originalConsole;
             }
         }
 

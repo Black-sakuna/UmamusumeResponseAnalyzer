@@ -18,7 +18,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             Workspace = uiHost.CreateWorkspace("启动");
             uiHost.BindWorkspaceHotkey(Workspace, ConsoleKey.B, ConsoleModifiers.Control, "启动信息");
             Refresh();
-            uiHost.RemoveWorkspaceWhenAnotherRegisters(Workspace, () =>
+            uiHost.RemoveWorkspaceWhenAnotherPanelActivates(Workspace, () =>
             {
                 if (LiveDisplayConsole.DefaultLogWorkspace == Workspace)
                     LiveDisplayConsole.DefaultLogWorkspace = null;

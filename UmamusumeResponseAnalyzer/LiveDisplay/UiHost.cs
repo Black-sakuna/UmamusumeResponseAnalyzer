@@ -33,6 +33,9 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         KeyboardCommandInput? commandInput;
         bool shutdownRequested;
         int runState;
+        internal static bool? HasInteractiveConsoleOverrideForTests { get; set; }
+        internal static Action? ClearConsoleOverrideForTests { get; set; }
+        internal static Func<CancellationToken, Task>? RunLiveDisplayUntilConsoleInteractionOverrideForTests { get; set; }
         int acceptingEvents = 1;
 
         public ILiveDisplayOutput ForPlugin(string pluginId) => new PluginLiveDisplayOutput(pluginId, this);
@@ -63,10 +66,10 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             Post(new UiEvent.RegisterWorkspace(workspace));
         }
 
-        internal void RemoveWorkspaceWhenAnotherRegisters(LiveDisplayWorkspace workspace, Action? removed = null)
+        internal void RemoveWorkspaceWhenAnotherPanelActivates(LiveDisplayWorkspace workspace, Action? removed = null)
         {
             ArgumentNullException.ThrowIfNull(workspace);
-            Post(new UiEvent.RemoveWorkspaceWhenAnotherRegisters(workspace, removed));
+            Post(new UiEvent.RemoveWorkspaceWhenAnotherPanelActivates(workspace, removed));
         }
 
         public void SetPanel(LiveDisplayPanel panel, bool switchToWorkspace = true) => Post(new UiEvent.SetPanel(panel, switchToWorkspace));
@@ -151,7 +154,9 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             console.Write(BuildLayout(console.Profile.Width, console.Profile.Height));
         }
 
-        public async Task RunAsync(CancellationToken cancellationToken)
+        public Task RunAsync(CancellationToken cancellationToken) => RunAsync(cancellationToken, firstRenderGate: null);
+
+        internal async Task RunAsync(CancellationToken cancellationToken, Task? firstRenderGate)
         {
             if (Interlocked.Exchange(ref runState, 1) != 0)
                 throw new InvalidOperationException("UiHost.RunAsync 已在运行中。");
@@ -163,6 +168,11 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                     await RunHeadlessAsync(cancellationToken);
                     return;
                 }
+
+                ClearConsole();
+
+                if (firstRenderGate is not null)
+                    await DrainConsoleInteractionsBeforeFirstRenderAsync(firstRenderGate, cancellationToken);
 
                 while (!cancellationToken.IsCancellationRequested && !shutdownRequested)
                 {
@@ -183,8 +193,33 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             }
         }
 
+        async Task DrainConsoleInteractionsBeforeFirstRenderAsync(Task firstRenderGate, CancellationToken cancellationToken)
+        {
+            while (!cancellationToken.IsCancellationRequested && !shutdownRequested)
+            {
+                while (consoleInteractions.Reader.TryRead(out var interaction))
+                    await ExecuteConsoleInteractionAsync(interaction, clearConsole: true);
+
+                if (firstRenderGate.IsCompleted && !consoleInteractions.Reader.TryPeek(out _))
+                {
+                    await firstRenderGate;
+                    return;
+                }
+
+                var waitForGate = firstRenderGate.WaitAsync(cancellationToken);
+                var waitForInteraction = consoleInteractions.Reader.WaitToReadAsync(cancellationToken).AsTask();
+                await Task.WhenAny(waitForGate, waitForInteraction);
+            }
+        }
+
         async Task<ConsoleInteractionRequest?> RunLiveDisplayUntilConsoleInteractionAsync(CancellationToken cancellationToken)
         {
+            if (RunLiveDisplayUntilConsoleInteractionOverrideForTests is { } runOverride)
+            {
+                await runOverride(cancellationToken);
+                return null;
+            }
+
             ConsoleInteractionRequest? pendingInteraction = null;
             var width = GetConsoleWidth();
             var height = GetConsoleHeight();
@@ -266,7 +301,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             try
             {
                 if (clearConsole)
-                    AnsiConsole.Clear();
+                    ClearConsole();
 
                 await request.Action();
                 request.SetResult();
@@ -278,9 +313,11 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             finally
             {
                 if (clearConsole)
-                    AnsiConsole.Clear();
+                    ClearConsole();
             }
         }
+
+        static void ClearConsole() => (ClearConsoleOverrideForTests ?? AnsiConsole.Clear)();
 
         void FailPendingConsoleInteractions()
         {
@@ -324,8 +361,8 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                         setWorkspaceShortcut.Modifiers,
                         setWorkspaceShortcut.ShortcutText);
                     break;
-                case UiEvent.RemoveWorkspaceWhenAnotherRegisters removeWorkspace:
-                    ArmWorkspaceRemovalWhenAnotherRegisters(removeWorkspace.Workspace, removeWorkspace.Removed);
+                case UiEvent.RemoveWorkspaceWhenAnotherPanelActivates removeWorkspace:
+                    ArmWorkspaceRemovalWhenAnotherPanelActivates(removeWorkspace.Workspace, removeWorkspace.Removed);
                     break;
                 case UiEvent.SetPanel setPanel:
                     if (IsRemovedWorkspace(setPanel.Panel.Workspace))
@@ -333,10 +370,14 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
 
                     RegisterKnownWorkspace(setPanel.Panel.Workspace);
                     panels[(setPanel.Panel.Workspace, setPanel.Panel.PluginId, setPanel.Panel.Key)] = setPanel.Panel;
-                    if (setPanel.SwitchToWorkspace && !Equals(activeWorkspace, setPanel.Panel.Workspace))
+                    if (setPanel.SwitchToWorkspace)
                     {
-                        activeWorkspace = setPanel.Panel.Workspace;
-                        Volatile.Write(ref currentWorkspace, setPanel.Panel.Workspace);
+                        RemovePendingWorkspacesAfterPanelActivation(setPanel.Panel.Workspace);
+                        if (!Equals(activeWorkspace, setPanel.Panel.Workspace))
+                        {
+                            activeWorkspace = setPanel.Panel.Workspace;
+                            Volatile.Write(ref currentWorkspace, setPanel.Panel.Workspace);
+                        }
                     }
                     break;
                 case UiEvent.Log log:
@@ -747,7 +788,6 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                     activeWorkspace = workspace;
                     SetCurrentWorkspaceIfEmpty(workspace);
                 }
-                RemovePendingWorkspacesAfterRegistering(workspace);
                 return;
             }
 
@@ -758,7 +798,6 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 SetCurrentWorkspaceIfEmpty(workspace);
             }
 
-            RemovePendingWorkspacesAfterRegistering(workspace);
             RefreshWorkspaceCompletionTitles();
         }
 
@@ -780,26 +819,22 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             workspaces[workspace] = state with { ShortcutText = shortcutText, Hotkey = hotkey };
         }
 
-        void ArmWorkspaceRemovalWhenAnotherRegisters(LiveDisplayWorkspace workspace, Action? removed)
+        void ArmWorkspaceRemovalWhenAnotherPanelActivates(LiveDisplayWorkspace workspace, Action? removed)
         {
-            var replacement = workspaces.Keys.FirstOrDefault(x => x != workspace);
-            if (replacement is not null)
-            {
-                RemoveWorkspace(workspace, replacement, removed);
+            if (pendingWorkspaceRemovals.Any(x => Equals(x.Workspace, workspace)))
                 return;
-            }
 
             pendingWorkspaceRemovals.Add(new(workspace, removed));
         }
 
-        void RemovePendingWorkspacesAfterRegistering(LiveDisplayWorkspace registeredWorkspace)
+        void RemovePendingWorkspacesAfterPanelActivation(LiveDisplayWorkspace activatedWorkspace)
         {
             foreach (var pending in pendingWorkspaceRemovals.ToList())
             {
-                if (ReferenceEquals(pending.Workspace, registeredWorkspace))
+                if (Equals(pending.Workspace, activatedWorkspace))
                     continue;
 
-                RemoveWorkspace(pending.Workspace, registeredWorkspace, pending.Removed);
+                RemoveWorkspace(pending.Workspace, activatedWorkspace, pending.Removed);
                 pendingWorkspaceRemovals.Remove(pending);
             }
         }
@@ -943,6 +978,9 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
 
         static bool HasInteractiveConsole()
         {
+            if (HasInteractiveConsoleOverrideForTests is { } overrideValue)
+                return overrideValue;
+
             if (Console.IsOutputRedirected)
                 return false;
 

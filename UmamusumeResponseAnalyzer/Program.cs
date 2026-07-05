@@ -55,104 +55,150 @@ namespace UmamusumeResponseAnalyzer
             }
             while (prompt != I18N_Start); //如果不是启动则重新显示主菜单
 
-            bootstrap.SetPhase("database", "数据文件", LiveDisplaySeverity.Info, "正在加载事件、技能、名称等数据。");
-            _database_initialize_task = Database.Initialize();
-            Task.WaitAll(_database_initialize_task, _plugin_initialize_task); //等待数据库初始化完成
-            bootstrap.SetPhase("database", "数据文件", LiveDisplaySeverity.Success, "加载完成；缺失或损坏项见日志。");
+            using var liveDisplayCts = new CancellationTokenSource();
+            var firstRenderGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var uiTask = uiHost.RunAsync(liveDisplayCts.Token, firstRenderGate.Task);
+            Task? keyboardTask = null;
 
-            bootstrap.SetPhase("plugin-init", "插件初始化", LiveDisplaySeverity.Info, "正在调用插件 Initialize。");
-            PluginManager.InitializeLoadedPlugins();
-            var loadedPluginCount = PluginManager.LoadedPlugins.Count;
-            var failedPluginCount = PluginManager.FailedPlugins.Count;
-            bootstrap.SetPhase(
-                "plugin-init",
-                "插件初始化",
-                failedPluginCount == 0 ? LiveDisplaySeverity.Success : LiveDisplaySeverity.Warning,
-                failedPluginCount == 0
-                    ? $"已初始化 {loadedPluginCount} 个插件。"
-                    : $"已初始化 {loadedPluginCount} 个插件，{failedPluginCount} 个插件失败。");
-
-            bootstrap.SetPhase("server", "HTTP server", LiveDisplaySeverity.Info, "正在启动监听。");
             try
             {
-                Server.Start(); //启动HTTP服务器
-                bootstrap.SetPhase("server", "HTTP server", LiveDisplaySeverity.Success, $"监听 http://{Config.Core.ListenAddress}:{Config.Core.ListenPort}");
-            }
-            catch (Exception ex)
-            {
-                bootstrap.SetPhase("server", "HTTP server", LiveDisplaySeverity.Error, ex.Message);
-                throw;
-            }
-
-            bootstrap.Log(
-                "Plugin",
-                loadedPluginCount == 0
-                    ? "没有加载任何插件。可从插件仓库安装插件。"
-                    : $"已加载 {loadedPluginCount} 个插件。按 P 查看插件列表。",
-                loadedPluginCount == 0 ? LiveDisplaySeverity.Warning : LiveDisplaySeverity.Success);
-            foreach (var plugin in PluginManager.FailedPlugins)
-            {
-                var message = $"插件 {Path.GetFileName(plugin)} 加载失败";
-                bootstrap.Log("Plugin", message, LiveDisplaySeverity.Warning);
-            }
-
-            bootstrap.Log("Server", $"监听 http://{Config.Core.ListenAddress}:{Config.Core.ListenPort}", LiveDisplaySeverity.Success);
-            if (Config.Core.ListenAddress == "0.0.0.0")
-            {
-                var interfaces = NetworkInterface.GetAllNetworkInterfaces()
-                       .Where(x => x.OperationalStatus == OperationalStatus.Up && x.NetworkInterfaceType != NetworkInterfaceType.Loopback)
-                       .SelectMany(x => x.GetIPProperties().UnicastAddresses)
-                       .Where(x => x.Address.AddressFamily == AddressFamily.InterNetwork)
-                       .Select(x => x.Address.ToString())
-                       .ToList();
-                foreach (var i in interfaces)
+                while (!uiHost.IsRunning)
                 {
-                    bootstrap.Log("Server", string.Format(Localization.Server.I18N_AvailableEndpointTip, i, Config.Core.ListenPort));
+                    if (uiTask.IsCompleted)
+                    {
+                        await uiTask;
+                        throw new InvalidOperationException("UiHost stopped before startup completed.");
+                    }
+
+                    await Task.Delay(10, liveDisplayCts.Token);
                 }
-            }
 
-            for (var i = 0; i < 30; i++)
-            {
-                if (Server.IsRunning) break;
-                await Task.Delay(100);
-            }
-            if (!Server.IsRunning)
-            {
-                bootstrap.SetPhase("server", "HTTP server", LiveDisplaySeverity.Error, I18N_LaunchFail.RemoveMarkup());
-                LiveDisplayConsole.WriteLine(I18N_LaunchFail);
-                LiveDisplayConsole.ReadLine();
-                Environment.Exit(1);
-            }
+                bootstrap.SetPhase("database", "数据文件", LiveDisplaySeverity.Info, "正在加载事件、技能、名称等数据。");
+                _database_initialize_task = Database.Initialize();
+                Task.WaitAll(_database_initialize_task, _plugin_initialize_task); //等待数据库初始化完成
+                bootstrap.SetPhase("database", "数据文件", LiveDisplaySeverity.Success, "加载完成；缺失或损坏项见日志。");
 
-            var startedMessage = I18N_Start_Started.RemoveMarkup();
-            bootstrap.Log("URA", startedMessage, LiveDisplaySeverity.Success);
-            bootstrap.SetPhase("started", "宿主", LiveDisplaySeverity.Success, startedMessage);
+                bootstrap.SetPhase("plugin-init", "插件初始化", LiveDisplaySeverity.Info, "正在调用插件 Initialize。");
+                PluginManager.InitializeLoadedPlugins();
+                var loadedPluginCount = PluginManager.LoadedPlugins.Count;
+                var failedPluginCount = PluginManager.FailedPlugins.Count;
+                bootstrap.SetPhase(
+                    "plugin-init",
+                    "插件初始化",
+                    failedPluginCount == 0 ? LiveDisplaySeverity.Success : LiveDisplaySeverity.Warning,
+                    failedPluginCount == 0
+                        ? $"已初始化 {loadedPluginCount} 个插件。"
+                        : $"已初始化 {loadedPluginCount} 个插件，{failedPluginCount} 个插件失败。");
+                firstRenderGate.TrySetResult();
 
-            await PluginManager.TriggerStartedAsync();
-
-            _ = Task.Run(() => CheckPluginUpdatesAsync(uiHost));
-
-            KeyboardManager.Register(
-                ConsoleKey.C, ConsoleModifiers.Control,
-                "退出程序",
-                () =>
+                bootstrap.SetPhase("server", "HTTP server", LiveDisplaySeverity.Info, "正在启动监听。");
+                try
                 {
-                    KeyboardManager.Stop();
-                    uiHost.RequestShutdown();
-                    return Task.CompletedTask;
-            });
-            KeyboardManager.Register(ConsoleKey.P, "插件列表", ctx =>
-            {
-                var plugins = PluginManager.SnapshotLoadedPlugins();
-                foreach (var i in plugins)
-                    ctx.WriteLine($"{i.Name} v{i.Version}  by {i.Author}");
-                if (plugins.Count == 0)
-                    ctx.WriteLine("（没有加载任何插件）", ConsoleColor.DarkGray);
-                return Task.CompletedTask;
-            });
-            KeyboardManager.SetCommandHandler(uiHost.HandleCommandAsync, uiHost.CompleteCommand);
+                    Server.Start(); //启动HTTP服务器
+                    bootstrap.SetPhase("server", "HTTP server", LiveDisplaySeverity.Success, $"监听 http://{Config.Core.ListenAddress}:{Config.Core.ListenPort}");
+                }
+                catch (Exception ex)
+                {
+                    bootstrap.SetPhase("server", "HTTP server", LiveDisplaySeverity.Error, ex.Message);
+                    throw;
+                }
 
-            await RunLiveDisplayApplicationAsync(uiHost);
+                bootstrap.Log(
+                    "Plugin",
+                    loadedPluginCount == 0
+                        ? "没有加载任何插件。可从插件仓库安装插件。"
+                        : $"已加载 {loadedPluginCount} 个插件。按 P 查看插件列表。",
+                    loadedPluginCount == 0 ? LiveDisplaySeverity.Warning : LiveDisplaySeverity.Success);
+                foreach (var plugin in PluginManager.FailedPlugins)
+                {
+                    var message = $"插件 {Path.GetFileName(plugin)} 加载失败";
+                    bootstrap.Log("Plugin", message, LiveDisplaySeverity.Warning);
+                }
+
+                bootstrap.Log("Server", $"监听 http://{Config.Core.ListenAddress}:{Config.Core.ListenPort}", LiveDisplaySeverity.Success);
+                if (Config.Core.ListenAddress == "0.0.0.0")
+                {
+                    var interfaces = NetworkInterface.GetAllNetworkInterfaces()
+                           .Where(x => x.OperationalStatus == OperationalStatus.Up && x.NetworkInterfaceType != NetworkInterfaceType.Loopback)
+                           .SelectMany(x => x.GetIPProperties().UnicastAddresses)
+                           .Where(x => x.Address.AddressFamily == AddressFamily.InterNetwork)
+                           .Select(x => x.Address.ToString())
+                           .ToList();
+                    foreach (var i in interfaces)
+                    {
+                        bootstrap.Log("Server", string.Format(Localization.Server.I18N_AvailableEndpointTip, i, Config.Core.ListenPort));
+                    }
+                }
+
+                for (var i = 0; i < 30; i++)
+                {
+                    if (Server.IsRunning) break;
+                    await Task.Delay(100);
+                }
+                if (!Server.IsRunning)
+                {
+                    bootstrap.SetPhase("server", "HTTP server", LiveDisplaySeverity.Error, I18N_LaunchFail.RemoveMarkup());
+                    LiveDisplayConsole.WriteLine(I18N_LaunchFail);
+                    LiveDisplayConsole.ReadLine();
+                    Environment.Exit(1);
+                }
+
+                var startedMessage = I18N_Start_Started.RemoveMarkup();
+                bootstrap.Log("URA", startedMessage, LiveDisplaySeverity.Success);
+                bootstrap.SetPhase("started", "宿主", LiveDisplaySeverity.Success, startedMessage);
+
+                await PluginManager.TriggerStartedAsync();
+
+                _ = Task.Run(() => CheckPluginUpdatesAsync(uiHost));
+
+                KeyboardManager.Register(
+                    ConsoleKey.C, ConsoleModifiers.Control,
+                    "退出程序",
+                    () =>
+                    {
+                        KeyboardManager.Stop();
+                        uiHost.RequestShutdown();
+                        return Task.CompletedTask;
+                    });
+                KeyboardManager.Register(ConsoleKey.P, "插件列表", ctx =>
+                {
+                    var plugins = PluginManager.SnapshotLoadedPlugins();
+                    foreach (var i in plugins)
+                        ctx.WriteLine($"{i.Name} v{i.Version}  by {i.Author}");
+                    if (plugins.Count == 0)
+                        ctx.WriteLine("（没有加载任何插件）", ConsoleColor.DarkGray);
+                    return Task.CompletedTask;
+                });
+                KeyboardManager.SetCommandHandler(uiHost.HandleCommandAsync, uiHost.CompleteCommand);
+                keyboardTask = KeyboardManager.RunAsync(liveDisplayCts.Token);
+
+                await Task.WhenAny(uiTask, keyboardTask);
+            }
+            finally
+            {
+                firstRenderGate.TrySetResult();
+                liveDisplayCts.Cancel();
+                KeyboardManager.Stop();
+                uiHost.RequestShutdown();
+                KeyboardManager.OverlaySink = null;
+                KeyboardManager.SetCommandHandler(null);
+                LiveDisplayConsole.Unbind(uiHost);
+            }
+
+            try
+            {
+                if (keyboardTask is null)
+                    await uiTask;
+                else
+                    await Task.WhenAll(uiTask, keyboardTask);
+            }
+            catch (OperationCanceledException) when (!uiTask.IsFaulted && (keyboardTask is null || !keyboardTask.IsFaulted))
+            {
+            }
+
+            ThrowIfFaulted(uiTask);
+            if (keyboardTask is not null)
+                ThrowIfFaulted(keyboardTask);
         }
 
         static Task StartPluginInitializationAsync(BootstrapWorkspace bootstrap)
@@ -244,38 +290,6 @@ namespace UmamusumeResponseAnalyzer
             var names = string.Join("、", updates.Take(3).Select(x => x.DisplayName));
             var more = updates.Count > 3 ? " 等" : string.Empty;
             return $"{updates.Count} 个插件可更新：{names}{more}。到「插件仓库」菜单里手动安装。";
-        }
-
-        static async Task RunLiveDisplayApplicationAsync(UiHost uiHost)
-        {
-            using var cts = new CancellationTokenSource();
-            var uiTask = uiHost.RunAsync(cts.Token);
-            var keyboardTask = KeyboardManager.RunAsync(cts.Token);
-
-            try
-            {
-                await Task.WhenAny(uiTask, keyboardTask);
-            }
-            finally
-            {
-                cts.Cancel();
-                KeyboardManager.Stop();
-                uiHost.RequestShutdown();
-                KeyboardManager.OverlaySink = null;
-                KeyboardManager.SetCommandHandler(null);
-                LiveDisplayConsole.Unbind(uiHost);
-            }
-
-            try
-            {
-                await Task.WhenAll(uiTask, keyboardTask);
-            }
-            catch (OperationCanceledException) when (!uiTask.IsFaulted && !keyboardTask.IsFaulted)
-            {
-            }
-
-            ThrowIfFaulted(uiTask);
-            ThrowIfFaulted(keyboardTask);
         }
 
         static void ThrowIfFaulted(Task task)

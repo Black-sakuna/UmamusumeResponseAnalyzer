@@ -6,7 +6,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
     {
         public sealed record RegisterWorkspace(LiveDisplayWorkspace Workspace) : UiEvent;
         public sealed record SetWorkspaceShortcut(LiveDisplayWorkspace Workspace, ConsoleKey Key, ConsoleModifiers Modifiers, string ShortcutText) : UiEvent;
-        public sealed record RemoveWorkspaceWhenAnotherRegisters(LiveDisplayWorkspace Workspace, Action? Removed) : UiEvent;
+        public sealed record RemoveWorkspaceWhenAnotherPanelActivates(LiveDisplayWorkspace Workspace, Action? Removed) : UiEvent;
         public sealed record SetPanel(LiveDisplayPanel Panel, bool SwitchToWorkspace) : UiEvent;
         public sealed record Log(LiveDisplayLogLine Line) : UiEvent;
         public sealed record Notify(LiveDisplayNotification Notification) : UiEvent;
