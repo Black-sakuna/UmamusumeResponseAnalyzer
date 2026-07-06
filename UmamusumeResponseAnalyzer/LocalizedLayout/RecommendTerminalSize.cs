@@ -1,23 +1,16 @@
-﻿using UmamusumeResponseAnalyzer.LocalizedLayout.Handlers;
-
 namespace UmamusumeResponseAnalyzer.LocalizedLayout
 {
     public class RecommendTerminalSize
     {
         public static TerminalSize Current
         {
-            get
+            get => Thread.CurrentThread.CurrentUICulture.Name switch
             {
-                var culture = Thread.CurrentThread.CurrentUICulture.Name switch
-                {
-                    "zh-CN" => "SimplifiedChinese",
-                    "en-US" => "English",
-                    "ja-JP" => "Japanese",
-                    _ => "English"
-                };
-                var layout = typeof(RecommendTerminalSize).GetField(culture, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
-                return (TerminalSize)layout!.GetValue(null)!;
-            }
+                "zh-CN" => SimplifiedChinese,
+                "ja-JP" => Japanese,
+                "en-US" => English,
+                _ => English
+            };
         }
         public static TerminalSize SimplifiedChinese = new(110, 35);
         public static TerminalSize Japanese = new(135, 35);

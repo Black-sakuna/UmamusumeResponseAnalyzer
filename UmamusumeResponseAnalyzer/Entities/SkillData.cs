@@ -1,8 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 using SingleModeChara = Gallop.SingleModeChara;
 using static UmamusumeResponseAnalyzer.Entities.TalentSkillData;
 
@@ -11,7 +9,7 @@ namespace UmamusumeResponseAnalyzer.Entities
     public class SkillData
     {
         private string translatedName = null!;
-        public bool? IsScenarioEvolution { get; set; } = null;
+        public bool? IsScenarioEvolution { get; set; }
         public List<SkillData> Upgrades { get; set; } = [];
         /// <summary>
         /// 上位技能(不包含进化技能)
@@ -78,8 +76,6 @@ namespace UmamusumeResponseAnalyzer.Entities
         public SkillData Clone()
         {
             var clone = (SkillData)MemberwiseClone();
-            //clone.Superior = Superior?.Clone();
-            //clone.Inferior = Inferior?.Clone();
             return clone;
         }
     }

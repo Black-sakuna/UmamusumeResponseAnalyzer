@@ -1,9 +1,3 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-
 namespace UmamusumeResponseAnalyzer.Entities
 {
     //优先级。数字越小越优先，不能超过9

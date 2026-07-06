@@ -229,7 +229,6 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 {
                     if (selectedByName.ContainsKey(dependency)) continue;
 
-                    // 依赖只按 InternalName 声明（数据模型里不含作者），同名 fork 无法区分——取第一个
                     // 依赖模型按 InternalName 识别，取第一个提供该 InternalName 的插件。
                     if (catalogByName.TryGetValue(dependency, out var dependencyPluginInfo))
                     {

@@ -1,6 +1,5 @@
 using Spectre.Console;
 using Spectre.Console.Rendering;
-using UmamusumeResponseAnalyzer;
 
 namespace UmamusumeResponseAnalyzer.LiveDisplay
 {

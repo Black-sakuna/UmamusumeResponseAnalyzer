@@ -1,7 +1,6 @@
 using Gallop;
 using Spectre.Console;
 using System.Collections.Frozen;
-using UmamusumeResponseAnalyzer.Game;
 using UmamusumeResponseAnalyzer.Game.TurnInfo;
 
 namespace UmamusumeResponseAnalyzer.Entities
@@ -70,7 +69,7 @@ namespace UmamusumeResponseAnalyzer.Entities
                 if (isFriendSupportCard) // 友人单独标绿
                 {
                     Priority = PartnerPriority.友人;
-                    NameColor = $"[green]";
+                    NameColor = "[green]";
 
                 }
                 else if (Friendship < 80)// 除了友人以外都可以进行友情训练，检测羁绊
@@ -82,13 +81,12 @@ namespace UmamusumeResponseAnalyzer.Entities
                 Shining = Friendship >= 80
                     && supportCard.CanTriggerFriendshipTraining((toTrainIdDictionary ?? ToTrainId)[command.command_id]);
 
-                if ((CardId == 30137 && turn.GetCommonResponse().chara_info.chara_effect_id_array.Any(x => x == 102)) || //神团
-                (CardId == 30067 && turn.GetCommonResponse().chara_info.chara_effect_id_array.Any(x => x == 101)) || //皇团
-                (CardId == 30081 && turn.GetCommonResponse().chara_info.chara_effect_id_array.Any(x => x == 100)) //天狼星
-                )
+                if ((CardId == 30137 && turn.GetCommonResponse().chara_info.chara_effect_id_array.Contains(102)) //神团
+                    || (CardId == 30067 && turn.GetCommonResponse().chara_info.chara_effect_id_array.Contains(101)) //皇团
+                    || (CardId == 30081 && turn.GetCommonResponse().chara_info.chara_effect_id_array.Contains(100))) //天狼星
                 {
                     Shining = true;
-                    NameColor = $"[#80ff00]";
+                    NameColor = "[#80ff00]";
                 }
 
                 if (Shining)
@@ -96,12 +94,12 @@ namespace UmamusumeResponseAnalyzer.Entities
                     if (isFriendSupportCard)
                     {
                         Priority = PartnerPriority.友人;
-                        NameColor = $"[#80ff00]";
+                        NameColor = "[#80ff00]";
                     }
                     else
                     {
                         Priority = PartnerPriority.闪;
-                        NameColor = $"[aqua]";
+                        NameColor = "[aqua]";
                     }
                 }
             }
@@ -111,7 +109,7 @@ namespace UmamusumeResponseAnalyzer.Entities
                 if (Position is >= 100 and < 1000) // 理事长、记者等
                 {
                     Priority = PartnerPriority.关键NPC;
-                    NameColor = $"[#008080]";
+                    NameColor = "[#008080]";
                 }
             }
 
