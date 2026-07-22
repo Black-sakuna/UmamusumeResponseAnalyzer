@@ -1,250 +1,194 @@
-using System.Globalization;
-using Spectre.Console;
-using Spectre.Console.Rendering;
+using System.Drawing;
+using Terminal.Gui.ViewBase;
+using Terminal.Gui.Views;
 
-namespace UmamusumeResponseAnalyzer.LiveDisplay
+namespace UmamusumeResponseAnalyzer.LiveDisplay;
+
+internal static class WorkspaceLayoutBuilder
 {
-    // workspace 布局渲染：把 UiHost 持有的 panels/logs/activeWorkspace 组装成 IRenderable。
-    internal static class WorkspaceLayoutBuilder
+    internal sealed record Layout(View View, int MaxScroll);
+
+    public static Layout BuildWorkspaceLayout(
+        LiveDisplayWorkspace? workspace,
+        IReadOnlyCollection<LiveDisplayPanel> panels,
+        IReadOnlyList<LiveDisplayLogLine> logs,
+        Func<LiveDisplayWorkspace, string> workspaceLabel,
+        int width,
+        int height,
+        int scrollOffset)
     {
-        static readonly Color[] PluginColors = [Color.DeepSkyBlue1, Color.Green, Color.Yellow, Color.Orange1, Color.MediumPurple, Color.Aqua, Color.Lime];
-
-        public static IRenderable BuildWorkspaceLayout(
-            LiveDisplayWorkspace? activeWorkspace,
-            IReadOnlyCollection<LiveDisplayPanel> panels,
-            IReadOnlyList<LiveDisplayLogLine> logs,
-            Func<LiveDisplayWorkspace, string> shortcutResolver)
+        var viewport = new View
         {
-            if (activeWorkspace is null)
-            {
-                var globalLogs = logs
-                    .Where(x => x.Workspace is null)
-                    .TakeLast(18);
-                return BuildBareLogs(globalLogs);
-            }
-
-            if (TryGetFullBleedPanel(panels, activeWorkspace, out var fullBleedPanel))
-                return fullBleedPanel.Content;
-
-            return BuildWorkspaceBody(panels, logs, activeWorkspace, shortcutResolver);
-        }
-
-        static bool TryGetFullBleedPanel(
-            IReadOnlyCollection<LiveDisplayPanel> panels,
-            LiveDisplayWorkspace workspace,
-            out LiveDisplayPanel panel)
-        {
-            panel = null!;
-            var found = false;
-            foreach (var candidate in panels)
-            {
-                if (candidate.Workspace != workspace || !candidate.FullBleed)
-                    continue;
-
-                if (!found || candidate.UpdatedAt >= panel.UpdatedAt)
-                {
-                    panel = candidate;
-                    found = true;
-                }
-            }
-
-            return found;
-        }
-
-        static IRenderable BuildWorkspacePanels(
-            IReadOnlyCollection<LiveDisplayPanel> panels,
-            LiveDisplayWorkspace workspace,
-            Func<LiveDisplayWorkspace, string> shortcutResolver)
-        {
-            var workspacePanels = panels
-                .Where(x => x.Workspace == workspace)
-                .OrderBy(x => x.PluginId)
-                .ThenBy(x => x.Key)
-                .ToList();
-
-            if (workspacePanels.Count == 0)
-            {
-                return new Panel(new Markup("[grey]当前 workspace 还没有插件输出。[/]"))
-                    .Header(shortcutResolver(workspace))
-                    .BorderColor(Color.Grey35);
-            }
-
-            var renderables = workspacePanels.Select(panel =>
-            {
-                var renderedPanel = new Panel(panel.Content)
-                    .Header($"{panel.PluginId.EscapeMarkup()} - {panel.Title.EscapeMarkup()}")
-                    .BorderColor(PluginColor(panel.PluginId));
-                return (IRenderable)(workspacePanels.Count == 1 ? renderedPanel.Expand() : renderedPanel);
-            }).ToArray();
-
-            return new Rows(renderables);
-        }
-
-        static IRenderable BuildWorkspaceBody(
-            IReadOnlyCollection<LiveDisplayPanel> panels,
-            IReadOnlyList<LiveDisplayLogLine> logs,
-            LiveDisplayWorkspace workspace,
-            Func<LiveDisplayWorkspace, string> shortcutResolver)
-        {
-            var workspacePanels = BuildWorkspacePanels(panels, workspace, shortcutResolver);
-            var workspaceLogs = logs
-                .Where(x => x.Workspace is null || x.Workspace == workspace || x.Severity >= LiveDisplaySeverity.Warning)
-                .TakeLast(14)
-                .ToArray();
-
-            return workspaceLogs.Length == 0
-                ? workspacePanels
-                : new Rows([workspacePanels, BuildBareLogs(workspaceLogs)]);
-        }
-
-        // 无 workspace 时，日志直接裸露显示（无面板边框/标题），就像普通控制台输出。
-        static IRenderable BuildBareLogs(IEnumerable<LiveDisplayLogLine> source)
-        {
-            var rows = source.Select(BuildLogRow).ToArray();
-            return rows.Length == 0 ? new Markup("") : new Rows(rows);
-        }
-
-        static IRenderable BuildLogRow(LiveDisplayLogLine line)
-        {
-            var prefix = $"{SeverityMarkup(line.Severity)} [[{line.PluginId.EscapeMarkup()}]]";
-            return new LogRowRenderable(prefix, line.Text, line.IsMarkup);
-        }
-
-        static string SeverityMarkup(LiveDisplaySeverity severity) => severity switch
-        {
-            LiveDisplaySeverity.Trace => "[grey]TRACE[/]",
-            LiveDisplaySeverity.Info => "[deepskyblue1]INFO[/]",
-            LiveDisplaySeverity.Success => "[green]OK[/]",
-            LiveDisplaySeverity.Warning => "[yellow]WARN[/]",
-            LiveDisplaySeverity.Error => "[red]ERR[/]",
-            _ => "[white]INFO[/]"
+            Width = Dim.Fill(),
+            Height = Dim.Fill(),
+            CanFocus = false
         };
+        var activePanels = SelectPanels(workspace, panels);
+        var activePanelViews = activePanels
+            .Select(panel => (Panel: panel, View: panel.Content.CreateView()))
+            .ToArray();
+        var visibleLogs = logs.TakeLast(14).ToArray();
+        var logHeight = visibleLogs.Length == 0 ? 0 : Math.Min(visibleLogs.Length, Math.Max(1, height / 3));
+        var bodyHeight = Math.Max(1, height - logHeight);
+        var contentHeight = Math.Max(height, EstimateContentHeight(activePanelViews, bodyHeight) + logHeight);
+        var maxScroll = Math.Max(0, contentHeight - height);
+        scrollOffset = Math.Clamp(scrollOffset, 0, maxScroll);
+        viewport.SetContentSize(new Size(Math.Max(1, width), contentHeight));
+        viewport.Viewport = new Rectangle(0, scrollOffset, Math.Max(1, width), Math.Max(1, height));
 
-        static Color PluginColor(string pluginId)
+        if (workspace is null)
         {
-            var hash = (uint)pluginId.GetHashCode();
-            return PluginColors[(int)(hash % (uint)PluginColors.Length)];
+            viewport.Add(new Label
+            {
+                Text = "等待插件创建 workspace…",
+                X = 1,
+                Y = 1,
+                Width = Dim.Fill(1),
+                Height = 1
+            });
+        }
+        else if (activePanels.Length == 0)
+        {
+            viewport.Add(new Label
+            {
+                Text = $"{workspaceLabel(workspace)} 还没有插件输出。",
+                X = 1,
+                Y = 1,
+                Width = Dim.Fill(1),
+                Height = 1
+            });
+        }
+        else
+        {
+            AddPanels(viewport, activePanelViews, bodyHeight);
         }
 
-        sealed class LogRowRenderable(string prefixMarkup, string text, bool isMarkup) : IRenderable
+        if (visibleLogs.Length > 0)
         {
-            public Measurement Measure(RenderOptions options, int maxWidth)
-                => ((IRenderable)new Markup($"{prefixMarkup} {text.EscapeMarkup()}")).Measure(options, maxWidth);
-
-            public IEnumerable<Segment> Render(RenderOptions options, int maxWidth)
+            viewport.Add(new TextView
             {
-                if (maxWidth <= 0)
-                    yield break;
+                Text = string.Join(Environment.NewLine, visibleLogs.Select(FormatLog)),
+                ReadOnly = true,
+                WordWrap = false,
+                CanFocus = false,
+                X = 0,
+                Y = contentHeight - logHeight,
+                Width = Dim.Fill(),
+                Height = logHeight
+            });
+        }
 
-                var prefixSegments = ((IRenderable)new Markup(prefixMarkup)).Render(options, maxWidth).ToArray();
-                var messageLines = BuildMessageLines(options, maxWidth);
+        return new(viewport, maxScroll);
+    }
 
-                var renderedAnyLine = false;
-                for (var i = 0; i < messageLines.Count; i++)
-                {
-                    IReadOnlyList<Segment> line = i == 0
-                        ? [.. prefixSegments, new Segment(" "), .. messageLines[i]]
-                        : messageLines[i];
-                    foreach (var segment in WrapLine(line, maxWidth, renderedAnyLine))
-                    {
-                        renderedAnyLine = true;
-                        yield return segment;
-                    }
-                }
+    internal static string BuildTextSnapshot(
+        LiveDisplayWorkspace? workspace,
+        IReadOnlyCollection<LiveDisplayPanel> panels,
+        IReadOnlyList<LiveDisplayLogLine> logs,
+        Func<LiveDisplayWorkspace, string> workspaceLabel)
+    {
+        var lines = new List<string>();
+        if (workspace is null)
+        {
+            lines.Add("等待插件创建 workspace…");
+        }
+        else
+        {
+            lines.Add($"Workspace: {workspaceLabel(workspace)}");
+            var activePanels = SelectPanels(workspace, panels);
+            if (activePanels.Length == 0)
+                lines.Add("当前 workspace 还没有插件输出。");
+            foreach (var panel in activePanels)
+            {
+                lines.Add($"[{panel.PluginId} - {panel.Title}]");
+                using var view = panel.Content.CreateView();
+                lines.Add(view is TextView textView ? textView.Text : view.Title);
+            }
+        }
+
+        lines.AddRange(logs.TakeLast(14).Select(FormatLog));
+        return string.Join(Environment.NewLine, lines);
+    }
+
+    static LiveDisplayPanel[] SelectPanels(
+        LiveDisplayWorkspace? workspace,
+        IReadOnlyCollection<LiveDisplayPanel> panels)
+    {
+        if (workspace is null)
+            return [];
+
+        var workspacePanels = panels
+            .Where(x => ReferenceEquals(x.Workspace, workspace))
+            .OrderBy(x => x.PluginId, StringComparer.Ordinal)
+            .ThenBy(x => x.Key, StringComparer.Ordinal)
+            .ToArray();
+        var fullBleed = workspacePanels
+            .Where(x => x.FullBleed)
+            .MaxBy(x => x.UpdatedAt);
+        return fullBleed is null ? workspacePanels : [fullBleed];
+    }
+
+    static void AddPanels(
+        View viewport,
+        IReadOnlyList<(LiveDisplayPanel Panel, View View)> panels,
+        int bodyHeight)
+    {
+        var panelHeight = Math.Max(3, bodyHeight / panels.Count);
+        for (var i = 0; i < panels.Count; i++)
+        {
+            var (panel, view) = panels[i];
+            view.X = 0;
+            view.Y = 0;
+            view.Width = Dim.Fill();
+            view.Height = Dim.Fill();
+            if (panel.FullBleed && panels.Count == 1)
+            {
+                view.Height = bodyHeight;
+                viewport.Add(view);
+                continue;
             }
 
-            List<IReadOnlyList<Segment>> BuildMessageLines(RenderOptions options, int maxWidth)
+            var frame = new FrameView
             {
-                var segments = isMarkup
-                    ? RenderMarkupMessage(options, Math.Max(maxWidth, text.GetCellWidth()))
-                    : RenderPlainMessage();
-                var lines = new List<IReadOnlyList<Segment>> { Array.Empty<Segment>() };
-
-                foreach (var segment in segments)
-                {
-                    if (segment.IsLineBreak)
-                    {
-                        lines.Add(Array.Empty<Segment>());
-                        continue;
-                    }
-
-                    lines[^1] = [.. lines[^1], segment];
-                }
-
-                return lines;
-            }
-
-            IEnumerable<Segment> RenderMarkupMessage(RenderOptions options, int maxWidth)
-            {
-                try
-                {
-                    return ((IRenderable)new Markup(text)).Render(options, maxWidth).ToArray();
-                }
-                catch
-                {
-                    return RenderPlainMessage();
-                }
-            }
-
-            IEnumerable<Segment> RenderPlainMessage()
-            {
-                var first = true;
-                foreach (var line in text.Replace("\r\n", "\n").Split('\n'))
-                {
-                    if (!first)
-                        yield return Segment.LineBreak;
-
-                    yield return new Segment(line);
-                    first = false;
-                }
-            }
-
-            static IEnumerable<Segment> WrapLine(IReadOnlyList<Segment> line, int maxWidth, bool prependLineBreak)
-            {
-                var currentWidth = 0;
-                var started = false;
-                foreach (var segment in line)
-                {
-                    if (segment.IsLineBreak || segment.IsControlCode)
-                        continue;
-
-                    foreach (var element in EnumerateTextElements(segment.Text))
-                    {
-                        if (!started)
-                        {
-                            if (prependLineBreak)
-                                yield return Segment.LineBreak;
-                            started = true;
-                        }
-
-                        if (currentWidth > 0 && currentWidth + element.CellWidth > maxWidth)
-                        {
-                            yield return Segment.LineBreak;
-                            currentWidth = 0;
-                        }
-
-                        yield return new Segment(element.Text, segment.Style);
-                        currentWidth += element.CellWidth;
-                    }
-                }
-
-                if (!started && prependLineBreak)
-                    yield return Segment.LineBreak;
-            }
-
-            static IEnumerable<TextElement> EnumerateTextElements(string value)
-            {
-                var indexes = StringInfo.ParseCombiningCharacters(value);
-                for (var i = 0; i < indexes.Length; i++)
-                {
-                    var start = indexes[i];
-                    var end = i + 1 < indexes.Length ? indexes[i + 1] : value.Length;
-                    var text = value[start..end];
-                    yield return new TextElement(text, text.GetCellWidth());
-                }
-            }
-
-            readonly record struct TextElement(string Text, int CellWidth);
+                Title = $"{panel.PluginId} - {panel.Title}",
+                X = 0,
+                Y = i * panelHeight,
+                Width = Dim.Fill(),
+                Height = i == panels.Count - 1 ? Math.Max(3, bodyHeight - i * panelHeight) : panelHeight,
+                CanFocus = false
+            };
+            frame.Add(view);
+            viewport.Add(frame);
         }
     }
+
+    static int EstimateContentHeight(
+        IReadOnlyList<(LiveDisplayPanel Panel, View View)> panels,
+        int bodyHeight)
+    {
+        if (panels.Count == 0)
+            return bodyHeight;
+
+        var textHeight = 0;
+        foreach (var (_, view) in panels)
+        {
+            textHeight += view is TextView textView
+                ? Math.Max(3, textView.Text.Count(x => x == '\n') + 3)
+                : Math.Max(3, bodyHeight / panels.Count);
+        }
+        return Math.Max(bodyHeight, textHeight);
+    }
+
+    static string FormatLog(LiveDisplayLogLine line)
+        => $"{SeverityText(line.Severity)} [{line.PluginId}] {line.Text}";
+
+    static string SeverityText(LiveDisplaySeverity severity) => severity switch
+    {
+        LiveDisplaySeverity.Trace => "TRACE",
+        LiveDisplaySeverity.Info => "INFO ",
+        LiveDisplaySeverity.Success => "OK   ",
+        LiveDisplaySeverity.Warning => "WARN ",
+        LiveDisplaySeverity.Error => "ERR  ",
+        _ => "INFO "
+    };
 }

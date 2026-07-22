@@ -1,5 +1,4 @@
 using Newtonsoft.Json;
-using Spectre.Console;
 using UmamusumeResponseAnalyzer.LiveDisplay;
 using UmamusumeResponseAnalyzer.Plugin;
 using WatsonWebserver.Core;
@@ -130,7 +129,7 @@ namespace UmamusumeResponseAnalyzer
                 // 热重载。本路由是 Server 核心路由,未走插件 [Route] 的 EnterRoute 读锁,故 ReloadPlugins
                 // 取写锁不会自锁;它内部会与 /notify 派发互斥并等在途路由排空(best-effort 5s)。
                 var needRestart = PluginManager.ReloadPlugins(req.InternalName);
-                LiveDisplayConsole.MarkupLine($"[green]URACloud 网页请求已安装插件 {req.InternalName.EscapeMarkup()} v{req.Version.EscapeMarkup()}[/]");
+                LiveDisplayConsole.WriteLine($"URACloud 网页请求已安装插件 {req.InternalName} v{req.Version}");
                 await SendJson(ctx, 200, new { ok = true, installed = req.InternalName, needsRestart = needRestart });
             }
             catch (ArgumentException)
@@ -139,7 +138,7 @@ namespace UmamusumeResponseAnalyzer
             }
             catch (Exception ex)
             {
-                LiveDisplayConsole.MarkupLine($"[red]URACloud 网页安装失败:[/] {ex.Message.EscapeMarkup()}");
+                LiveDisplayConsole.WriteLine($"URACloud 网页安装失败: {ex.Message}");
                 await SendJson(ctx, 500, new { ok = false, error = ex.Message });
             }
         }
@@ -153,9 +152,8 @@ namespace UmamusumeResponseAnalyzer
 
         static bool ConfirmInstallCore(string author, string internalName, string version)
         {
-            var prompt = new ConfirmationPrompt(
-                $"URACloud 请求安装插件 [green]{author.EscapeMarkup()}/{internalName.EscapeMarkup()}[/] v{version.EscapeMarkup()}, 是否允许?");
-            return LiveDisplayConsole.Prompt(prompt);
+            return LiveDisplayConsole.Confirm(
+                $"URACloud 请求安装插件 {author}/{internalName} v{version}，是否允许？");
         }
 
         sealed class InstallRequest

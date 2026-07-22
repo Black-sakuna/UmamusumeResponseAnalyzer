@@ -1,6 +1,3 @@
-using Spectre.Console;
-using Spectre.Console.Rendering;
-
 namespace UmamusumeResponseAnalyzer.LiveDisplay
 {
     internal sealed class BootstrapWorkspace
@@ -48,7 +45,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
 
         public void Log(string source, string text, LiveDisplaySeverity severity = LiveDisplaySeverity.Info)
         {
-            uiHost.Log(new LiveDisplayLogLine(Workspace, source, text, severity, IsMarkup: false));
+            uiHost.Log(new LiveDisplayLogLine(Workspace, source, text, severity));
         }
 
         void Refresh()
@@ -68,47 +65,44 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 DateTimeOffset.Now));
         }
 
-        IRenderable BuildContent()
+        LiveDisplayContent BuildContent()
         {
-            var rows = new List<IRenderable>
-            {
-                new Markup("[bold]设置[/]")
-            };
+            var rows = new List<string> { "设置" };
 
             if (settings.Count == 0)
             {
-                rows.Add(new Markup("[grey]尚未读取配置。[/]"));
+                rows.Add("尚未读取配置。");
             }
             else
             {
                 foreach (var (label, value) in settings)
-                    rows.Add(new Markup($"[grey]{label.EscapeMarkup()}[/] {value.EscapeMarkup()}"));
+                    rows.Add($"{label} {value}");
             }
 
-            rows.Add(new Text(string.Empty));
-            rows.Add(new Markup("[bold]启动阶段[/]"));
+            rows.Add(string.Empty);
+            rows.Add("启动阶段");
 
             if (phases.Count == 0)
             {
-                rows.Add(new Markup("[grey]等待启动。[/]"));
+                rows.Add("等待启动。");
             }
             else
             {
                 foreach (var phase in phases.Values)
-                    rows.Add(new Markup($"{SeverityMarkup(phase.Severity)} [grey]{phase.Label.EscapeMarkup()}[/] {phase.Detail.EscapeMarkup()}"));
+                    rows.Add($"{SeverityLabel(phase.Severity)} {phase.Label} {phase.Detail}");
             }
 
-            return new Rows(rows);
+            return LiveDisplayContent.Text(string.Join(Environment.NewLine, rows));
         }
 
-        static string SeverityMarkup(LiveDisplaySeverity severity) => severity switch
+        static string SeverityLabel(LiveDisplaySeverity severity) => severity switch
         {
-            LiveDisplaySeverity.Trace => "[grey]TRACE[/]",
-            LiveDisplaySeverity.Info => "[deepskyblue1]INFO[/]",
-            LiveDisplaySeverity.Success => "[green]OK[/]",
-            LiveDisplaySeverity.Warning => "[yellow]WARN[/]",
-            LiveDisplaySeverity.Error => "[red]ERR[/]",
-            _ => "[white]INFO[/]"
+            LiveDisplaySeverity.Trace => "TRACE",
+            LiveDisplaySeverity.Info => "INFO",
+            LiveDisplaySeverity.Success => "OK",
+            LiveDisplaySeverity.Warning => "WARN",
+            LiveDisplaySeverity.Error => "ERR",
+            _ => "INFO"
         };
 
         sealed record Phase(string Label, LiveDisplaySeverity Severity, string Detail);

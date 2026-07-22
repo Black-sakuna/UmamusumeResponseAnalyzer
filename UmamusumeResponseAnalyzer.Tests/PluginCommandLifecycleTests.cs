@@ -1,6 +1,4 @@
 using System.Reflection;
-using Spectre.Console;
-using Spectre.Console.Rendering;
 using UmamusumeResponseAnalyzer.LiveDisplay;
 using UmamusumeResponseAnalyzer.Plugin;
 using Xunit;
@@ -48,22 +46,63 @@ namespace UmamusumeResponseAnalyzer.Tests
                 "Plugin",
                 "main",
                 "插件",
-                new Panel("PluginBody").Expand(),
+                LiveDisplayContent.Text("PluginBody"),
                 DateTimeOffset.Now));
 
             await uiHost.HandleCommandAsync("/plugin reload CommandPopup");
             var output = Render(uiHost, width: 120, height: 35);
+            var popup = uiHost.GetKeyboardPopupForTests();
 
-            Assert.Contains("Plugin command", output);
+            Assert.NotNull(popup);
+            Assert.Contains(popup.Lines, line => line.Text == "Plugin command");
+            Assert.Contains(popup.Lines, line => line.Text.Contains("CommandPopup 已重载", StringComparison.Ordinal));
             Assert.Contains("CommandPopup", output);
             Assert.Contains("已重载", output);
             Assert.DoesNotContain("用法: /plugin", output);
         }
 
-        static string PluginSource(string pluginName)
-            => $$"""
+        [Fact]
+        public async Task PluginCommand_ReloadAllowsPluginConsoleOutputWhileHostRuns()
+        {
+            var pluginPath = Path.Combine(_tempDir, "Plugins", "CommandOutput.dll");
+            PluginCompiler.Compile(PluginSource("CommandOutput", writesConsoleOutput: true), "CommandOutput", pluginPath);
+            PluginManager.Init();
+
+            var uiHost = new UiHost();
+            KeyboardManager.OverlaySink = uiHost;
+            UiHost.HasInteractiveConsoleOverrideForTests = false;
+            LiveDisplayConsole.Bind(uiHost);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            var uiRun = uiHost.RunAsync(cts.Token);
+
+            try
+            {
+                while (!uiHost.IsRunning)
+                    await Task.Delay(10, cts.Token);
+
+                await uiHost.HandleCommandAsync("/plugin reload CommandOutput")
+                    .WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+                Assert.True(uiHost.IsRunning);
+            }
+            finally
+            {
+                uiHost.RequestShutdown();
+                cts.Cancel();
+                try { await uiRun.WaitAsync(TimeSpan.FromSeconds(2)); }
+                catch { }
+                LiveDisplayConsole.Unbind(uiHost);
+                UiHost.HasInteractiveConsoleOverrideForTests = null;
+            }
+        }
+
+        static string PluginSource(string pluginName, bool writesConsoleOutput = false)
+        {
+            var initialize = writesConsoleOutput
+                ? "LiveDisplayConsole.WriteLine(\"PLUGIN_INIT_OUTPUT\");"
+                : string.Empty;
+            return $$"""
                 using System.Threading.Tasks;
-                using Spectre.Console;
+                using UmamusumeResponseAnalyzer.LiveDisplay;
                 using UmamusumeResponseAnalyzer.Plugin;
 
                 public sealed class {{pluginName}} : IPlugin
@@ -72,10 +111,10 @@ namespace UmamusumeResponseAnalyzer.Tests
                     public string Author => "Test";
                     public string[] Targets => System.Array.Empty<string>();
 
-                    public void Initialize(IPluginContext context) { }
-                    public Task UpdatePlugin(ProgressContext ctx) => Task.CompletedTask;
+                    public void Initialize(IPluginContext context) { {{initialize}} }
                 }
                 """;
+        }
 
         static void ResetKeyboardManager()
         {
@@ -125,23 +164,6 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
 
         static string Render(UiHost uiHost, int width, int height)
-        {
-            var recording = new StringWriter();
-            var console = AnsiConsole.Create(new AnsiConsoleSettings { Out = new FixedSizeConsoleOutput(recording, width, height) });
-            uiHost.RenderSnapshot(console);
-            return recording.ToString();
-        }
-
-        sealed class FixedSizeConsoleOutput(TextWriter writer, int width, int height) : IAnsiConsoleOutput
-        {
-            public TextWriter Writer { get; } = writer;
-            public bool IsTerminal => false;
-            public int Width { get; } = width;
-            public int Height { get; } = height;
-
-            public void SetEncoding(System.Text.Encoding encoding)
-            {
-            }
-        }
+            => uiHost.RenderSnapshotForTests(width, height);
     }
 }

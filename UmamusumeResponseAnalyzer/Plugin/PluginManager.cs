@@ -1,6 +1,5 @@
 using System.Collections.Frozen;
 using Gallop.Endpoints;
-using Spectre.Console;
 using System.IO.Compression;
 using System.Reflection;
 using System.Runtime.CompilerServices;
@@ -246,8 +245,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
         static readonly FrozenSet<string> SharedAssemblyNames = new[]
         {
             HostAssemblyName,
-            "Spectre.Console",
-            "Spectre.Console.Ansi",
+            "Terminal.Gui",
             "Watson.Lite",
             "WatsonWebserver.Core",
             "WatsonWebserver.Lite",
@@ -418,7 +416,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 }
 
                 if (!hasMainPlugin)
-                    LiveDisplayConsole.MarkupLog("Plugin", $"[yellow]插件包 {Path.GetFileName(zip).EscapeMarkup()} 未找到主插件 DLL {pluginName.EscapeMarkup()}.dll，已跳过。[/]", LiveDisplaySeverity.Warning);
+                    LiveDisplayConsole.Log("Plugin", $"插件包 {Path.GetFileName(zip)} 未找到主插件 DLL {pluginName}.dll，已跳过。", LiveDisplaySeverity.Warning);
 
                 // 关联卫星资源到对应的程序集元数据
                 foreach (var entry in satelliteEntries)
@@ -533,7 +531,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 foreach (var name in group)
                     if (Metadatas.TryGetValue(name, out var present))
                     {
-                        LiveDisplayConsole.MarkupLog("Plugin", $"[red]插件 {name.EscapeMarkup()} 加载失败[/]:依赖的共享上下文插件 {string.Join("、", missing).EscapeMarkup()} 未安装。", LiveDisplaySeverity.Error);
+                        LiveDisplayConsole.Log("Plugin", $"插件 {name} 加载失败: 依赖的共享上下文插件 {string.Join("、", missing)} 未安装。", LiveDisplaySeverity.Error);
                         if (!FailedPlugins.Contains(present.FilePath)) FailedPlugins.Add(present.FilePath);
                     }
                 return;
@@ -587,7 +585,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 var type = assembly.GetExportedTypes().FirstOrDefault(x => typeof(IPlugin).IsAssignableFrom(x));
                 if (type == null)
                 {
-                    LiveDisplayConsole.MarkupLog("Plugin", $"[red]插件 {m.PluginName.EscapeMarkup()} 加载失败[/]: 未找到实现 {nameof(IPlugin)} 的公开类型。", LiveDisplaySeverity.Error);
+                    LiveDisplayConsole.Log("Plugin", $"插件 {m.PluginName} 加载失败: 未找到实现 {nameof(IPlugin)} 的公开类型。", LiveDisplaySeverity.Error);
                     FailedPlugins.Add(m.FilePath);
                     return false;
                 }
@@ -595,7 +593,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 phase = "创建插件实例";
                 if (Activator.CreateInstance(type) is not IPlugin createdPlugin)
                 {
-                    LiveDisplayConsole.MarkupLog("Plugin", $"[red]插件 {m.PluginName.EscapeMarkup()} 加载失败[/]: 无法创建插件实例。type={(type.FullName ?? type.Name).EscapeMarkup()}", LiveDisplaySeverity.Error);
+                    LiveDisplayConsole.Log("Plugin", $"插件 {m.PluginName} 加载失败: 无法创建插件实例。type={type.FullName ?? type.Name}", LiveDisplaySeverity.Error);
                     FailedPlugins.Add(m.FilePath);
                     return false;
                 }
@@ -1198,7 +1196,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
 
                     if (!scanned.ContainsKey(name) && !Metadatas.ContainsKey(name))
                     {
-                        LiveDisplayConsole.MarkupLog("Plugin", $"[yellow]插件 {rawName.EscapeMarkup()} 不存在，无法加载。[/]", LiveDisplaySeverity.Warning);
+                        LiveDisplayConsole.Log("Plugin", $"插件 {rawName} 不存在，无法加载。", LiveDisplaySeverity.Warning);
                         outcomes[rawName] = false;
                         continue;
                     }
@@ -1340,7 +1338,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
             // 约束1：已加载且为 LoadInHost → 进了 Default ALC，永不可卸载
             if (existing is { LoadInHost: true })
             {
-                LiveDisplayConsole.MarkupLog("Plugin", $"[yellow]插件 {pluginName.EscapeMarkup()} 在宿主上下文加载，不支持热重载，请重启。[/]", LiveDisplaySeverity.Warning);
+                LiveDisplayConsole.Log("Plugin", $"插件 {pluginName} 在宿主上下文加载，不支持热重载，请重启。", LiveDisplaySeverity.Warning);
                 return outcomes[pluginName] = false;
             }
 
@@ -1350,7 +1348,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
 
             if (affectedNames.Any(name => scanned.TryGetValue(name, out var m) && m.LoadInHost))
             {
-                LiveDisplayConsole.MarkupLog("Plugin", $"[yellow]插件 {pluginName.EscapeMarkup()} 在宿主上下文加载，不支持热重载，请重启。[/]", LiveDisplaySeverity.Warning);
+                LiveDisplayConsole.Log("Plugin", $"插件 {pluginName} 在宿主上下文加载，不支持热重载，请重启。", LiveDisplaySeverity.Warning);
                 foreach (var name in affectedNames)
                     outcomes[name] = false;
                 return false;
@@ -1374,7 +1372,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
             if (!Metadatas.ContainsKey(pluginName))
             {
                 // 文件已被删除：卸载即完成
-                LiveDisplayConsole.MarkupLog("Plugin", $"[yellow]插件 {pluginName.EscapeMarkup()} 的文件已不存在，已卸载。[/]", LiveDisplaySeverity.Warning);
+                LiveDisplayConsole.Log("Plugin", $"插件 {pluginName} 的文件已不存在，已卸载。", LiveDisplaySeverity.Warning);
                 BuildGroups();
                 LoadAffectedGroups(affectedNames, outcomes);
                 return outcomes[pluginName] = true;
@@ -1383,7 +1381,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
             // 新元数据若为 LoadInHost（如刚加上该特性），不走热重载路径
             if (Metadatas[pluginName].LoadInHost)
             {
-                LiveDisplayConsole.MarkupLog("Plugin", $"[yellow]插件 {pluginName.EscapeMarkup()} 在宿主上下文加载，不支持热重载，请重启。[/]", LiveDisplaySeverity.Warning);
+                LiveDisplayConsole.Log("Plugin", $"插件 {pluginName} 在宿主上下文加载，不支持热重载，请重启。", LiveDisplaySeverity.Warning);
                 return outcomes[pluginName] = false;
             }
 
@@ -1392,7 +1390,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
 
             var loaded = IsPluginLoaded(pluginName);
             if (loaded)
-                LiveDisplayConsole.MarkupLog("Plugin", $"[green]插件 {pluginName.EscapeMarkup()} 已重载。[/]", LiveDisplaySeverity.Success);
+                LiveDisplayConsole.Log("Plugin", $"插件 {pluginName} 已重载。", LiveDisplaySeverity.Success);
             return outcomes[pluginName] = loaded;
         }
 
@@ -1406,7 +1404,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
             var existing = GetValueIgnoreCase(Metadatas, pluginName);
             if (existing is { LoadInHost: true })
             {
-                LiveDisplayConsole.MarkupLog("Plugin", $"[yellow]插件 {pluginName.EscapeMarkup()} 在宿主上下文加载，不支持卸载，请重启。[/]", LiveDisplaySeverity.Warning);
+                LiveDisplayConsole.Log("Plugin", $"插件 {pluginName} 在宿主上下文加载，不支持卸载，请重启。", LiveDisplaySeverity.Warning);
                 return outcomes[pluginName] = false;
             }
 
@@ -1416,13 +1414,13 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 if (existing is not null)
                     Metadatas.Remove(existing.PluginName);
 
-                LiveDisplayConsole.MarkupLog("Plugin", $"[yellow]插件 {pluginName.EscapeMarkup()} 未加载。[/]", LiveDisplaySeverity.Warning);
+                LiveDisplayConsole.Log("Plugin", $"插件 {pluginName} 未加载。", LiveDisplaySeverity.Warning);
                 return outcomes[pluginName] = true;
             }
 
             if (group.Any(n => GetValueIgnoreCase(Metadatas, n) is { LoadInHost: true }))
             {
-                LiveDisplayConsole.MarkupLog("Plugin", $"[yellow]插件 {string.Join("、", group).EscapeMarkup()} 在宿主上下文加载，不支持卸载，请重启。[/]", LiveDisplaySeverity.Warning);
+                LiveDisplayConsole.Log("Plugin", $"插件 {string.Join("、", group)} 在宿主上下文加载，不支持卸载，请重启。", LiveDisplaySeverity.Warning);
                 foreach (var name in group) outcomes[name] = false;
                 return outcomes[pluginName] = false;
             }
@@ -1447,7 +1445,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
             foreach (var name in group)
                 outcomes[name] = true;
 
-            LiveDisplayConsole.MarkupLog("Plugin", $"[green]插件 {pluginName.EscapeMarkup()} 已卸载。[/]", LiveDisplaySeverity.Success);
+            LiveDisplayConsole.Log("Plugin", $"插件 {pluginName} 已卸载。", LiveDisplaySeverity.Success);
             return outcomes[pluginName] = true;
         }
 
@@ -1519,7 +1517,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 foreach (var name in group)
                     if (Metadatas.TryGetValue(name, out var present))
                     {
-                        LiveDisplayConsole.MarkupLog("Plugin", $"[red]插件 {name.EscapeMarkup()} 加载失败[/]:依赖的共享上下文插件 {string.Join("、", missing).EscapeMarkup()} 未安装。", LiveDisplaySeverity.Error);
+                        LiveDisplayConsole.Log("Plugin", $"插件 {name} 加载失败: 依赖的共享上下文插件 {string.Join("、", missing)} 未安装。", LiveDisplaySeverity.Error);
                         if (!FailedPlugins.Contains(present.FilePath)) FailedPlugins.Add(present.FilePath);
                     }
                 return null;
@@ -1559,7 +1557,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 var type = assembly.GetExportedTypes().FirstOrDefault(x => typeof(IPlugin).IsAssignableFrom(x));
                 if (type is null)
                 {
-                    LiveDisplayConsole.MarkupLog("Plugin", $"[red]插件 {metadata.PluginName.EscapeMarkup()} 加载失败[/]: 未找到实现 {nameof(IPlugin)} 的公开类型。", LiveDisplaySeverity.Error);
+                    LiveDisplayConsole.Log("Plugin", $"插件 {metadata.PluginName} 加载失败: 未找到实现 {nameof(IPlugin)} 的公开类型。", LiveDisplaySeverity.Error);
                     FailedPlugins.Add(metadata.FilePath);
                     return false;
                 }
@@ -1567,7 +1565,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 phase = "创建插件实例";
                 if (Activator.CreateInstance(type) is not IPlugin createdPlugin)
                 {
-                    LiveDisplayConsole.MarkupLog("Plugin", $"[red]插件 {metadata.PluginName.EscapeMarkup()} 加载失败[/]: 无法创建插件实例。type={(type.FullName ?? type.Name).EscapeMarkup()}", LiveDisplaySeverity.Error);
+                    LiveDisplayConsole.Log("Plugin", $"插件 {metadata.PluginName} 加载失败: 无法创建插件实例。type={type.FullName ?? type.Name}", LiveDisplaySeverity.Error);
                     FailedPlugins.Add(metadata.FilePath);
                     return false;
                 }
@@ -1706,7 +1704,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
             // 约束1：组内任一插件 LoadInHost → 整组进了 Default ALC，永不可卸载
             if (group.Any(n => Metadatas.TryGetValue(n, out var m) && m.LoadInHost))
             {
-                LiveDisplayConsole.MarkupLog("Plugin", $"[yellow]插件 {string.Join("、", group).EscapeMarkup()} 在宿主上下文加载，不支持热重载，请重启。[/]", LiveDisplaySeverity.Warning);
+                LiveDisplayConsole.Log("Plugin", $"插件 {string.Join("、", group)} 在宿主上下文加载，不支持热重载，请重启。", LiveDisplaySeverity.Warning);
                 return false;
             }
 

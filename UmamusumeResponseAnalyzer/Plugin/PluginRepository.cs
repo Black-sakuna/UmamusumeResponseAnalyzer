@@ -1,5 +1,5 @@
 using Newtonsoft.Json;
-using Spectre.Console;
+using Terminal.Gui.Text;
 using UmamusumeResponseAnalyzer.LiveDisplay;
 
 namespace UmamusumeResponseAnalyzer.Plugin
@@ -26,8 +26,8 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 }
                 catch (Exception ex)
                 {
-                    LiveDisplayConsole.MarkupLine($"[red]插件仓库操作失败:[/] {ex.Message.EscapeMarkup()}");
-                    LiveDisplayConsole.MarkupLine("按任意键返回");
+                    LiveDisplayConsole.WriteLine($"插件仓库操作失败: {ex.Message}");
+                    LiveDisplayConsole.WriteLine("按任意键返回");
                     LiveDisplayConsole.ReadKey(intercept: true);
                 }
             });
@@ -40,27 +40,22 @@ namespace UmamusumeResponseAnalyzer.Plugin
             {
                 // 不要在这之前 Clear():FetchAsync 失败时打印的红色原因(URL + 异常)要留在屏上,
                 // 否则只剩这句泛泛的"没有拉到",用户无从判断是网络/端点/过滤问题。
-                LiveDisplayConsole.MarkupLine("[yellow]没有从插件仓库拉到插件信息。[/]");
-                LiveDisplayConsole.MarkupLine("按任意键返回");
+                LiveDisplayConsole.WriteLine("没有从插件仓库拉到插件信息。");
+                LiveDisplayConsole.WriteLine("按任意键返回");
                 LiveDisplayConsole.ReadKey(intercept: true);
                 return;
             }
             LiveDisplayConsole.Clear();
 
-            var pluginSelection = new MultiSelectionPrompt<PluginInformation>()
-                .Title("选择要安装的插件")
-                .WrapAround(true)
-                .UseConverter(FormatChoice)
-                // 取终端可视高度:长列表在 Spectre 视口内滚动,避免溢出把顶部条目挤出屏幕、光标够不着。
-                .PageSize(Math.Clamp(Console.WindowHeight - 6, 10, 30))
-                .NotRequired();
-
-            pluginSelection.AddChoices(plugins
+            var pluginChoices = plugins
                 .OrderBy(p => string.IsNullOrWhiteSpace(p.Category) || p.Category == UncategorizedLabel ? 1 : 0)
                 .ThenBy(p => string.IsNullOrWhiteSpace(p.Category) ? UncategorizedLabel : p.Category)
-                .ThenBy(DisplayLabel, StringComparer.OrdinalIgnoreCase));
-
-            var selectedPlugins = LiveDisplayConsole.Prompt(pluginSelection);
+                .ThenBy(DisplayLabel, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            var selectedPlugins = LiveDisplayConsole.MultiSelect(
+                "选择要安装的插件",
+                pluginChoices,
+                converter: FormatChoice).ToList();
             if (selectedPlugins.Count == 0)
             {
                 LiveDisplayConsole.Clear();
@@ -85,12 +80,12 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 var needRestart = PluginManager.ReloadPlugins([.. installed]);
                 if (needRestart.Count == 0)
                 {
-                    LiveDisplayConsole.MarkupLine("[green]插件已安装并生效。[/]");
+                    LiveDisplayConsole.WriteLine("插件已安装并生效。");
                 }
                 else
                 {
                     // 无法热重载的情形（如 [LoadInHostContext] 插件）通过重启完成应用。
-                    LiveDisplayConsole.MarkupLine($"[yellow]{string.Join("、", needRestart).EscapeMarkup()} 需重启才能生效，按任意键重启。[/]");
+                    LiveDisplayConsole.WriteLine($"{string.Join("、", needRestart)} 需重启才能生效，按任意键重启。");
                     LiveDisplayConsole.ReadKey();
                     global::UmamusumeResponseAnalyzer.UmamusumeResponseAnalyzer.Restart();
                 }
@@ -189,28 +184,25 @@ namespace UmamusumeResponseAnalyzer.Plugin
             // @作者:区分同名不同作者的 fork；真实选择值直接绑定 PluginInformation,显示文本不参与身份判断。
             var author = string.IsNullOrWhiteSpace(info.Author) ? "" : $" @{info.Author}";
             var desc = string.IsNullOrEmpty(info.Description) ? "" : $" — {info.Description}";
-            // 选项必须单行:换行折成空格、再按终端列宽截断。Spectre 的 SelectionPrompt 只要有一项折行,
-            // 视口行数就算错,顶部条目会被挤出屏幕、光标够不着(本次 bug 现场)。先拼纯文本 → 截断 →
-            // 整体 EscapeMarkup:既避免截断切断 markup 标签,也顺手堵掉名字/描述含 '[' 的渲染坑。
+            // 选项保持单行并按终端列宽截断，避免长描述挤压列表。
             var raw = $"{DisplayLabel(info)}{version}{author}{desc}".ReplaceLineEndings(" ");
-            return TruncateToWidth(raw, Math.Max(30, Console.WindowWidth - 12)).EscapeMarkup();
+            return TruncateToWidth(raw, Math.Max(30, Console.WindowWidth - 12));
         }
 
         // 按显示列宽把字符串截成单行,超出补 “…”。
         internal static string TruncateToWidth(string s, int maxWidth)
         {
             var width = 0;
-            var ellipsisStart = 0;
-            for (var i = 0; i < s.Length; i++)
+            var result = new System.Text.StringBuilder(s.Length);
+            foreach (var rune in s.EnumerateRunes())
             {
-                var next = width + s[i].GetCellWidth();
-                if (next <= maxWidth - 1)
-                    ellipsisStart = i + 1;
-                if (next > maxWidth)
-                    return s[..ellipsisStart] + "…";
+                var next = width + rune.GetColumns();
+                if (next > maxWidth - 1)
+                    return result.Append('…').ToString();
+                result.Append(rune);
                 width = next;
             }
-            return s;
+            return result.ToString();
         }
 
         internal static void ResolveDependencies(List<PluginInformation> selectedPlugins, List<PluginInformation> catalog)
@@ -253,12 +245,11 @@ namespace UmamusumeResponseAnalyzer.Plugin
                     result.Add(forks[0]);
                     continue;
                 }
-                LiveDisplayConsole.MarkupLine($"[yellow]插件 {group.Key.EscapeMarkup()} 选中了多个来源,本地只能安装一个,请选择保留哪个:[/]");
-                var pick = LiveDisplayConsole.Prompt(new SelectionPrompt<PluginInformation>()
-                    .Title($"为 [green]{group.Key.EscapeMarkup()}[/] 选择来源")
-                    .WrapAround(true)
-                    .UseConverter(f => $"{DisplayLabel(f).EscapeMarkup()} @{f.Author.EscapeMarkup()}")
-                    .AddChoices(forks));
+                LiveDisplayConsole.WriteLine($"插件 {group.Key} 选中了多个来源，本地只能安装一个，请选择保留哪个：");
+                var pick = LiveDisplayConsole.Select(
+                    $"为 {group.Key} 选择来源",
+                    forks,
+                    f => $"{DisplayLabel(f)} @{f.Author}");
                 result.Add(pick);
             }
             return result;
@@ -290,16 +281,14 @@ namespace UmamusumeResponseAnalyzer.Plugin
             for (var i = 0; i < versions.Count; i++)
             {
                 var v = versions[i];
-                var tag = i == 0 ? " [grey](最新)[/]" : string.Empty;
-                var changelog = string.IsNullOrEmpty(v.Changelog) ? string.Empty : $" — {v.Changelog.EscapeMarkup()}";
+                var tag = i == 0 ? " (最新)" : string.Empty;
+                var changelog = string.IsNullOrEmpty(v.Changelog) ? string.Empty : $" — {v.Changelog}";
                 labelToVersion[$"{v.Version}{tag}{changelog}"] = v;
             }
 
-            var selection = LiveDisplayConsole.Prompt(new SelectionPrompt<string>()
-                .Title($"选择 [green]{DisplayLabel(plugin).EscapeMarkup()}[/] 要安装的版本")
-                .WrapAround(true)
-                .PageSize(15)
-                .AddChoices([.. labelToVersion.Keys, CancelLabel]));
+            var selection = LiveDisplayConsole.Select(
+                $"选择 {DisplayLabel(plugin)} 要安装的版本",
+                labelToVersion.Keys.Append(CancelLabel));
             if (selection == CancelLabel) return null;
             return labelToVersion[selection];
         }
@@ -308,10 +297,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
         // (历史回归:URACloud 迁移期曾 ExtractToDirectory("./") 解到 WORKING_DIRECTORY 根 → ScanAll 扫不到 → 装了等于没装。)
         internal static string InstallZipPath(string internalName) => Path.Combine("Plugins", $"{internalName}.zip");
 
-        // 把插件名当“字面方括号标签”塞进 Spectre markup:外层必须用 [[ ]](字面括号),不能用 [ ](会被当成样式/颜色解析)。
-        // 历史崩溃:安装信息曾写 [{name}],而 EscapeMarkup 只转义名字【内部】的括号;非样式名(如 CJK「梦想杯剧本解析器」)
-        // 被 Spectre 当样式解析 → InvalidOperationException "Could not find color or style" → 未捕获 → 崩掉整个程序。
-        internal static string Bracketed(string label) => $"[[{label.EscapeMarkup()}]]";
+        internal static string Bracketed(string label) => $"[{label}]";
 
         internal static async Task<List<string>> InstallPluginsAsync(List<PluginInformation> selectedPlugins, CancellationToken cancellationToken = default)
         {
@@ -325,7 +311,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
             {
                 if (conflictingNames.Contains(plugin.InternalName))
                 {
-                    LiveDisplayConsole.MarkupLine($"[yellow]{Bracketed(plugin.InternalName)} 被多个作者同时选中，跳过；请一次只安装其中一个 fork[/]");
+                    LiveDisplayConsole.WriteLine($"{Bracketed(plugin.InternalName)} 被多个作者同时选中，跳过；请一次只安装其中一个 fork");
                     continue;
                 }
 
@@ -334,7 +320,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                         && !string.Equals(p.Author, plugin.Author, StringComparison.OrdinalIgnoreCase));
                 if (installedFork != null)
                 {
-                    LiveDisplayConsole.MarkupLine($"[yellow]{Bracketed(DisplayLabel(plugin))} 与已安装的 {installedFork.Author.EscapeMarkup()}/{plugin.InternalName.EscapeMarkup()} 冲突，跳过[/]");
+                    LiveDisplayConsole.WriteLine($"{Bracketed(DisplayLabel(plugin))} 与已安装的 {installedFork.Author}/{plugin.InternalName} 冲突，跳过");
                     continue;
                 }
 
@@ -343,7 +329,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                     var versionToInstall = await PromptVersionAsync(plugin, cancellationToken);
                     if (versionToInstall is null)
                     {
-                        LiveDisplayConsole.MarkupLine($"[yellow]{Bracketed(DisplayLabel(plugin))} 跳过[/]");
+                        LiveDisplayConsole.WriteLine($"{Bracketed(DisplayLabel(plugin))} 跳过");
                         continue;
                     }
 
@@ -357,7 +343,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
                 {
-                    LiveDisplayConsole.MarkupLine($"[red]{Bracketed(DisplayLabel(plugin))} 安装失败:[/] {ex.Message.EscapeMarkup()}");
+                    LiveDisplayConsole.WriteLine($"{Bracketed(DisplayLabel(plugin))} 安装失败: {ex.Message}");
                 }
             }
             return installed;

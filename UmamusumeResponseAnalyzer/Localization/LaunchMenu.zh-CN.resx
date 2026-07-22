@@ -148,6 +148,6 @@
     <value>安装到{0}成功,按任意键返回主菜单</value>
   </data>
   <data name="I18N_Start_Started" xml:space="preserve">
-    <value>[bold green]已启动[/]</value>
+    <value>已启动</value>
   </data>
 </root>

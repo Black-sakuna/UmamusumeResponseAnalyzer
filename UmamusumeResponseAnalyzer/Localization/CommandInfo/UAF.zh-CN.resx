@@ -118,10 +118,10 @@
     <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
   </resheader>
   <data name="I18N_WrongTurnAlert" xml:space="preserve">
-    <value>[red]警告：回合数不正确，上一个回合为{0}，当前回合为{1}[/]</value>
+    <value>警告：回合数不正确，上一个回合为{0}，当前回合为{1}</value>
   </data>
   <data name="I18N_RepeatTurn" xml:space="preserve">
-    <value>[yellow]******此回合为重复显示******[/]</value>
+    <value>******此回合为重复显示******</value>
   </data>
   <data name="I18N_MinimumSportRank" xml:space="preserve">
     <value>:red_exclamation_mark:本阶段等级要求：{0}</value>
@@ -136,13 +136,13 @@
     <value>:red_exclamation_mark:不相谈的情况下{0}为最大等级提升{1}</value>
   </data>
   <data name="I18N_MoritaTrained" xml:space="preserve">
-    <value>共点了[aqua]{0}[/]次凉花</value>
+    <value>共点了{0}次凉花</value>
   </data>
   <data name="I18N_MoritaVitalGainTimes" xml:space="preserve">
-    <value>加了[aqua]{0}[/]次体力</value>
+    <value>加了{0}次体力</value>
   </data>
   <data name="I18N_MoritaRanking" xml:space="preserve">
-    <value>，超过了[aqua]{0}%[/]的凉花</value>
+    <value>，超过了{0}%的凉花</value>
   </data>
   <data name="I18N_CurrentRemainStat" xml:space="preserve">
     <value>当前:可获得</value>
@@ -151,25 +151,25 @@
     <value>获得Rank</value>
   </data>
   <data name="I18N_RankGainIncreased" xml:space="preserve">
-    <value>[yellow]:red_exclamation_mark:当前有项目等级加成[/]</value>
+    <value>:red_exclamation_mark:当前有项目等级加成</value>
   </data>
   <data name="I18N_RememberUseTalk" xml:space="preserve">
     <value>:red_exclamation_mark:请及时使用相谈</value>
   </data>
   <data name="I18N_TalkToGetBlueBuff" xml:space="preserve">
-    <value>:sparkles:{0}变[blue]蓝[/]可爆</value>
+    <value>:sparkles:{0}变蓝可爆</value>
   </data>
   <data name="I18N_TalkToGetRedBuff" xml:space="preserve">
-    <value>:sparkles:{0}变[red]红[/]可爆</value>
+    <value>:sparkles:{0}变红可爆</value>
   </data>
   <data name="I18N_TalkToGetYellowBuff" xml:space="preserve">
-    <value>:sparkles:{0}变[yellow]黄[/]可爆</value>
+    <value>:sparkles:{0}变黄可爆</value>
   </data>
   <data name="I18N_LowSportRank" xml:space="preserve">
     <value>:red_exclamation_mark:{0}：差 {1}</value>
   </data>
   <data name="I18N_AllRankOK" xml:space="preserve">
-    <value>[green]全部训练已达标！[/]</value>
+    <value>全部训练已达标！</value>
   </data>
   <data name="I18N_LowestSportRank" xml:space="preserve">
     <value>当前最低等级:</value>

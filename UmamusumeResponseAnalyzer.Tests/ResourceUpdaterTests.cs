@@ -31,7 +31,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
 
         [Fact]
-        public async Task Download_WithoutProgressContext_WritesFile()
+        public async Task Download_WithoutProgressSink_WritesFile()
         {
             var path = Path.Combine(Path.GetTempPath(), $"ura-download-{Guid.NewGuid():N}.br");
             ResourceUpdater.HttpClient = new(new StubHttpMessageHandler(_ =>

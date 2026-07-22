@@ -1,7 +1,7 @@
 using System.Reflection;
 using System.Runtime.CompilerServices;
-using Spectre.Console;
 using UmamusumeResponseAnalyzer;
+using UmamusumeResponseAnalyzer.LiveDisplay;
 using UmamusumeResponseAnalyzer.Plugin;
 using Xunit;
 
@@ -31,6 +31,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         {
             SeedConfig(); // 触碰 PluginManager/LoadIntoContext 会读 Config.Repository.Targets，先注入一个 YamlConfig
             ResetPluginState();
+            KeyboardManager.UnregisterAll();
 
             _originalCwd = Directory.GetCurrentDirectory();
             _tempDir = Path.Combine(Path.GetTempPath(), "ura-hotreload-" + Guid.NewGuid().ToString("N"));
@@ -43,6 +44,8 @@ namespace UmamusumeResponseAnalyzer.Tests
         public void Dispose()
         {
             ResetPluginState();
+            KeyboardManager.UnregisterAll();
+            KeyboardManager.OverlaySink = null;
             Directory.SetCurrentDirectory(_originalCwd);
             try { Directory.Delete(_tempDir, recursive: true); } catch { /* 进程仍持有内存中的程序集，文件残留无妨 */ }
         }
@@ -52,26 +55,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         {
             // 加载（独立插件 v1 + 共享组 Anchor/Member）→ analyzer dispatch → 重载，全部在不内联的辅助方法里完成，
             // 它返回后持有过旧插件/MethodInfo 的栈帧消失，GC 才能如实反映卸载结果。
-            // 同时捕获 Spectre 控制台输出，验证生产侧的卸载自检不再打误报警告。
-            var recording = new StringWriter();
-            var originalConsole = AnsiConsole.Console;
-            AnsiConsole.Console = AnsiConsole.Create(new AnsiConsoleSettings { Out = new AnsiConsoleOutput(recording) });
-            WeakReference weakStandalone, weakGroup;
-            try
-            {
-                (weakStandalone, weakGroup) = LoadDispatchThenReload();
-            }
-            finally
-            {
-                AnsiConsole.Console = originalConsole;
-            }
-
-            var consoleOutput = recording.ToString();
-            Assert.Contains("已重载", consoleOutput); // 重载确实发生
-            // 回归断言：正常卸载不应打印假阳性的"仍存活"警告。
-            // 生产侧已移除卸载处的同步 GC 自检——在 reload 调用栈内做该检查会被保守栈扫描误报；
-            // 真正的卸载实证由本测试下方的 WeakReference 检查（调用栈展开后）完成。
-            Assert.DoesNotContain("卸载后仍存活", consoleOutput);
+            var (weakStandalone, weakGroup) = LoadDispatchThenReload();
 
             // 核心断言①：两个旧 ALC（独立插件的 + 共享组的）都被回收 —— 零引用泄漏、真卸载
             for (var i = 0; (weakStandalone.IsAlive || weakGroup.IsAlive) && i < 10; i++)
@@ -295,6 +279,20 @@ namespace UmamusumeResponseAnalyzer.Tests
             Assert.Contains(PluginManager.LoadedPlugins, x => PluginManager.InternalName(x) == "RuntimeHostPlugin");
         }
 
+        [Fact]
+        public void HotReload_TransientDelegatesReleaseReloadedContextAndUnloadRestoresPersistentHotkey()
+        {
+            var oldContext = ExerciseTransientShortcutReloadAndUnload();
+
+            for (var i = 0; oldContext.IsAlive && i < 10; i++)
+            {
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+            }
+
+            Assert.False(oldContext.IsAlive, "reload 后旧 notification shortcut 仍强引用 collectible ALC");
+        }
+
         /// <summary>
         /// 编译并加载 3 个插件 → dispatch → 把独立插件升级到 v2 并重载、把共享组重载，返回两个旧 ALC 的弱引用。
         /// NoInlining：让本帧产生的所有指向旧 ALC 的临时引用随返回而释放（测 collectible ALC 卸载的标准手法）。
@@ -341,6 +339,56 @@ namespace UmamusumeResponseAnalyzer.Tests
             return (weakStandalone, weakGroup);
         }
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        WeakReference ExerciseTransientShortcutReloadAndUnload()
+        {
+            const string pluginName = "TransientShortcutPlugin";
+            var pluginPath = Path.Combine(_tempDir, "Plugins", $"{pluginName}.dll");
+            var shortcutLog = Path.Combine(_tempDir, "shortcut-log.txt");
+            var uiHost = new UiHost();
+            PluginManager.BindLiveDisplay(_ => uiHost.ForPlugin(pluginName));
+            KeyboardManager.OverlaySink = uiHost;
+            var persistentInvocations = 0;
+            KeyboardManager.Register(ConsoleKey.F8, "host persistent", () =>
+            {
+                persistentInvocations++;
+                return Task.CompletedTask;
+            });
+
+            PluginCompiler.Compile(TransientShortcutPluginSource(pluginName, "v1", shortcutLog), pluginName, pluginPath);
+            PluginManager.Init();
+            PluginManager.InitializeLoadedPlugins();
+            var oldContext = new WeakReference(PluginManager.Contexts[pluginName]);
+            KeyboardManager.HandleKeyAsync(new ConsoleKeyInfo('\0', ConsoleKey.F8, false, false, false)).GetAwaiter().GetResult();
+            KeyboardManager.HandleKeyAsync(new ConsoleKeyInfo('\0', ConsoleKey.F7, false, false, false)).GetAwaiter().GetResult();
+            KeyboardManager.HandleKeyAsync(new ConsoleKeyInfo('\0', ConsoleKey.F8, false, false, false)).GetAwaiter().GetResult();
+            Assert.Equal(["v1-notification", "v1-popup"], File.ReadAllLines(shortcutLog));
+            Assert.Equal(0, persistentInvocations);
+
+            PluginCompiler.Compile(TransientShortcutPluginSource(pluginName, "v2", shortcutLog), pluginName, pluginPath);
+            Assert.Empty(PluginManager.ReloadPlugins(pluginName));
+            Assert.Equal(0, KeyboardManager.TransientShortcutCountForTests);
+            KeyboardManager.HandleKeyAsync(new ConsoleKeyInfo('\0', ConsoleKey.F8, false, false, false)).GetAwaiter().GetResult();
+            Assert.Equal(1, persistentInvocations);
+
+            PluginManager.InitializeLoadedPlugins();
+            KeyboardManager.HandleKeyAsync(new ConsoleKeyInfo('\0', ConsoleKey.F8, false, false, false)).GetAwaiter().GetResult();
+            KeyboardManager.HandleKeyAsync(new ConsoleKeyInfo('\0', ConsoleKey.F7, false, false, false)).GetAwaiter().GetResult();
+            KeyboardManager.HandleKeyAsync(new ConsoleKeyInfo('\0', ConsoleKey.F8, false, false, false)).GetAwaiter().GetResult();
+            Assert.Equal(
+                ["v1-notification", "v1-popup", "v2-notification", "v2-popup"],
+                File.ReadAllLines(shortcutLog));
+            Assert.Equal(1, persistentInvocations);
+
+            Assert.Empty(PluginManager.UnloadPlugins(pluginName));
+            Assert.Equal(0, KeyboardManager.TransientShortcutCountForTests);
+            KeyboardManager.HandleKeyAsync(new ConsoleKeyInfo('\0', ConsoleKey.F8, false, false, false)).GetAwaiter().GetResult();
+            Assert.Equal(2, persistentInvocations);
+            KeyboardManager.UnregisterAll();
+            KeyboardManager.OverlaySink = null;
+            return oldContext;
+        }
+
         /// <summary>经真实 typed/raw analyzer 分发路径调用已注册插件。</summary>
         static void Dispatch()
         {
@@ -366,7 +414,6 @@ namespace UmamusumeResponseAnalyzer.Tests
                 using System.IO;
                 using System.Threading.Tasks;
                 using Gallop.Endpoints;
-                using Spectre.Console;
                 using UmamusumeResponseAnalyzer.Plugin;
 
                 {{assemblyAttributes}}
@@ -377,8 +424,6 @@ namespace UmamusumeResponseAnalyzer.Tests
                         public string Name => "{{pluginDisplayName}}";
                         public string Author => "test";
                         public string[] Targets => System.Array.Empty<string>();
-                        public Task UpdatePlugin(ProgressContext ctx) => Task.CompletedTask;
-
                         // 记录 Initialize 被调用——测 High#2 门控:Server 未启动时,重载不应触发 Initialize。
                         public void Initialize(IPluginContext context) => File.AppendAllText(@"{{_initLog}}", "{{pluginName}}\n");
 
@@ -387,6 +432,55 @@ namespace UmamusumeResponseAnalyzer.Tests
                         {
                             File.AppendAllText(@"{{_logPath}}", "{{marker}}:" + payload.Length + "\n");
                             return ValueTask.CompletedTask;
+                        }
+                    }
+                }
+                """;
+        }
+
+        static string TransientShortcutPluginSource(string pluginName, string marker, string shortcutLog)
+        {
+            return $$"""
+                using System;
+                using System.IO;
+                using System.Threading.Tasks;
+                using UmamusumeResponseAnalyzer;
+                using UmamusumeResponseAnalyzer.LiveDisplay;
+                using UmamusumeResponseAnalyzer.Plugin;
+
+                namespace {{pluginName}}Ns
+                {
+                    public class {{pluginName}} : IPlugin
+                    {
+                        public string Name => "{{pluginName}}";
+                        public string Author => "test";
+                        public string[] Targets => Array.Empty<string>();
+                        public void Initialize(IPluginContext context)
+                        {
+                            var workspace = context.LiveDisplay.CreateWorkspace("Transient shortcut");
+                            context.LiveDisplay.Notify(
+                                workspace,
+                                "{{marker}}",
+                                ttl: TimeSpan.FromMinutes(5),
+                                shortcuts: new LiveDisplayShortcut(ConsoleKey.F8, HandleNotificationAsync));
+                            KeyboardManager.Register(ConsoleKey.F7, "popup", popup =>
+                            {
+                                popup.WriteLine("{{marker}}")
+                                    .BindShortcut(new LiveDisplayShortcut(ConsoleKey.F8, HandlePopupAsync));
+                                return Task.CompletedTask;
+                            });
+                        }
+
+                        static Task HandleNotificationAsync()
+                        {
+                            File.AppendAllText(@"{{shortcutLog}}", "{{marker}}-notification" + Environment.NewLine);
+                            return Task.CompletedTask;
+                        }
+
+                        static Task HandlePopupAsync()
+                        {
+                            File.AppendAllText(@"{{shortcutLog}}", "{{marker}}-popup" + Environment.NewLine);
+                            return Task.CompletedTask;
                         }
                     }
                 }

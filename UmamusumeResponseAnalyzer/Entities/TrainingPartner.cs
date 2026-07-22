@@ -1,5 +1,4 @@
 using Gallop;
-using Spectre.Console;
 using System.Collections.Frozen;
 using UmamusumeResponseAnalyzer.Game.TurnInfo;
 
@@ -52,7 +51,6 @@ namespace UmamusumeResponseAnalyzer.Entities
         public string Name { get; }
         public int Friendship { get; }
         public bool IsNpc => Position is not (>= 1 and <= 6);
-        public string NameColor { get; } = "[#ffffff]";
         public string NameAppend { get; } = string.Empty;
         public bool Shining { get; } = false;
 
@@ -65,17 +63,14 @@ namespace UmamusumeResponseAnalyzer.Entities
                 CardId = turn.SupportCards[Position];
                 var supportCard = Database.Names.GetSupportCard(CardId);
                 var isFriendSupportCard = supportCard.Type == 0;
-                Name = supportCard.Nickname.EscapeMarkup();
+                Name = supportCard.Nickname;
                 if (isFriendSupportCard) // 友人单独标绿
                 {
                     Priority = PartnerPriority.友人;
-                    NameColor = "[green]";
-
                 }
                 else if (Friendship < 80)// 除了友人以外都可以进行友情训练，检测羁绊
                 {
                     Priority = PartnerPriority.羁绊不足;
-                    NameColor = "[yellow]";
                 }
                 //在得意位置上
                 Shining = Friendship >= 80
@@ -86,7 +81,6 @@ namespace UmamusumeResponseAnalyzer.Entities
                     || (CardId == 30081 && turn.GetCommonResponse().chara_info.chara_effect_id_array.Contains(100))) //天狼星
                 {
                     Shining = true;
-                    NameColor = "[#80ff00]";
                 }
 
                 if (Shining)
@@ -94,22 +88,19 @@ namespace UmamusumeResponseAnalyzer.Entities
                     if (isFriendSupportCard)
                     {
                         Priority = PartnerPriority.友人;
-                        NameColor = "[#80ff00]";
                     }
                     else
                     {
                         Priority = PartnerPriority.闪;
-                        NameColor = "[aqua]";
                     }
                 }
             }
             else // NPC
             {
-                Name = (Database.Names.GetCharacter(Position).Nickname).EscapeMarkup();
+                Name = Database.Names.GetCharacter(Position).Nickname;
                 if (Position is >= 100 and < 1000) // 理事长、记者等
                 {
                     Priority = PartnerPriority.关键NPC;
-                    NameColor = "[#008080]";
                 }
             }
 
@@ -119,14 +110,14 @@ namespace UmamusumeResponseAnalyzer.Entities
                 // 羁绊不满，额外显示
                 if (Friendship < 100)
                 {
-                    NameAppend += $"[red]{Friendship}[/]";
+                    NameAppend += Friendship;
                 }
             }
 
-            Name = $"{NameColor}{Name}[/]{NameAppend}";
+            Name += NameAppend;
             var tips = command.tips_event_partner_array.Intersect(command.training_partner_array);
             if (tips.Contains(Position)) // 有Hint就加个红感叹号，和游戏内表现一样
-                Name = $"[red]![/]{Name}";
+                Name = $"!{Name}";
         }
     }
 }

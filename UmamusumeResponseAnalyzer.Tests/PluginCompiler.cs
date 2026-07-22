@@ -1,7 +1,7 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Gallop.Endpoints;
-using Spectre.Console;
+using Terminal.Gui.ViewBase;
 using UmamusumeResponseAnalyzer.Plugin;
 
 namespace UmamusumeResponseAnalyzer.Tests
@@ -22,8 +22,8 @@ namespace UmamusumeResponseAnalyzer.Tests
             foreach (var p in tpa.Split(Path.PathSeparator))
                 if (!string.IsNullOrEmpty(p) && File.Exists(p))
                     refs[p] = MetadataReference.CreateFromFile(p);
-            // 插件源码会用到的 ABI 依赖：宿主公开面(IPlugin/Gallop endpoint marker)、ProgressContext(Spectre)
-            foreach (var asm in new[] { typeof(IPlugin).Assembly, typeof(IGameEndpoint).Assembly, typeof(ProgressContext).Assembly })
+            // 插件源码会用到的 ABI 依赖：宿主公开面、Gallop endpoint marker 与 Terminal.Gui View。
+            foreach (var asm in new[] { typeof(IPlugin).Assembly, typeof(IGameEndpoint).Assembly, typeof(View).Assembly })
                 if (!string.IsNullOrEmpty(asm.Location))
                     refs[asm.Location] = MetadataReference.CreateFromFile(asm.Location);
             return [.. refs.Values];

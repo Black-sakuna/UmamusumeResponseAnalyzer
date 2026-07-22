@@ -2,7 +2,6 @@ using System.IO.Compression;
 using System.Reflection;
 using Gallop;
 using Gallop.Endpoints;
-using Spectre.Console;
 using UmamusumeResponseAnalyzer.LiveDisplay;
 using UmamusumeResponseAnalyzer.Plugin;
 using WatsonWebserver.Core;
@@ -150,8 +149,6 @@ namespace UmamusumeResponseAnalyzer.Tests
             var plugin = new NoConfigPromptPlugin();
 
             await PluginConfigPrompt.RunAsync(plugin);
-
-            Assert.Equal(0, plugin.UpdateCalls);
         }
 
         [Fact]
@@ -253,7 +250,6 @@ namespace UmamusumeResponseAnalyzer.Tests
                 PluginCompiler.Compile(
                     """
                     using System.Threading.Tasks;
-                    using Spectre.Console;
                     using UmamusumeResponseAnalyzer.Plugin;
 
                     public sealed class NotificationsPlugin : IPlugin
@@ -263,7 +259,6 @@ namespace UmamusumeResponseAnalyzer.Tests
                         public string[] Targets => System.Array.Empty<string>();
 
                         public void Initialize(IPluginContext context) { }
-                        public Task UpdatePlugin(ProgressContext ctx) => Task.CompletedTask;
                     }
                     """,
                     "Notifications",
@@ -361,8 +356,6 @@ namespace UmamusumeResponseAnalyzer.Tests
             public virtual Task ConfigPromptAsync()
                 => Task.CompletedTask;
 
-            public Task UpdatePlugin(ProgressContext ctx)
-                => Task.CompletedTask;
         }
 
         sealed class CompiledSettingsPluginFixture : IDisposable
@@ -378,7 +371,6 @@ namespace UmamusumeResponseAnalyzer.Tests
                 PluginCompiler.Compile(
                     """
                     using System.Threading.Tasks;
-                    using Spectre.Console;
                     using UmamusumeResponseAnalyzer.Plugin;
 
                     public sealed class SettingsPlugin : IPlugin
@@ -390,7 +382,6 @@ namespace UmamusumeResponseAnalyzer.Tests
                         public int Value { get; set; } = 1;
 
                         public void Initialize(IPluginContext context) { }
-                        public Task UpdatePlugin(ProgressContext ctx) => Task.CompletedTask;
                     }
                     """,
                     "SettingsPlugin",
@@ -552,13 +543,6 @@ namespace UmamusumeResponseAnalyzer.Tests
             {
             }
 
-            public int UpdateCalls { get; private set; }
-
-            public new Task UpdatePlugin(ProgressContext ctx)
-            {
-                UpdateCalls++;
-                return Task.CompletedTask;
-            }
         }
 
         sealed class LegacyConfigPromptPlugin : TestPlugin
@@ -596,19 +580,21 @@ namespace UmamusumeResponseAnalyzer.Tests
             public string Author => author;
             public string[] Targets => [];
             public void Initialize(IPluginContext context) { }
-            public Task UpdatePlugin(ProgressContext ctx) => Task.CompletedTask;
         }
 
         sealed class FakeLiveDisplayOutput : ILiveDisplayOutput
         {
             public LiveDisplayWorkspace? CurrentWorkspace => null;
-            public LiveDisplayWorkspace CreateWorkspace(string title) => LiveDisplayWorkspace.Create(title);
+            public LiveDisplayWorkspace CreateWorkspace(string title, int historyCapacity = 0) => LiveDisplayWorkspace.Create(title);
+            public void RemoveWorkspace(LiveDisplayWorkspace workspace) { }
+            public void CaptureWorkspaceSnapshot(LiveDisplayWorkspace workspace) { }
             public void SwitchWorkspace(LiveDisplayWorkspace workspace) { }
             public void BindWorkspaceHotkey(LiveDisplayWorkspace workspace, ConsoleKey key, ConsoleModifiers modifiers = 0, string? description = null) { }
-            public void SetPanel(LiveDisplayWorkspace workspace, string key, string title, Spectre.Console.Rendering.IRenderable content, bool fullBleed = false) { }
+            public void SetPanel(LiveDisplayWorkspace workspace, string key, string title, LiveDisplayContent content, bool fullBleed = false, bool switchToWorkspace = true) { }
+            public void Log(string text, LiveDisplaySeverity severity = LiveDisplaySeverity.Info) { }
             public void Log(LiveDisplayWorkspace workspace, string text, LiveDisplaySeverity severity = LiveDisplaySeverity.Info) { }
-            public void MarkupLog(LiveDisplayWorkspace workspace, string markup, LiveDisplaySeverity severity = LiveDisplaySeverity.Info) { }
-            public void Notify(LiveDisplayWorkspace workspace, string text, LiveDisplaySeverity severity = LiveDisplaySeverity.Info, TimeSpan? ttl = null) { }
+            public void Notify(string text, LiveDisplaySeverity severity = LiveDisplaySeverity.Info, TimeSpan? ttl = null, params LiveDisplayShortcut[] shortcuts) { }
+            public void Notify(LiveDisplayWorkspace workspace, string text, LiveDisplaySeverity severity = LiveDisplaySeverity.Info, TimeSpan? ttl = null, params LiveDisplayShortcut[] shortcuts) { }
         }
 
     }

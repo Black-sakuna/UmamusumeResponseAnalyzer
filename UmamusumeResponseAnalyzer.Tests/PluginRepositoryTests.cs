@@ -130,16 +130,10 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
 
         [Fact]
-        public void Bracketed_EscapesNameAndUsesLiteralBrackets_NoMarkupCrash()
+        public void Bracketed_UsesLiteralBrackets()
         {
-            // 回归(noVNC 实测):安装信息曾用 [{name}] 把插件名套进 markup 方括号,非样式名(CJK「梦想杯剧本解析器」)
-            // 被 Spectre 当样式解析 → "Could not find color or style" → 未捕获 → 崩掉整个程序(装任何会安装失败的插件都中招)。
-            // 修复后用字面 [[ ]] 包裹。
-            Assert.Equal("[[梦想杯剧本解析器]]", PluginRepository.Bracketed("梦想杯剧本解析器")); // 字面方括号,非 markup tag
-            Assert.Equal("[[a[[x]]]]", PluginRepository.Bracketed("a[x]"));                    // 名字内部的方括号也转义
-            // 放进真实失败信息格式里,Spectre 解析不应抛(旧 [{name}] 写法会抛 InvalidOperationException)
-            Assert.Null(Record.Exception(() =>
-                Spectre.Console.AnsiConsole.Markup($"[red]{PluginRepository.Bracketed("梦想杯剧本解析器")} 安装失败:[/] x")));
+            Assert.Equal("[梦想杯剧本解析器]", PluginRepository.Bracketed("梦想杯剧本解析器"));
+            Assert.Equal("[a[x]]", PluginRepository.Bracketed("a[x]"));
         }
 
         [Fact]

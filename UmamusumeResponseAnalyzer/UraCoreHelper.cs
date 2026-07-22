@@ -1,5 +1,4 @@
 ﻿using Microsoft.Win32;
-using Spectre.Console;
 using UmamusumeResponseAnalyzer.LiveDisplay;
 
 namespace UmamusumeResponseAnalyzer
@@ -119,11 +118,11 @@ namespace UmamusumeResponseAnalyzer
                 return;
             }
 
-            var registryCaution = new ConfirmationPrompt(
+            var registryCaution =
                 @"该行为具有一定风险，将注册表HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\DevOverrideEnable的值改为1。" + "\n" +
-                "请仔细阅读https://learn.microsoft.com/en-us/windows/win32/dlls/dynamic-link-library-redirection 了解其风险后再做决定，我们不对此负责。");
+                "请仔细阅读https://learn.microsoft.com/en-us/windows/win32/dlls/dynamic-link-library-redirection 了解其风险后再做决定，我们不对此负责。";
 
-            if (!LiveDisplayConsole.Prompt(registryCaution))
+            if (!LiveDisplayConsole.Confirm(registryCaution))
             {
                 LiveDisplayConsole.WriteLine("已取消启用DLL重定向。");
                 return;

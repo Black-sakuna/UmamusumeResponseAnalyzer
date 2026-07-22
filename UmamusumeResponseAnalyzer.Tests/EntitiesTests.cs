@@ -129,20 +129,6 @@ namespace UmamusumeResponseAnalyzer.Tests
             Assert.Equal(1, (int)Motivation.Worst);
         }
 
-        // ToColoredString 颜色：5=>green 4=>yellow 3/2/1=>red；主体是 enumString 标签。
-        // 源码 $"[color]{this}[/]" 经 ToString() 重写后渲染为中文标签(绝好调/好调/普通/不调/绝不调)。
-        [Theory]
-        [InlineData(5, "green", "绝好调")]
-        [InlineData(4, "yellow", "好调")]
-        [InlineData(3, "red", "普通")]
-        [InlineData(2, "red", "不调")]
-        [InlineData(1, "red", "绝不调")]
-        public void Motivation_ToColoredString(int value, string color, string label)
-        {
-            var expected = $"[{color}]{label}[/]";
-            Assert.Equal(expected, new Motivation(value).ToColoredString());
-        }
-
     }
 
     /// <summary>

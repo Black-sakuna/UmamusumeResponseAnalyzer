@@ -1,9 +1,12 @@
+using UmamusumeResponseAnalyzer.LiveDisplay;
+
 namespace UmamusumeResponseAnalyzer
 {
     internal interface IKeyboardOverlaySink
     {
-        void ShowPopup(KeyboardPopup popup);
-        void HidePopup();
+        Task<bool> TryHandleWorkspaceKeyAsync(ConsoleKeyInfo keyInfo);
+        void ShowPopup(KeyboardPopup popup, int generation);
+        void HidePopup(int generation);
         void ShowCommandInput(KeyboardCommandInput input);
         void HideCommandInput();
     }
@@ -12,7 +15,8 @@ namespace UmamusumeResponseAnalyzer
         IReadOnlyList<KeyboardPopupLine> Lines,
         int ScrollOffset = 0,
         DateTimeOffset? ExpiresAt = null,
-        KeyboardPopupSelection? Selection = null);
+        KeyboardPopupSelection? Selection = null,
+        IReadOnlyList<LiveDisplayShortcut>? Shortcuts = null);
 
     internal sealed record KeyboardPopupSelection(
         IReadOnlyList<int> LineIndexes,
@@ -32,7 +36,7 @@ namespace UmamusumeResponseAnalyzer
         }
     }
 
-    internal sealed record KeyboardPopupLine(string Text, ConsoleColor Color, bool IsMarkup);
+    internal sealed record KeyboardPopupLine(string Text, ConsoleColor Color);
     internal sealed record KeyboardCommandInput(string Text, IReadOnlyList<string> CompletionCandidates)
     {
         public KeyboardCommandInput(string text) : this(text, [])
@@ -43,24 +47,26 @@ namespace UmamusumeResponseAnalyzer
     public sealed class KeyboardHandlerContext
     {
         readonly List<KeyboardPopupLine> lines = [];
+        readonly List<LiveDisplayShortcut> shortcuts = [];
 
         public int LineCount => lines.Count;
 
         public KeyboardHandlerContext WriteLine(string text = "", ConsoleColor color = ConsoleColor.White)
         {
-            lines.Add(new KeyboardPopupLine(text, color, IsMarkup: false));
+            lines.Add(new KeyboardPopupLine(text, color));
             return this;
         }
 
-        public KeyboardHandlerContext MarkupLine(string markup = "")
+        public KeyboardHandlerContext BindShortcut(LiveDisplayShortcut shortcut)
         {
-            lines.Add(new KeyboardPopupLine(markup, ConsoleColor.White, IsMarkup: true));
+            ArgumentNullException.ThrowIfNull(shortcut);
+            shortcuts.Add(shortcut);
             return this;
         }
 
         internal KeyboardPopup ToPopup(int scrollOffset = 0, KeyboardPopupSelection? selection = null)
         {
-            return new KeyboardPopup(lines.ToArray(), scrollOffset, Selection: selection);
+            return new KeyboardPopup(lines.ToArray(), scrollOffset, Selection: selection, Shortcuts: shortcuts.ToArray());
         }
     }
 }

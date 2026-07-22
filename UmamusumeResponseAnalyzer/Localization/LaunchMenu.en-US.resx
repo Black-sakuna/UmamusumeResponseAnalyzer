@@ -148,6 +148,6 @@
     <value>Successfully installed to {0}, press any key to return to the main menu</value>
   </data>
   <data name="I18N_Start_Started" xml:space="preserve">
-    <value>[bold green]Launched[/]</value>
+    <value>Launched</value>
   </data>
 </root>

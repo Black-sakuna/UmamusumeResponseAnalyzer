@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <root>
   <!-- 
     Microsoft ResX Schema 
@@ -118,10 +118,10 @@
     <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
   </resheader>
   <data name="I18N_WrongTurnAlert" xml:space="preserve">
-    <value>[red]Warning: Incorrect turn, the previous turn was {0}, the current turn is {1}[/]</value>
+    <value>Warning: Incorrect turn, the previous turn was {0}, the current turn is {1}</value>
   </data>
   <data name="I18N_RepeatTurn" xml:space="preserve">
-    <value>[yellow]This turn is a duplicate display[/]</value>
+    <value>This turn is a duplicate display</value>
   </data>
   <data name="I18N_MinimumSportRank" xml:space="preserve">
     <value>:red_exclamation_mark:The minimum sports rank for the current period is {0}</value>
@@ -136,13 +136,13 @@
     <value>:red_exclamation_mark:Without talk, {0} for the maximum rank of {1}</value>
   </data>
   <data name="I18N_MoritaTrained" xml:space="preserve">
-    <value>Clicked [aqua]{0}[/] times on Morita</value>
+    <value>Clicked {0} times on Morita</value>
   </data>
   <data name="I18N_MoritaVitalGainTimes" xml:space="preserve">
-    <value>Recover vital [aqua]{0}[/] times</value>
+    <value>Recover vital {0} times</value>
   </data>
   <data name="I18N_MoritaRanking" xml:space="preserve">
-    <value>, exceeded [aqua]{0}%[/] of Morita</value>
+    <value>, exceeded {0}% of Morita</value>
   </data>
   <data name="I18N_CurrentRemainStat" xml:space="preserve">
     <value>Current: Available</value>
@@ -157,19 +157,19 @@
     <value>:red_exclamation_mark:Please use talk in time</value>
   </data>
   <data name="I18N_TalkToGetBlueBuff" xml:space="preserve">
-    <value>:sparkles:{0} turns [blue]blue[/] can burst</value>
+    <value>:sparkles:{0} turns blue can burst</value>
   </data>
   <data name="I18N_TalkToGetRedBuff" xml:space="preserve">
-    <value>:sparkles:{0} turns [red]red[/] can burst</value>
+    <value>:sparkles:{0} turns red can burst</value>
   </data>
   <data name="I18N_TalkToGetYellowBuff" xml:space="preserve">
-    <value>:sparkles:{0} turns [yellow]yellow[/] can burst</value>
+    <value>:sparkles:{0} turns yellow can burst</value>
   </data>
   <data name="I18N_LowSportRank" xml:space="preserve">
     <value>:red_exclamation_mark:{0}：need {1}</value>
   </data>
   <data name="I18N_AllRankOK" xml:space="preserve">
-    <value>[green]All ranks are met![/]</value>
+    <value>All ranks are met!</value>
   </data>
   <data name="I18N_LowestSportRank" xml:space="preserve">
     <value>Lowest sport rank:</value>

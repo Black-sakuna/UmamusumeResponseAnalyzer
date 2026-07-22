@@ -1,5 +1,4 @@
 using Newtonsoft.Json;
-using Spectre.Console;
 using System.Diagnostics;
 using System.Globalization;
 using System.Net;
@@ -72,13 +71,7 @@ namespace UmamusumeResponseAnalyzer
                 var prompt = string.Empty;
                 var tabs = typeof(YamlConfig).GetProperties(BindingFlags.Public | BindingFlags.Instance).Select(x => x.Name);
                 var translatedTabs = tabs.ToDictionary(x => i18n.ResourceManager.GetString($"Tabs_{x}_Title", i18n.Culture)!, x => x);
-                var selection = new SelectionPrompt<string>()
-                    .Title(i18n.Settings_Title)
-                    .WrapAround(true)
-                    .AddChoices(translatedTabs.Keys)
-                    .AddChoices(i18n.Return)
-                    .PageSize(30);
-                prompt = LiveDisplayConsole.Prompt(selection);
+                prompt = LiveDisplayConsole.Select(i18n.Settings_Title, translatedTabs.Keys.Append(i18n.Return));
                 if (prompt == i18n.Return) break;
                 var config = typeof(Config).GetProperty(translatedTabs[prompt])?.GetValue(null);
                 var result = config?.GetType()?.GetMethod("Prompt")?.Invoke(config, null);
@@ -113,18 +106,15 @@ namespace UmamusumeResponseAnalyzer
             var selected = string.Empty;
             do
             {
-                var selectionPrompt = new SelectionPrompt<string>()
-                    .Title(i18n.Tabs_Core_Title)
-                    .WrapAround(true)
-                    .AddChoices(_properties.Select(x => x.AppendValue(this, translated)))
-                    .AddChoices(i18n.Return);
-                selected = LiveDisplayConsole.Prompt(selectionPrompt).Split(':')[0];
+                selected = LiveDisplayConsole.Select(
+                    i18n.Tabs_Core_Title,
+                    _properties.Select(x => x.AppendValue(this, translated)).Append(i18n.Return)).Split(':')[0];
                 if (selected == i18n.Tabs_Core_ListenAddress)
                 {
                     var address = string.Empty;
                     do
                     {
-                        address = LiveDisplayConsole.Prompt(new TextPrompt<string>(i18n.Tabs_Core_ListenAddressPrompt));
+                        address = LiveDisplayConsole.Ask(i18n.Tabs_Core_ListenAddressPrompt);
                         if (IPAddress.TryParse(address, out _))
                         {
                             ListenAddress = address;
@@ -139,7 +129,7 @@ namespace UmamusumeResponseAnalyzer
                     var port = string.Empty;
                     do
                     {
-                        port = LiveDisplayConsole.Prompt(new TextPrompt<string>(i18n.Tabs_Core_ListenPortPrompt));
+                        port = LiveDisplayConsole.Ask(i18n.Tabs_Core_ListenPortPrompt);
                         if (int.TryParse(port, out var portInt))
                         {
                             ListenPort = portInt;
@@ -170,18 +160,13 @@ namespace UmamusumeResponseAnalyzer
             var selected = string.Empty;
             do
             {
-                var selectionPrompt = new SelectionPrompt<string>()
-                    .Title(i18n.Tabs_Repository_Title)
-                    .WrapAround(true)
-                    .AddChoices(_properties.Select(x => x.AppendValue(this, translated)))
-                    .AddChoices(i18n.Return);
-                selected = LiveDisplayConsole.Prompt(selectionPrompt).Split(':')[0];
+                selected = LiveDisplayConsole.Select(
+                    i18n.Tabs_Repository_Title,
+                    _properties.Select(x => x.AppendValue(this, translated)).Append(i18n.Return)).Split(':')[0];
 
                 if (selected == i18n.Tabs_Repository_Targets)
                 {
-                    var targetPrompt = new TextPrompt<string>(i18n.Tabs_Repository_TargetsPrompt)
-                        .AllowEmpty();
-                    var targetsInput = LiveDisplayConsole.Prompt(targetPrompt);
+                    var targetsInput = LiveDisplayConsole.Ask(i18n.Tabs_Repository_TargetsPrompt, allowEmpty: true);
                     Targets = string.IsNullOrEmpty(targetsInput) ? [] : [.. targetsInput.Replace('，', ',').Split(',')];
                     LiveDisplayConsole.Clear();
                 }
@@ -230,13 +215,7 @@ namespace UmamusumeResponseAnalyzer
             var plugins = BuildPluginChoices(PluginManager.SnapshotLoadedPlugins());
             do
             {
-                var selectionPrompt = new SelectionPrompt<string>()
-                    .Title(i18n.Tabs_Plugin_Title)
-                    .WrapAround(true)
-                    .AddChoices(plugins.Keys)
-                    .AddChoices(i18n.Return)
-                    .PageSize(30);
-                selected = LiveDisplayConsole.Prompt(selectionPrompt);
+                selected = LiveDisplayConsole.Select(i18n.Tabs_Plugin_Title, plugins.Keys.Append(i18n.Return));
                 if (selected != i18n.Return)
                 {
                     var plugin = plugins[selected];
@@ -261,32 +240,24 @@ namespace UmamusumeResponseAnalyzer
             var selected = string.Empty;
             do
             {
-                var l3Prompt = new SelectionPrompt<string>()
-                    .Title(i18n.Tabs_Updater_Title)
-                    .WrapAround(true)
-                    .AddChoices(_properties.Select(x => x.AppendValue(this, translated)))
-                    .AddChoices(i18n.Return);
-                selected = LiveDisplayConsole.Prompt(l3Prompt).Split(':')[0];
+                selected = LiveDisplayConsole.Select(
+                    i18n.Tabs_Updater_Title,
+                    _properties.Select(x => x.AppendValue(this, translated)).Append(i18n.Return)).Split(':')[0];
                 if (selected == nameof(TrainerIsMale))
                 {
                     TrainerIsMale = !TrainerIsMale;
                 }
                 else if (selected == nameof(DatabaseLanguage))
                 {
-                    var dbLangPrompt = new SelectionPrompt<string>()
-                        .Title(nameof(DatabaseLanguage))
-                        .WrapAround(true)
-                        .AddChoices(["ja-JP", "zh-TW", "zh-CN"]);
-                    var dbLang = LiveDisplayConsole.Prompt(dbLangPrompt);
+                    var dbLang = LiveDisplayConsole.Select(nameof(DatabaseLanguage), new[] { "ja-JP", "zh-TW", "zh-CN" });
                     DatabaseLanguage = dbLang;
                     LiveDisplayConsole.Clear();
                 }
                 else if (selected == nameof(CustomDatabaseRepository))
                 {
-                    var urlPrompt = new TextPrompt<string>(i18n.Tabs_Updater_CustomDatabaseRepositoryPrompt).AllowEmpty();
                     do
                     {
-                        var url = LiveDisplayConsole.Prompt(urlPrompt);
+                        var url = LiveDisplayConsole.Ask(i18n.Tabs_Updater_CustomDatabaseRepositoryPrompt, allowEmpty: true);
                         if (string.IsNullOrEmpty(url))
                         {
                             CustomDatabaseRepository = string.Empty;
@@ -317,11 +288,7 @@ namespace UmamusumeResponseAnalyzer
         {
             var languageProperties = Enum.GetNames(typeof(Language));
             var translated = languageProperties.ToDictionary(x => i18n.ResourceManager.GetString($"Tabs_Language_{x}", i18n.Culture)!, x => x);
-            var languagePrompt = new SelectionPrompt<string>()
-                .Title(i18n.Tabs_Language_Title)
-                .AddChoices(translated.Keys);
-
-            var selected = LiveDisplayConsole.Prompt(languagePrompt);
+            var selected = LiveDisplayConsole.Select(i18n.Tabs_Language_Title, translated.Keys);
             if (translated.TryGetValue(selected, out var languageName) && Enum.TryParse<Language>(languageName, out var langEnum))
             {
                 Selected = langEnum;
@@ -370,19 +337,10 @@ namespace UmamusumeResponseAnalyzer
         {
             var _properties = GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance);
             var translated = _properties.Select(x => x.Name).ToDictionary(x => x, x => i18n.ResourceManager.GetString($"Tabs_Debug_{x}", i18n.Culture)!);
-            var l3Prompt = new MultiSelectionPrompt<string>()
-                .Title(i18n.Tabs_Debug_Title)
-                .WrapAround(true)
-                .Required(false)
-                .AddChoices(translated.Values);
-            foreach (var i in _properties)
-            {
-                if ((bool)i.GetValue(this)!)
-                {
-                    l3Prompt.Select(translated[i.Name]);
-                }
-            }
-            var l3 = LiveDisplayConsole.Prompt(l3Prompt);
+            var selected = _properties
+                .Where(x => (bool)x.GetValue(this)!)
+                .Select(x => translated[x.Name]);
+            var l3 = LiveDisplayConsole.MultiSelect(i18n.Tabs_Debug_Title, translated.Values, selected);
             foreach (var i in _properties)
             {
                 i.SetValue(this, l3.Contains(translated[i.Name]));

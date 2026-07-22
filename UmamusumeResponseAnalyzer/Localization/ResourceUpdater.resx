@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <root>
   <!-- 
     Microsoft ResX Schema 
@@ -148,15 +148,15 @@
     <value>Downloading the latest skill_upgrade_speciality.br from GitHub</value>
   </data>
   <data name="I18N_UpdatedFileCorrupted" xml:space="preserve">
-    <value>[red]Update file corrupted, main program update failed[/]</value>
+    <value>Update file corrupted, main program update failed</value>
   </data>
   <data name="I18N_DownloadingCmder" xml:space="preserve">
     <value>Downloading cmder.zip</value>
   </data>
   <data name="I18N_AccessGithubFail" xml:space="preserve">
-    <value>{0}: [red]Unable to connect to GitHub, please try using a proxy[/]</value>
+    <value>{0}: Unable to connect to GitHub, please try using a proxy</value>
   </data>
   <data name="I18N_AccessMirrorFail" xml:space="preserve">
-    <value>{0}: [red]Unable to connect to the update server, please try enabling "Force use GitHub for updates" in settings and try again[/]</value>
+    <value>{0}: Unable to connect to the update server, please try enabling "Force use GitHub for updates" in settings and try again</value>
   </data>
 </root>

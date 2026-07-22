@@ -1,26 +1,51 @@
-using Spectre.Console.Rendering;
+using Terminal.Gui.ViewBase;
+using Terminal.Gui.Views;
 
 namespace UmamusumeResponseAnalyzer.LiveDisplay;
 
 public interface ILiveDisplayOutput
 {
     LiveDisplayWorkspace? CurrentWorkspace { get; }
-    LiveDisplayWorkspace CreateWorkspace(string title);
+    LiveDisplayWorkspace CreateWorkspace(string title, int historyCapacity = 0);
+    void RemoveWorkspace(LiveDisplayWorkspace workspace);
+    void CaptureWorkspaceSnapshot(LiveDisplayWorkspace workspace);
     void SwitchWorkspace(LiveDisplayWorkspace workspace);
     void BindWorkspaceHotkey(LiveDisplayWorkspace workspace, ConsoleKey key, ConsoleModifiers modifiers = 0, string? description = null);
-    void SetPanel(LiveDisplayWorkspace workspace, string key, string title, IRenderable content, bool fullBleed = false);
-    void SetPanel(LiveDisplayWorkspace workspace, string key, string title, IRenderable content, bool fullBleed, bool switchToWorkspace)
-    {
-        if (!switchToWorkspace)
-            throw new NotSupportedException("当前 LiveDisplay output 实现不支持 switchToWorkspace: false。");
-
-        SetPanel(workspace, key, title, content, fullBleed);
-    }
-
+    void SetPanel(
+        LiveDisplayWorkspace workspace,
+        string key,
+        string title,
+        LiveDisplayContent content,
+        bool fullBleed = false,
+        bool switchToWorkspace = true);
+    void Log(string text, LiveDisplaySeverity severity = LiveDisplaySeverity.Info);
     void Log(LiveDisplayWorkspace workspace, string text, LiveDisplaySeverity severity = LiveDisplaySeverity.Info);
-    void MarkupLog(LiveDisplayWorkspace workspace, string markup, LiveDisplaySeverity severity = LiveDisplaySeverity.Info);
-    void Notify(LiveDisplayWorkspace workspace, string text, LiveDisplaySeverity severity = LiveDisplaySeverity.Info, TimeSpan? ttl = null);
+    void Notify(string text, LiveDisplaySeverity severity = LiveDisplaySeverity.Info, TimeSpan? ttl = null, params LiveDisplayShortcut[] shortcuts);
+    void Notify(LiveDisplayWorkspace workspace, string text, LiveDisplaySeverity severity = LiveDisplaySeverity.Info, TimeSpan? ttl = null, params LiveDisplayShortcut[] shortcuts);
 }
+
+public sealed class LiveDisplayContent(Func<View> createView)
+{
+    public View CreateView()
+        => createView() ?? throw new InvalidOperationException("LiveDisplayContent factory 返回了 null。");
+
+    public static LiveDisplayContent Text(string text)
+    {
+        ArgumentNullException.ThrowIfNull(text);
+        return new(() => new TextView
+        {
+            Text = text,
+            ReadOnly = true,
+            WordWrap = false,
+            CanFocus = false
+        });
+    }
+}
+
+public sealed record LiveDisplayShortcut(
+    ConsoleKey Key,
+    Func<Task> Handler,
+    ConsoleModifiers Modifiers = 0);
 
 public sealed class LiveDisplayWorkspace : IEquatable<LiveDisplayWorkspace>
 {
@@ -28,53 +53,29 @@ public sealed class LiveDisplayWorkspace : IEquatable<LiveDisplayWorkspace>
 
     LiveDisplayWorkspace(string title)
     {
-        Title = Normalize(title, nameof(title));
+        if (string.IsNullOrWhiteSpace(title))
+            throw new ArgumentException("Workspace title 不能为空。", nameof(title));
+
+        Title = title;
     }
 
     public string Title { get; }
 
-    public static LiveDisplayWorkspace Create(string title)
-    {
-        return new LiveDisplayWorkspace(title);
-    }
+    public static LiveDisplayWorkspace Create(string title) => new(title);
 
     public bool Equals(LiveDisplayWorkspace? other)
-    {
-        return other is not null && TitleComparer.Equals(Title, other.Title);
-    }
+        => other is not null && TitleComparer.Equals(Title, other.Title);
 
-    public override bool Equals(object? obj)
-    {
-        return obj is LiveDisplayWorkspace other && Equals(other);
-    }
+    public override bool Equals(object? obj) => obj is LiveDisplayWorkspace other && Equals(other);
 
-    public override int GetHashCode()
-    {
-        return TitleComparer.GetHashCode(Title);
-    }
+    public override int GetHashCode() => TitleComparer.GetHashCode(Title);
 
-    public override string ToString()
-    {
-        return Title;
-    }
+    public override string ToString() => Title;
 
     public static bool operator ==(LiveDisplayWorkspace? left, LiveDisplayWorkspace? right)
-    {
-        return left is null ? right is null : left.Equals(right);
-    }
+        => left is null ? right is null : left.Equals(right);
 
-    public static bool operator !=(LiveDisplayWorkspace? left, LiveDisplayWorkspace? right)
-    {
-        return !(left == right);
-    }
-
-    static string Normalize(string value, string parameterName)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-            throw new ArgumentException("Workspace title 不能为空。", parameterName);
-
-        return value.Trim();
-    }
+    public static bool operator !=(LiveDisplayWorkspace? left, LiveDisplayWorkspace? right) => !(left == right);
 }
 
 public enum LiveDisplaySeverity

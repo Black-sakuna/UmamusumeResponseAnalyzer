@@ -118,10 +118,10 @@
     <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
   </resheader>
   <data name="I18N_ResponseAnalyzeFail" xml:space="preserve">
-    <value>[red]解析Response时出现错误: (如果程序运行正常则可以忽略)[/]</value>
+    <value>解析Response时出现错误: (如果程序运行正常则可以忽略)</value>
   </data>
   <data name="I18N_PingReceived" xml:space="preserve">
-    <value>[green]检测到从游戏发来的请求，配置正确[/]</value>
+    <value>检测到从游戏发来的请求，配置正确</value>
   </data>
   <data name="I18N_WildcardServerStarted" xml:space="preserve">
     <value>服务器已于http://*:4693启动</value>

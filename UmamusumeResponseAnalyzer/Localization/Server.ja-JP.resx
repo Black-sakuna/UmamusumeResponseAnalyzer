@@ -118,10 +118,10 @@
     <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
   </resheader>
   <data name="I18N_ResponseAnalyzeFail" xml:space="preserve">
-    <value>[red]Responseの解析時にエラーが発生しました（プログラムが正常に動作している場合は無視してかまいません）[/]</value>
+    <value>Responseの解析時にエラーが発生しました（プログラムが正常に動作している場合は無視してかまいません）</value>
   </data>
   <data name="I18N_PingReceived" xml:space="preserve">
-    <value>[green]ゲームからのリクエストを検出しました、設定が正しいです[/]</value>
+    <value>ゲームからのリクエストを検出しました、設定が正しいです</value>
   </data>
   <data name="I18N_WildcardServerStarted" xml:space="preserve">
     <value>サーバーはhttp://*:4693で起動しました</value>

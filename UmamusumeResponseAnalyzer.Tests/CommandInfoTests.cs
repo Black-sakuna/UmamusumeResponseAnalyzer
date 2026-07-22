@@ -186,7 +186,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         {
             var partner = BuildPartner(position: 1, cardId: 30001, friendship: 80, commandId: 101, tips: [1]);
 
-            Assert.StartsWith("[red]![/]", partner.Name);
+            Assert.StartsWith("!", partner.Name);
         }
 
         [Fact]

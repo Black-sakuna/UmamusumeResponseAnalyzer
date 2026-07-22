@@ -1,4 +1,3 @@
-using Spectre.Console;
 using System.Diagnostics;
 using System.IO.Compression;
 using System.Net.NetworkInformation;
@@ -57,14 +56,14 @@ namespace UmamusumeResponseAnalyzer
             var prompt = string.Empty;
             do
             {
-                await LiveDisplayConsole.RunAsync(async () => prompt = await ShowMenu());
+                await LiveDisplayConsole.RunInputAsync(async () => prompt = await ShowMenu());
             }
             while (prompt != I18N_Start); //如果不是启动则重新显示主菜单
 
             using var liveDisplayCts = new CancellationTokenSource();
             var firstRenderGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var uiTask = uiHost.RunAsync(liveDisplayCts.Token, firstRenderGate.Task);
-            Task keyboardTask;
+            Task keyboardTask = Task.CompletedTask;
 
             try
             {
@@ -95,6 +94,27 @@ namespace UmamusumeResponseAnalyzer
                     failedPluginCount == 0
                         ? $"已初始化 {loadedPluginCount} 个插件。"
                         : $"已初始化 {loadedPluginCount} 个插件，{failedPluginCount} 个插件失败。");
+
+                KeyboardManager.Register(
+                    ConsoleKey.C, ConsoleModifiers.Control,
+                    "退出程序",
+                    () =>
+                    {
+                        KeyboardManager.Stop();
+                        uiHost.RequestShutdown();
+                        return Task.CompletedTask;
+                    });
+                KeyboardManager.Register(ConsoleKey.P, "插件列表", ctx =>
+                {
+                    var plugins = PluginManager.SnapshotLoadedPlugins();
+                    foreach (var i in plugins)
+                        ctx.WriteLine($"{i.Name} v{i.Version}  by {i.Author}");
+                    if (plugins.Count == 0)
+                        ctx.WriteLine("（没有加载任何插件）", ConsoleColor.DarkGray);
+                    return Task.CompletedTask;
+                });
+                KeyboardManager.SetCommandHandler(uiHost.HandleCommandAsync, uiHost.CompleteCommand);
+                keyboardTask = KeyboardManager.RunAsync(liveDisplayCts.Token);
                 firstRenderGate.TrySetResult();
 
                 bootstrap.SetPhase("server", "HTTP server", LiveDisplaySeverity.Info, "正在启动监听。");
@@ -142,40 +162,19 @@ namespace UmamusumeResponseAnalyzer
                 }
                 if (!Server.IsRunning)
                 {
-                    bootstrap.SetPhase("server", "HTTP server", LiveDisplaySeverity.Error, I18N_LaunchFail.RemoveMarkup());
+                    bootstrap.SetPhase("server", "HTTP server", LiveDisplaySeverity.Error, I18N_LaunchFail);
                     LiveDisplayConsole.WriteLine(I18N_LaunchFail);
                     LiveDisplayConsole.ReadLine();
                     Environment.Exit(1);
                 }
 
-                var startedMessage = I18N_Start_Started.RemoveMarkup();
+                var startedMessage = I18N_Start_Started;
                 bootstrap.Log("URA", startedMessage, LiveDisplaySeverity.Success);
                 bootstrap.SetPhase("started", "宿主", LiveDisplaySeverity.Success, startedMessage);
 
                 await PluginManager.TriggerStartedAsync();
 
                 _ = CheckPluginUpdatesAsync(uiHost);
-
-                KeyboardManager.Register(
-                    ConsoleKey.C, ConsoleModifiers.Control,
-                    "退出程序",
-                    () =>
-                    {
-                        KeyboardManager.Stop();
-                        uiHost.RequestShutdown();
-                        return Task.CompletedTask;
-                    });
-                KeyboardManager.Register(ConsoleKey.P, "插件列表", ctx =>
-                {
-                    var plugins = PluginManager.SnapshotLoadedPlugins();
-                    foreach (var i in plugins)
-                        ctx.WriteLine($"{i.Name} v{i.Version}  by {i.Author}");
-                    if (plugins.Count == 0)
-                        ctx.WriteLine("（没有加载任何插件）", ConsoleColor.DarkGray);
-                    return Task.CompletedTask;
-                });
-                KeyboardManager.SetCommandHandler(uiHost.HandleCommandAsync, uiHost.CompleteCommand);
-                keyboardTask = KeyboardManager.RunAsync(liveDisplayCts.Token);
 
                 await Task.WhenAny(uiTask, keyboardTask);
             }
@@ -187,7 +186,6 @@ namespace UmamusumeResponseAnalyzer
                 uiHost.RequestShutdown();
                 KeyboardManager.OverlaySink = null;
                 KeyboardManager.SetCommandHandler(null);
-                LiveDisplayConsole.Unbind(uiHost);
             }
 
             try
@@ -196,6 +194,10 @@ namespace UmamusumeResponseAnalyzer
             }
             catch (OperationCanceledException) when (!uiTask.IsFaulted && !keyboardTask.IsFaulted)
             {
+            }
+            finally
+            {
+                LiveDisplayConsole.Unbind(uiHost);
             }
         }
 
@@ -240,7 +242,8 @@ namespace UmamusumeResponseAnalyzer
                     "URA",
                     FormatPluginUpdateNotification(updates),
                     LiveDisplaySeverity.Info,
-                    DateTimeOffset.Now.AddSeconds(12)));
+                    DateTimeOffset.Now.AddSeconds(12),
+                    []));
 
                 foreach (var update in updates)
                 {
@@ -248,8 +251,7 @@ namespace UmamusumeResponseAnalyzer
                         Workspace: null,
                         "URA",
                         $"插件 {update.DisplayName} 有新版本可用: {update.CurrentVersion} -> {update.LatestVersion}",
-                        LiveDisplaySeverity.Info,
-                        IsMarkup: false));
+                        LiveDisplaySeverity.Info));
                 }
             }
             catch (Exception ex)
@@ -259,7 +261,8 @@ namespace UmamusumeResponseAnalyzer
                     "URA",
                     $"插件更新检查失败: {ex.Message}",
                     LiveDisplaySeverity.Warning,
-                    LiveDisplayNotification.ExpiresAtFromNow(LiveDisplaySeverity.Warning)));
+                    LiveDisplayNotification.ExpiresAtFromNow(LiveDisplaySeverity.Warning),
+                    []));
             }
         }
 
@@ -282,10 +285,9 @@ namespace UmamusumeResponseAnalyzer
             LiveDisplayConsole.WriteLine("推荐使用Windows终端(Windows Terminal)，并将启动大小设置为120列35行以获得更好的体验。");
             LiveDisplayConsole.WriteLine();
 
-            var mobileOrPc = LiveDisplayConsole.Prompt(
-                new SelectionPrompt<string>()
-                .Title("请选择运行UM:PD的设备")
-                .AddChoices(["手机/模拟器以及此计算机", "此计算机"]));
+            var mobileOrPc = LiveDisplayConsole.Select(
+                "请选择运行UM:PD的设备",
+                new[] { "手机/模拟器以及此计算机", "此计算机" });
             if (mobileOrPc == "手机/模拟器以及此计算机")
             {
                 Config.Core.ListenAddress = "0.0.0.0";
@@ -297,10 +299,9 @@ namespace UmamusumeResponseAnalyzer
             }
             LiveDisplayConsole.WriteLine();
 
-            var targets = LiveDisplayConsole.Prompt(
-                new MultiSelectionPrompt<string>()
-                .Title("请选择你所使用的UM:PD版本，只选择繁中服的话就不会显示未来才能使用的插件防止报错。")
-                .AddChoices(["日服(Cygames)", "繁中服(Komoe)"]));
+            var targets = LiveDisplayConsole.MultiSelect(
+                "请选择你所使用的UM:PD版本，只选择繁中服的话就不会显示未来才能使用的插件防止报错。",
+                new[] { "日服(Cygames)", "繁中服(Komoe)" });
             foreach (var target in targets)
             {
                 switch (target)
@@ -314,44 +315,38 @@ namespace UmamusumeResponseAnalyzer
                 }
             }
 
-            var dbLang = LiveDisplayConsole.Prompt(
-                new SelectionPrompt<string>()
-                .Title("请选择事件数据语言，选择繁中等将会使用对应客户端已实装的内容翻译。不会影响实际效果及数据库总大小。")
-                .AddChoices(["日文", "繁中"]));
+            var dbLang = LiveDisplayConsole.Select(
+                "请选择事件数据语言，选择繁中等将会使用对应客户端已实装的内容翻译。不会影响实际效果及数据库总大小。",
+                new[] { "日文", "繁中" });
             Config.Updater.DatabaseLanguage = dbLang == "繁中" ? "zh-TW" : "ja-JP";
 
-            var trainerGender = LiveDisplayConsole.Prompt(
-                new SelectionPrompt<string>()
-                .Title("请选择训练员性别，用于精确显示事件选项。")
-                .AddChoices(["男", "女"]));
+            var trainerGender = LiveDisplayConsole.Select(
+                "请选择训练员性别，用于精确显示事件选项。",
+                new[] { "男", "女" });
             Config.Updater.TrainerIsMale = trainerGender == "男";
 
-            LiveDisplayConsole.MarkupLine("在正式开始使用之前，请先[green]更新数据文件[/]并根据需求[green]前往[[插件仓库]]安装自己需要的插件[/]。");
-            LiveDisplayConsole.MarkupLine("否则URA将[red]没有任何功能[/]。");
+            LiveDisplayConsole.WriteLine("在正式开始使用之前，请先更新数据文件并根据需求前往[插件仓库]安装自己需要的插件。");
+            LiveDisplayConsole.WriteLine("否则 URA 将没有任何功能。");
         }
         static async Task<string> ShowMenu()
         {
-            var selections = new SelectionPrompt<string>()
-                .Title(I18N_Instruction)
-                .WrapAround(true)
-                .AddChoices(
-                [
+            var selections = new List<string>
+            {
                     I18N_Start,
                     I18N_Options,
                     "插件仓库",
                     I18N_UpdateAssets,
                     I18N_UpdateProgram,
                     "加入QQ群（号被封过之后在频道里说话会概率被夹"
-                ]
-                );
+            };
             #region 条件显示功能
             // Windows限定功能，其他平台不显示
             if (OperatingSystem.IsWindows())
             {
-                selections.AddChoice(I18N_InstallUraCore);
+                selections.Add(I18N_InstallUraCore);
             }
             #endregion
-            var prompt = LiveDisplayConsole.Prompt(selections);
+            var prompt = LiveDisplayConsole.Select(I18N_Instruction, selections);
             if (prompt == I18N_Options)
             {
                 Config.Prompt();
@@ -371,13 +366,13 @@ namespace UmamusumeResponseAnalyzer
             else if (prompt == I18N_InstallUraCore && UraCoreHelper.GamePaths.Count != 0)
             {
                 LiveDisplayConsole.Clear();
-                var target = LiveDisplayConsole.Prompt(new TextPrompt<string>("请选择想要安装的Mod: ").AddChoices(["umamusume-localify", "Hachimi"]).DefaultValue("Hachimi"));
+                var target = LiveDisplayConsole.Select("请选择想要安装的 Mod", new[] { "umamusume-localify", "Hachimi" });
                 LiveDisplayConsole.WriteLine(I18N_UraCoreHelper_FoundPaths, UraCoreHelper.GamePaths.Count);
 
                 foreach (var i in UraCoreHelper.GamePaths)
                 {
                     LiveDisplayConsole.WriteLine(I18N_UraCoreHelper_FoundAvailablePath, i);
-                    var confirm = LiveDisplayConsole.Prompt(new ConfirmationPrompt($"是否需要将{target}安装到{i}？该操作需要管理员权限。"));
+                    var confirm = LiveDisplayConsole.Confirm($"是否需要将 {target} 安装到 {i}？该操作需要管理员权限。");
                     if (confirm)
                     {
                         using var proc = new Process();

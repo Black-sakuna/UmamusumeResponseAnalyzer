@@ -4,8 +4,7 @@ using Gallop;
 using Gallop.Endpoints;
 using MessagePack;
 using Newtonsoft.Json.Linq;
-using Spectre.Console;
-using Spectre.Console.Rendering;
+using Terminal.Gui.ViewBase;
 using UmamusumeResponseAnalyzer.LiveDisplay;
 using UmamusumeResponseAnalyzer.Plugin;
 using Xunit;
@@ -629,9 +628,8 @@ namespace UmamusumeResponseAnalyzer.Tests
         public void PluginLoadContext_ResolvesSharedAbiAssemblyFromDefaultContext()
         {
             var ctx = new PluginManager.PluginLoadContext("shared-abi-test");
-            var recording = new StringWriter();
-            var originalConsole = AnsiConsole.Console;
-            AnsiConsole.Console = AnsiConsole.Create(new AnsiConsoleSettings { Out = new AnsiConsoleOutput(recording) });
+            var uiHost = new UiHost();
+            LiveDisplayConsole.Bind(uiHost);
             try
             {
                 var host = ctx.LoadFromAssemblyName(typeof(IPlugin).Assembly.GetName());
@@ -649,17 +647,20 @@ namespace UmamusumeResponseAnalyzer.Tests
                     Version = new Version(99, 0, 0, 0),
                 };
                 Assert.Same(typeof(Server).Assembly, ctx.LoadFromAssemblyName(futureHostVersion));
-                Assert.Contains("插件依赖的宿主 ABI 版本更高", recording.ToString());
+                uiHost.RenderSnapshotForTests();
+                Assert.Contains(
+                    uiHost.GetLogsForTests(null),
+                    line => line.Text.Contains("插件依赖的宿主 ABI 版本更高", StringComparison.Ordinal));
 
-                var wrongSpectreVersion = new AssemblyName(typeof(ProgressContext).Assembly.GetName().Name!)
+                var wrongTerminalGuiVersion = new AssemblyName(typeof(View).Assembly.GetName().Name!)
                 {
                     Version = new Version(99, 0, 0, 0),
                 };
-                Assert.Throws<FileLoadException>(() => ctx.LoadFromAssemblyName(wrongSpectreVersion));
+                Assert.Throws<FileLoadException>(() => ctx.LoadFromAssemblyName(wrongTerminalGuiVersion));
             }
             finally
             {
-                AnsiConsole.Console = originalConsole;
+                LiveDisplayConsole.Unbind(uiHost);
                 ctx.Unload();
             }
         }
@@ -706,7 +707,6 @@ namespace UmamusumeResponseAnalyzer.Tests
             public string Author => "Test";
             public string[] Targets => [];
             public virtual void Initialize(IPluginContext context) { }
-            public Task UpdatePlugin(ProgressContext ctx) => Task.CompletedTask;
         }
 
         sealed class RandomDtoFactory(int seed)
@@ -1170,13 +1170,16 @@ namespace UmamusumeResponseAnalyzer.Tests
         sealed class FakeLiveDisplayOutput : ILiveDisplayOutput
         {
             public LiveDisplayWorkspace? CurrentWorkspace => null;
-            public LiveDisplayWorkspace CreateWorkspace(string title) => LiveDisplayWorkspace.Create(title);
+            public LiveDisplayWorkspace CreateWorkspace(string title, int historyCapacity = 0) => LiveDisplayWorkspace.Create(title);
+            public void RemoveWorkspace(LiveDisplayWorkspace workspace) { }
+            public void CaptureWorkspaceSnapshot(LiveDisplayWorkspace workspace) { }
             public void SwitchWorkspace(LiveDisplayWorkspace workspace) { }
             public void BindWorkspaceHotkey(LiveDisplayWorkspace workspace, ConsoleKey key, ConsoleModifiers modifiers = 0, string? description = null) { }
-            public void SetPanel(LiveDisplayWorkspace workspace, string key, string title, IRenderable content, bool fullBleed = false) { }
+            public void SetPanel(LiveDisplayWorkspace workspace, string key, string title, LiveDisplayContent content, bool fullBleed = false, bool switchToWorkspace = true) { }
+            public void Log(string text, LiveDisplaySeverity severity = LiveDisplaySeverity.Info) { }
             public void Log(LiveDisplayWorkspace workspace, string text, LiveDisplaySeverity severity = LiveDisplaySeverity.Info) { }
-            public void MarkupLog(LiveDisplayWorkspace workspace, string markup, LiveDisplaySeverity severity = LiveDisplaySeverity.Info) { }
-            public void Notify(LiveDisplayWorkspace workspace, string text, LiveDisplaySeverity severity = LiveDisplaySeverity.Info, TimeSpan? ttl = null) { }
+            public void Notify(string text, LiveDisplaySeverity severity = LiveDisplaySeverity.Info, TimeSpan? ttl = null, params LiveDisplayShortcut[] shortcuts) { }
+            public void Notify(LiveDisplayWorkspace workspace, string text, LiveDisplaySeverity severity = LiveDisplaySeverity.Info, TimeSpan? ttl = null, params LiveDisplayShortcut[] shortcuts) { }
         }
     }
 }

@@ -1,6 +1,5 @@
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
-using Spectre.Console;
 using System.Diagnostics;
 using System.Globalization;
 using System.Net;
@@ -39,19 +38,8 @@ namespace UmamusumeResponseAnalyzer
             var path = Path.Combine(Path.GetTempPath(), "latest-UmamusumeResponseAnalyzer.exe");
             try
             {
-                await LiveDisplayConsole.RunProgressAsync(p =>
-                    p.Columns(
-                    [
-                        new TaskDescriptionColumn(),
-                        new ProgressBarColumn(),
-                        new PercentageColumn(),
-                        new RemainingTimeColumn(),
-                        new SpinnerColumn()
-                    ])
-                    .StartAsync(async ctx =>
-                    {
-                        await Download(ctx, I18N_DownloadProgramInstruction, path);
-                    }));
+                await LiveDisplayConsole.RunProgressAsync(
+                    progress => Download(progress, I18N_DownloadProgramInstruction, path));
             }
             catch (Exception ex)
             {
@@ -90,7 +78,7 @@ namespace UmamusumeResponseAnalyzer
                 }
                 if (string.IsNullOrEmpty(output))
                 {
-                    LiveDisplayConsole.MarkupLine(I18N_UpdatedFileCorrupted);
+                LiveDisplayConsole.WriteLine(I18N_UpdatedFileCorrupted);
                     File.Delete(Path.Combine(Path.GetTempPath(), "latest-UmamusumeResponseAnalyzer.exe"));
                     return;
                 }
@@ -151,26 +139,17 @@ namespace UmamusumeResponseAnalyzer
         {
             try
             {
-                await LiveDisplayConsole.RunProgressAsync(p =>
-                    p.Columns(
-                    [
-                        new TaskDescriptionColumn(),
-                        new ProgressBarColumn(),
-                        new PercentageColumn(),
-                        new RemainingTimeColumn(),
-                        new SpinnerColumn()
-                    ])
-                    .StartAsync(ctx => Task.WhenAll(
-                    [
-                        Download(ctx, I18N_DownloadEventsInstruction, Database.EVENT_NAME_FILEPATH),
-                        Download(ctx, I18N_DownloadNamesInstruction, Database.NAMES_FILEPATH),
-                        Download(ctx, I18N_DownloadSkillDataInstruction, Database.SKILLS_FILEPATH),
-                        Download(ctx, I18N_DownloadTalentSkillInstruction, Database.TALENT_SKILLS_FILEPATH),
-                        Download(ctx, I18N_DownloadFactorIdsInstruction, Database.FACTOR_IDS_FILEPATH),
-                        Download(ctx, I18N_DownloadSkillUpgradeSpecialityInstruction, Database.SKILL_UPGRADE_SPECIALITY_FILEPATH),
-                        Download(ctx, Database.SADDLE_IDS_FILEPATH, Database.SADDLE_IDS_FILEPATH),
-                        Download(ctx, Database.SUCCESSION_RELATION_FILEPATH, Database.SUCCESSION_RELATION_FILEPATH)
-                    ])));
+                await LiveDisplayConsole.RunProgressAsync(progress => Task.WhenAll(
+                [
+                    Download(progress, I18N_DownloadEventsInstruction, Database.EVENT_NAME_FILEPATH),
+                    Download(progress, I18N_DownloadNamesInstruction, Database.NAMES_FILEPATH),
+                    Download(progress, I18N_DownloadSkillDataInstruction, Database.SKILLS_FILEPATH),
+                    Download(progress, I18N_DownloadTalentSkillInstruction, Database.TALENT_SKILLS_FILEPATH),
+                    Download(progress, I18N_DownloadFactorIdsInstruction, Database.FACTOR_IDS_FILEPATH),
+                    Download(progress, I18N_DownloadSkillUpgradeSpecialityInstruction, Database.SKILL_UPGRADE_SPECIALITY_FILEPATH),
+                    Download(progress, Database.SADDLE_IDS_FILEPATH, Database.SADDLE_IDS_FILEPATH),
+                    Download(progress, Database.SUCCESSION_RELATION_FILEPATH, Database.SUCCESSION_RELATION_FILEPATH)
+                ]));
             }
             catch (Exception ex)
             {
@@ -179,7 +158,7 @@ namespace UmamusumeResponseAnalyzer
                 return;
             }
 
-            LiveDisplayConsole.MarkupLine(I18N_DownloadedInstruction);
+            LiveDisplayConsole.WriteLine(I18N_DownloadedInstruction);
             LiveDisplayConsole.ReadKey();
         }
         static string GetDownloadUrl(string filepath)
@@ -194,7 +173,7 @@ namespace UmamusumeResponseAnalyzer
                 ".exe" => ProgramUrl
             };
         }
-        public static async Task Download(ProgressContext ctx = null!, string instruction = null!, string path = null!)
+        internal static async Task Download(IProgress<DownloadProgress>? progress = null, string? instruction = null, string? path = null)
         {
             if (string.IsNullOrWhiteSpace(path))
                 throw new ArgumentException("下载目标路径不能为空。", nameof(path));
@@ -203,14 +182,13 @@ namespace UmamusumeResponseAnalyzer
             var fullPath = Path.GetFullPath(path);
             var directory = Path.GetDirectoryName(fullPath)!;
             var tempPath = Path.Combine(directory, $".{Path.GetFileName(fullPath)}.{Guid.NewGuid():N}.tmp");
-            ProgressTask? task = null;
             try
             {
                 using var response = await HttpClient.GetAsync(downloadURL, HttpCompletionOption.ResponseHeadersRead);
                 response.EnsureSuccessStatusCode();
-                task = ctx?.AddTask(instruction, false);
-                task?.MaxValue(response.Content.Headers.ContentLength ?? 0);
-                task?.StartTask();
+                var total = response.Content.Headers.ContentLength ?? 0;
+                long completed = 0;
+                progress?.Report(new(instruction ?? Path.GetFileName(path), completed, total));
 
                 using (var contentStream = await response.Content.ReadAsStreamAsync())
                 using (var fileStream = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 8192, true))
@@ -221,7 +199,8 @@ namespace UmamusumeResponseAnalyzer
                         var read = await contentStream.ReadAsync(buffer);
                         if (read == 0)
                             break;
-                        task?.Increment(read);
+                        completed += read;
+                        progress?.Report(new(instruction ?? Path.GetFileName(path), completed, total));
                         await fileStream.WriteAsync(buffer.AsMemory(0, read));
                     }
                 }
@@ -230,19 +209,16 @@ namespace UmamusumeResponseAnalyzer
             }
             catch (Exception) when (new Uri(downloadURL).Host == "raw.githubusercontent.com")
             {
-                LiveDisplayConsole.MarkupLine(I18N_AccessGithubFail, downloadURL.EscapeMarkup());
+                LiveDisplayConsole.WriteLine(I18N_AccessGithubFail, downloadURL);
                 throw;
             }
             catch
             {
-                LiveDisplayConsole.MarkupLine(I18N_AccessMirrorFail, downloadURL.EscapeMarkup());
+                LiveDisplayConsole.WriteLine(I18N_AccessMirrorFail, downloadURL);
                 throw;
             }
             finally
             {
-                // 下载失败也必须结束 task，否则 Spectre Progress 会一直渲染卡住的进度条
-                if (task is { IsFinished: false })
-                    task.StopTask();
                 if (File.Exists(tempPath))
                 {
                     try { File.Delete(tempPath); }
@@ -252,4 +228,6 @@ namespace UmamusumeResponseAnalyzer
             }
         }
     }
+
+    internal sealed record DownloadProgress(string Description, long Completed, long Total);
 }

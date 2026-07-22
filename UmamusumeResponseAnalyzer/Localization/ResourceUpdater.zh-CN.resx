@@ -148,15 +148,15 @@
     <value>正在从GitHub下载最新的talentskillsets.br</value>
   </data>
   <data name="I18N_UpdatedFileCorrupted" xml:space="preserve">
-    <value>[red]更新文件受损，主程序更新失败[/]</value>
+    <value>更新文件受损，主程序更新失败</value>
   </data>
   <data name="I18N_DownloadingCmder" xml:space="preserve">
     <value>正在下载cmder.zip</value>
   </data>
   <data name="I18N_AccessGithubFail" xml:space="preserve">
-    <value>{0}: [red]无法连接到GitHub，请尝试使用代理[/]</value>
+    <value>{0}: 无法连接到GitHub，请尝试使用代理</value>
   </data>
   <data name="I18N_AccessMirrorFail" xml:space="preserve">
-    <value>{0}: [red]无法连接到更新服务器，请尝试在设置中启用"强制使用GitHub更新"后再试[/]</value>
+    <value>{0}: 无法连接到更新服务器，请尝试在设置中启用"强制使用GitHub更新"后再试</value>
   </data>
 </root>

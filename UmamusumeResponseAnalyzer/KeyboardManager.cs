@@ -1,28 +1,44 @@
 using System.Collections.Concurrent;
 using System.Reflection;
+using System.Runtime.ExceptionServices;
 using UmamusumeResponseAnalyzer.LiveDisplay;
 
 namespace UmamusumeResponseAnalyzer
 {
     public static class KeyboardManager
     {
-        public record HotkeyEntry(
-            string Description,
-            Func<Task> Handler,
-            object? Owner = null,
-            Assembly? DeclaringAssembly = null);
+        public sealed class HotkeyEntry(
+            string description,
+            Func<Task> handler,
+            object? owner = null,
+            Assembly? declaringAssembly = null)
+        {
+            public string Description { get; } = description;
+            public Func<Task> Handler { get; } = handler;
+            public object? Owner { get; } = owner;
+            public Assembly? DeclaringAssembly { get; } = declaringAssembly;
+        }
 
         const int PollIntervalMs = 50;
+        const int MouseWheelDelta = 120;
 
         static readonly ConcurrentDictionary<(ConsoleKey Key, ConsoleModifiers Modifiers), HotkeyEntry> hotkeys = [];
+        static readonly object inputSync = new();
         static readonly object popupSync = new();
+        static readonly object notificationShortcutSync = new();
         static readonly object commandInputSync = new();
+        static readonly Dictionary<long, NotificationShortcutRegistration> notificationShortcutRegistrations = [];
 
         static KeyboardPopup? activePopup;
+        static IReadOnlyList<TransientShortcutEntry> popupShortcuts = [];
         static CancellationTokenSource? runCts;
         static CancellationTokenSource? popupAutoCloseCts;
+        static IConsoleInputSession? activeConsoleInputSession;
+        static int forceManagedInput;
         static int inputSuspensionCount;
+        static int mouseWheelRemainder;
         static int popupGeneration;
+        static long notificationShortcutRegistrationId;
         static readonly AsyncLocal<object?> registrationOwner = new();
         static string commandBuffer = string.Empty;
         static readonly List<string> commandHistory = [];
@@ -34,6 +50,46 @@ namespace UmamusumeResponseAnalyzer
 
         public static TimeSpan PopupAutoCloseDelay { get; set; } = TimeSpan.FromSeconds(3);
         internal static IKeyboardOverlaySink? OverlaySink { get; set; }
+        internal static Func<IConsoleInputSession?>? ConsoleInputSessionFactoryOverrideForTests { get; set; }
+        internal static bool IsRunning => Volatile.Read(ref runCts) is not null;
+        internal static bool IsManagedInputForced => Volatile.Read(ref forceManagedInput) != 0;
+
+        internal static CancellationToken GetInputCancellationToken()
+        {
+            var currentRun = Volatile.Read(ref runCts);
+            if (currentRun is null)
+                return CancellationToken.None;
+
+            try
+            {
+                return currentRun.Token;
+            }
+            catch (ObjectDisposedException)
+            {
+                return CancellationToken.None;
+            }
+        }
+
+        internal static void ForceManagedInputForProcess()
+        {
+            Volatile.Write(ref forceManagedInput, 1);
+        }
+
+        internal static IConsoleInputSession? GetSuspendedConsoleInputSession()
+        {
+            lock (inputSync)
+            {
+                return inputSuspensionCount > 0
+                    ? activeConsoleInputSession
+                    : null;
+            }
+        }
+
+        internal static void RefreshConsoleInputMode()
+        {
+            lock (inputSync)
+                activeConsoleInputSession?.RefreshMode();
+        }
 
         public static void Register(
             ConsoleKey key,
@@ -74,7 +130,16 @@ namespace UmamusumeResponseAnalyzer
             Register(key, 0, description, handler);
         }
 
-        static void RegisterCore(
+        internal static HotkeyEntry RegisterTracked(
+            ConsoleKey key,
+            ConsoleModifiers modifiers,
+            string description,
+            Func<Task> handler)
+        {
+            return RegisterCore(key, modifiers, description, handler);
+        }
+
+        static HotkeyEntry RegisterCore(
             ConsoleKey key,
             ConsoleModifiers modifiers,
             string description,
@@ -87,16 +152,28 @@ namespace UmamusumeResponseAnalyzer
                 throw new InvalidOperationException($"Ctrl+{key} 由终端保留，不能注册为热键。");
             }
 
-            hotkeys[(key, modifiers)] = new(
+            var entry = new HotkeyEntry(
                 description,
                 handler,
                 registrationOwner.Value,
                 declaringAssembly ?? AssemblyOf(handler));
+            hotkeys[(key, modifiers)] = entry;
+            return entry;
         }
 
         public static bool Unregister(ConsoleKey key, ConsoleModifiers modifiers = 0)
         {
             return hotkeys.TryRemove((key, modifiers), out _);
+        }
+
+        internal static bool Unregister(
+            ConsoleKey key,
+            ConsoleModifiers modifiers,
+            HotkeyEntry entry)
+        {
+            return hotkeys.TryRemove(new KeyValuePair<(ConsoleKey Key, ConsoleModifiers Modifiers), HotkeyEntry>(
+                (key, modifiers),
+                entry));
         }
 
         public static void SetCommandHandler(Func<string, Task>? handler)
@@ -120,6 +197,7 @@ namespace UmamusumeResponseAnalyzer
         public static void UnregisterAll()
         {
             hotkeys.Clear();
+            ClearTransientShortcuts();
         }
 
         public static IDisposable RegisterScope(object owner)
@@ -137,7 +215,7 @@ namespace UmamusumeResponseAnalyzer
                 if (ReferenceEquals(entry.Owner, owner) && hotkeys.TryRemove(combo, out _))
                     count++;
             }
-            return count;
+            return count + RemoveTransientShortcuts(entry => ReferenceEquals(entry.Owner, owner));
         }
 
         sealed class RegistrationScope(object? previous) : IDisposable
@@ -170,9 +248,23 @@ namespace UmamusumeResponseAnalyzer
             {
                 SetCommandHandler(null);
             }
+
+            RemoveTransientShortcuts(entry =>
+                entry.DeclaringAssembly is not null && assemblies.Contains(entry.DeclaringAssembly));
         }
 
         public static IReadOnlyDictionary<(ConsoleKey Key, ConsoleModifiers Modifiers), HotkeyEntry> Hotkeys => hotkeys;
+        internal static int TransientShortcutCountForTests
+        {
+            get
+            {
+                int popupCount;
+                lock (popupSync)
+                    popupCount = popupShortcuts.Count;
+                lock (notificationShortcutSync)
+                    return popupCount + notificationShortcutRegistrations.Values.Sum(x => x.Shortcuts.Count);
+            }
+        }
 
         public static void Stop()
         {
@@ -187,10 +279,42 @@ namespace UmamusumeResponseAnalyzer
 
         public static IDisposable SuspendInput()
         {
-            Interlocked.Increment(ref inputSuspensionCount);
-            HidePopup();
-            CancelCommandInput();
-            return new InputSuspension();
+            lock (inputSync)
+            {
+                if (inputSuspensionCount == 0)
+                    activeConsoleInputSession?.Suspend();
+
+                checked
+                {
+                    inputSuspensionCount++;
+                }
+                mouseWheelRemainder = 0;
+            }
+
+            try
+            {
+                HidePopup();
+                CancelCommandInput();
+                return new InputSuspension();
+            }
+            catch
+            {
+                try
+                {
+                    ResumeInput();
+                }
+                catch (Exception ex)
+                {
+                    try
+                    {
+                        LiveDisplayConsole.LogSecondaryInputFailure("恢复", ex);
+                    }
+                    catch
+                    {
+                    }
+                }
+                throw;
+            }
         }
 
         public static string FormatKeyCombo(ConsoleKey key, ConsoleModifiers modifiers)
@@ -236,63 +360,302 @@ namespace UmamusumeResponseAnalyzer
             if (Interlocked.CompareExchange(ref runCts, linkedCts, null) is not null)
                 throw new InvalidOperationException("KeyboardManager.RunAsync 已在运行中。");
 
+            IConsoleInputSession? inputSession = null;
             var treatControlCAsInputChanged = false;
             var previousTreatControlCAsInput = false;
-            try
-            {
-                previousTreatControlCAsInput = Console.TreatControlCAsInput;
-                Console.TreatControlCAsInput = true;
-                treatControlCAsInputChanged = true;
-            }
-            catch (IOException)
-            {
-            }
+            ExceptionDispatchInfo? primaryFailure = null;
+            Exception? cleanupFailure = null;
 
             try
             {
-                while (!linkedCts.Token.IsCancellationRequested)
+                WindowsConsoleInputException? initializationFailure = null;
+                await LiveDisplayConsole.ConsoleInputGate.WaitAsync(linkedCts.Token);
+                try
                 {
-                    if (Volatile.Read(ref inputSuspensionCount) > 0)
+                    lock (inputSync)
                     {
-                        await DelayPollAsync(linkedCts.Token);
-                        continue;
-                    }
+                        mouseWheelRemainder = 0;
+                        try
+                        {
+                            if (ConsoleInputSessionFactoryOverrideForTests is { } factory)
+                            {
+                                inputSession = factory();
+                            }
+                            else if (Volatile.Read(ref forceManagedInput) == 0 &&
+                                     WindowsConsoleInputSession.TryCreate(out var windowsSession))
+                            {
+                                inputSession = windowsSession;
+                            }
+                        }
+                        catch (WindowsConsoleInputException ex) when (ex.SecondaryNativeErrorCode is null)
+                        {
+                            initializationFailure = ex;
+                        }
 
-                    if (!TryKeyAvailable())
-                    {
-                        await DelayPollAsync(linkedCts.Token);
-                        continue;
-                    }
+                        if (inputSession is null && ConsoleInputSessionFactoryOverrideForTests is null)
+                            ForceManagedInputForProcess();
 
-                    ConsoleKeyInfo keyInfo;
-                    try
-                    {
-                        keyInfo = Console.ReadKey(intercept: true);
-                    }
-                    catch (InvalidOperationException)
-                    {
-                        break;
-                    }
+                        if (inputSession is not null)
+                        {
+                            activeConsoleInputSession = inputSession;
+                            if (inputSuspensionCount > 0)
+                            {
+                                try
+                                {
+                                    inputSession.Suspend();
+                                }
+                                catch (WindowsConsoleInputException ex)
+                                {
+                                    activeConsoleInputSession = null;
+                                    try
+                                    {
+                                        inputSession.Dispose();
+                                    }
+                                    catch (WindowsConsoleInputException restoreFailure)
+                                    {
+                                        throw new WindowsConsoleInputException(
+                                            ex.Stage,
+                                            ex.NativeErrorCode,
+                                            restoreFailure.NativeErrorCode);
+                                    }
 
-                    await HandleKeyAsync(keyInfo);
+                                    inputSession = null;
+                                    initializationFailure = ex;
+                                    if (ConsoleInputSessionFactoryOverrideForTests is null)
+                                        ForceManagedInputForProcess();
+                                }
+                            }
+                        }
+                    }
                 }
-            }
-            finally
-            {
-                if (treatControlCAsInputChanged)
+                finally
+                {
+                    LiveDisplayConsole.ConsoleInputGate.Release();
+                }
+
+                if (initializationFailure is not null)
+                {
+                    LiveDisplayConsole.Log(
+                        "Keyboard",
+                        $"Windows console input 初始化失败，已使用 managed keyboard：" +
+                        $"stage={initializationFailure.Stage}, error={initializationFailure.NativeErrorCode}, " +
+                        initializationFailure.Message,
+                        LiveDisplaySeverity.Warning);
+                }
+
+                if (inputSession is not null)
+                {
+                    await RunNativeInputLoopAsync(inputSession, linkedCts.Token);
+                }
+                else
                 {
                     try
                     {
-                        Console.TreatControlCAsInput = previousTreatControlCAsInput;
+                        previousTreatControlCAsInput = Console.TreatControlCAsInput;
+                        Console.TreatControlCAsInput = true;
+                        treatControlCAsInputChanged = true;
                     }
                     catch (IOException)
                     {
                     }
+
+                    await RunManagedInputLoopAsync(linkedCts.Token);
+                }
+            }
+            catch (OperationCanceledException) when (linkedCts.IsCancellationRequested)
+            {
+            }
+            catch (Exception ex)
+            {
+                if (ex is WindowsConsoleInputException { SecondaryNativeErrorCode: not null })
+                    ForceManagedInputForProcess();
+                primaryFailure = ExceptionDispatchInfo.Capture(ex);
+                try
+                {
+                    linkedCts.Cancel();
+                }
+                catch (Exception cancellationFailure)
+                {
+                    try
+                    {
+                        LiveDisplayConsole.LogSecondaryInputFailure("cancellation", cancellationFailure);
+                    }
+                    catch
+                    {
+                    }
+                }
+            }
+
+            void RecordCleanupFailure(Exception ex)
+            {
+                if (primaryFailure is null && cleanupFailure is null)
+                {
+                    cleanupFailure = ex;
+                    return;
                 }
 
-                HidePopup();
-                Interlocked.CompareExchange(ref runCts, null, linkedCts);
+                try
+                {
+                    LiveDisplayConsole.LogSecondaryInputFailure("清理", ex);
+                }
+                catch
+                {
+                }
             }
+
+            lock (inputSync)
+                mouseWheelRemainder = 0;
+
+            try
+            {
+                if (inputSession is not null)
+                {
+                    await LiveDisplayConsole.ConsoleInputGate.WaitAsync();
+                    try
+                    {
+                        lock (inputSync)
+                        {
+                            if (ReferenceEquals(activeConsoleInputSession, inputSession))
+                                activeConsoleInputSession = null;
+                            try
+                            {
+                                inputSession.Dispose();
+                            }
+                            catch
+                            {
+                                ForceManagedInputForProcess();
+                                throw;
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        LiveDisplayConsole.ConsoleInputGate.Release();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                RecordCleanupFailure(ex);
+            }
+
+            if (treatControlCAsInputChanged)
+            {
+                try
+                {
+                    Console.TreatControlCAsInput = previousTreatControlCAsInput;
+                }
+                catch (Exception ex)
+                {
+                    RecordCleanupFailure(ex);
+                }
+            }
+
+            try
+            {
+                HidePopup();
+            }
+            catch (Exception ex)
+            {
+                RecordCleanupFailure(ex);
+            }
+
+            Interlocked.CompareExchange(ref runCts, null, linkedCts);
+
+            primaryFailure?.Throw();
+            if (cleanupFailure is not null)
+                ExceptionDispatchInfo.Capture(cleanupFailure).Throw();
+        }
+
+        static async Task RunNativeInputLoopAsync(
+            IConsoleInputSession inputSession,
+            CancellationToken cancellationToken)
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                var input = default(ConsoleInputEvent);
+                bool hasInput;
+                lock (inputSync)
+                {
+                    hasInput = inputSuspensionCount == 0 && inputSession.TryRead(out input);
+                }
+
+                if (!hasInput)
+                {
+                    await DelayPollAsync(cancellationToken);
+                    continue;
+                }
+
+                if (input.Kind == ConsoleInputEventKind.Key)
+                {
+                    await HandleKeyAsync(input.KeyInfo);
+                    continue;
+                }
+
+                await HandleMouseWheelAsync(input.WheelDelta, input.Modifiers, input.IsHorizontal);
+            }
+        }
+
+        static async Task RunManagedInputLoopAsync(CancellationToken cancellationToken)
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                if (Volatile.Read(ref inputSuspensionCount) > 0)
+                {
+                    await DelayPollAsync(cancellationToken);
+                    continue;
+                }
+
+                if (!TryKeyAvailable())
+                {
+                    await DelayPollAsync(cancellationToken);
+                    continue;
+                }
+
+                ConsoleKeyInfo keyInfo;
+                try
+                {
+                    keyInfo = Console.ReadKey(intercept: true);
+                }
+                catch (InvalidOperationException)
+                {
+                    break;
+                }
+
+                await HandleKeyAsync(keyInfo);
+            }
+        }
+
+        internal static async Task HandleMouseWheelAsync(
+            short delta,
+            ConsoleModifiers modifiers,
+            bool isHorizontal = false)
+        {
+            int steps;
+            lock (inputSync)
+            {
+                if (isHorizontal ||
+                    modifiers != 0 ||
+                    inputSuspensionCount > 0 ||
+                    IsInCommandInput() ||
+                    HasActivePopup())
+                {
+                    mouseWheelRemainder = 0;
+                    return;
+                }
+
+                mouseWheelRemainder += delta;
+                steps = mouseWheelRemainder / MouseWheelDelta;
+                mouseWheelRemainder %= MouseWheelDelta;
+            }
+
+            if (steps == 0 || OverlaySink is not { } overlaySink)
+                return;
+
+            var key = steps > 0 ? ConsoleKey.UpArrow : ConsoleKey.DownArrow;
+            var keyInfo = new ConsoleKeyInfo('\0', key, shift: false, alt: false, control: false);
+            for (var remaining = Math.Abs(steps); remaining > 0; remaining--)
+                await overlaySink.TryHandleWorkspaceKeyAsync(keyInfo);
         }
 
         internal static async Task HandleKeyAsync(ConsoleKeyInfo keyInfo)
@@ -303,21 +666,26 @@ namespace UmamusumeResponseAnalyzer
                 return;
             }
 
-            if (HasActivePopup())
-            {
-                if (await HandlePopupKeyAsync(keyInfo))
-                    return;
-
-                if (await TryHandleHotkeyAsync(keyInfo))
-                    return;
-
+            if (await TryHandlePopupShortcutAsync(keyInfo))
                 return;
-            }
+
+            if (await TryHandleNotificationShortcutAsync(keyInfo))
+                return;
+
+            var hasActivePopup = HasActivePopup();
+            if (hasActivePopup && await HandlePopupKeyAsync(keyInfo))
+                return;
+
+            if (!hasActivePopup &&
+                OverlaySink is { } overlaySink &&
+                await overlaySink.TryHandleWorkspaceKeyAsync(keyInfo))
+                return;
 
             if (await TryHandleHotkeyAsync(keyInfo))
                 return;
 
-            TryBeginCommandInput(keyInfo);
+            if (!hasActivePopup)
+                TryBeginCommandInput(keyInfo);
         }
 
         static async Task HandleCommandInputKeyAsync(ConsoleKeyInfo keyInfo)
@@ -627,7 +995,54 @@ namespace UmamusumeResponseAnalyzer
                 return false;
 
             HidePopup();
-            await InvokeSafely(entry.Handler);
+            await InvokeSafely(entry);
+            return true;
+        }
+
+        static async Task<bool> TryHandlePopupShortcutAsync(ConsoleKeyInfo keyInfo)
+        {
+            HotkeyEntry? entry;
+            lock (popupSync)
+            {
+                entry = activePopup is null
+                    ? null
+                    : popupShortcuts.LastOrDefault(x =>
+                        x.Key == keyInfo.Key && x.Modifiers == keyInfo.Modifiers)?.Entry;
+            }
+
+            if (entry is null)
+                return false;
+
+            await InvokeSafely(entry);
+            return true;
+        }
+
+        static async Task<bool> TryHandleNotificationShortcutAsync(ConsoleKeyInfo keyInfo)
+        {
+            HotkeyEntry? entry = null;
+            var latestRegistrationId = 0L;
+            lock (notificationShortcutSync)
+            {
+                RemoveExpiredNotificationShortcutsLocked(DateTimeOffset.Now);
+                foreach (var registration in notificationShortcutRegistrations.Values)
+                {
+                    if (registration.Id <= latestRegistrationId)
+                        continue;
+
+                    var candidate = registration.Shortcuts.LastOrDefault(x =>
+                        x.Key == keyInfo.Key && x.Modifiers == keyInfo.Modifiers);
+                    if (candidate is null)
+                        continue;
+
+                    latestRegistrationId = registration.Id;
+                    entry = candidate.Entry;
+                }
+            }
+
+            if (entry is null)
+                return false;
+
+            await InvokeSafely(entry);
             return true;
         }
 
@@ -743,14 +1158,19 @@ namespace UmamusumeResponseAnalyzer
             var overlaySink = OverlaySink ?? throw new InvalidOperationException("Keyboard popup 需要先绑定 LiveDisplay overlay sink。");
             KeyboardPopup shownPopup;
             int generation;
+            var shortcuts = CreateTransientShortcutEntries(popup.Shortcuts ?? []);
             lock (popupSync)
             {
-                shownPopup = NormalizePopupForDisplay(popup, Math.Max(0, popup.ScrollOffset), refreshExpiresAt: true);
+                shownPopup = NormalizePopupForDisplay(
+                    popup with { Shortcuts = null },
+                    Math.Max(0, popup.ScrollOffset),
+                    refreshExpiresAt: true);
                 activePopup = shownPopup;
+                popupShortcuts = shortcuts;
                 generation = unchecked(++popupGeneration);
             }
 
-            overlaySink.ShowPopup(shownPopup);
+            overlaySink.ShowPopup(shownPopup, generation);
             SchedulePopupAutoClose(generation, shownPopup.ExpiresAt);
         }
 
@@ -762,6 +1182,7 @@ namespace UmamusumeResponseAnalyzer
         static void HidePopup(int? generation)
         {
             IKeyboardOverlaySink? overlaySink;
+            int hiddenGeneration;
             lock (popupSync)
             {
                 if (generation is not null && generation.Value != popupGeneration)
@@ -771,12 +1192,14 @@ namespace UmamusumeResponseAnalyzer
                     return;
 
                 activePopup = null;
+                popupShortcuts = [];
                 popupGeneration = unchecked(popupGeneration + 1);
+                hiddenGeneration = popupGeneration;
                 CancelPopupAutoCloseLocked();
                 overlaySink = OverlaySink;
             }
 
-            overlaySink?.HidePopup();
+            overlaySink?.HidePopup(hiddenGeneration);
         }
 
         static async Task DelayPollAsync(CancellationToken cancellationToken)
@@ -818,7 +1241,7 @@ namespace UmamusumeResponseAnalyzer
                 generation = unchecked(++popupGeneration);
             }
 
-            OverlaySink?.ShowPopup(popup);
+            OverlaySink?.ShowPopup(popup, generation);
             SchedulePopupAutoClose(generation, popup.ExpiresAt);
         }
 
@@ -864,7 +1287,7 @@ namespace UmamusumeResponseAnalyzer
                 generation = unchecked(++popupGeneration);
             }
 
-            OverlaySink?.ShowPopup(popup);
+            OverlaySink?.ShowPopup(popup, generation);
             SchedulePopupAutoClose(generation, popup.ExpiresAt);
         }
 
@@ -972,6 +1395,110 @@ namespace UmamusumeResponseAnalyzer
             popupAutoCloseCts = null;
         }
 
+        internal static long RegisterNotificationShortcuts(
+            LiveDisplayWorkspace? workspace,
+            DateTimeOffset expiresAt,
+            IReadOnlyList<LiveDisplayShortcut> shortcuts)
+        {
+            ArgumentNullException.ThrowIfNull(shortcuts);
+            if (shortcuts.Count == 0)
+                return 0;
+
+            var entries = CreateTransientShortcutEntries(shortcuts);
+            lock (notificationShortcutSync)
+            {
+                RemoveExpiredNotificationShortcutsLocked(DateTimeOffset.Now);
+                var id = unchecked(++notificationShortcutRegistrationId);
+                notificationShortcutRegistrations[id] = new(id, workspace, expiresAt, entries);
+                return id;
+            }
+        }
+
+        internal static void UnregisterNotificationShortcuts(long registrationId)
+        {
+            if (registrationId == 0)
+                return;
+
+            lock (notificationShortcutSync)
+                notificationShortcutRegistrations.Remove(registrationId);
+        }
+
+        internal static void RemoveNotificationShortcuts(LiveDisplayWorkspace workspace)
+        {
+            lock (notificationShortcutSync)
+            {
+                foreach (var id in notificationShortcutRegistrations
+                    .Where(x => ReferenceEquals(x.Value.Workspace, workspace))
+                    .Select(x => x.Key)
+                    .ToArray())
+                {
+                    notificationShortcutRegistrations.Remove(id);
+                }
+            }
+        }
+
+        static TransientShortcutEntry[] CreateTransientShortcutEntries(IReadOnlyList<LiveDisplayShortcut> shortcuts)
+        {
+            var owner = registrationOwner.Value;
+            var entries = new TransientShortcutEntry[shortcuts.Count];
+            for (var i = 0; i < shortcuts.Count; i++)
+            {
+                var shortcut = shortcuts[i];
+                ArgumentNullException.ThrowIfNull(shortcut);
+                ArgumentNullException.ThrowIfNull(shortcut.Handler);
+                entries[i] = new(
+                    shortcut.Key,
+                    shortcut.Modifiers,
+                    new HotkeyEntry(string.Empty, shortcut.Handler, owner, AssemblyOf(shortcut.Handler)));
+            }
+            return entries;
+        }
+
+        static int RemoveTransientShortcuts(Func<HotkeyEntry, bool> predicate)
+        {
+            var count = 0;
+            lock (popupSync)
+            {
+                var remaining = popupShortcuts.Where(x => !predicate(x.Entry)).ToArray();
+                count += popupShortcuts.Count - remaining.Length;
+                popupShortcuts = remaining;
+            }
+
+            lock (notificationShortcutSync)
+            {
+                foreach (var (id, registration) in notificationShortcutRegistrations.ToArray())
+                {
+                    var remaining = registration.Shortcuts.Where(x => !predicate(x.Entry)).ToArray();
+                    count += registration.Shortcuts.Count - remaining.Length;
+                    if (remaining.Length == 0)
+                        notificationShortcutRegistrations.Remove(id);
+                    else if (remaining.Length != registration.Shortcuts.Count)
+                        notificationShortcutRegistrations[id] = registration with { Shortcuts = remaining };
+                }
+            }
+
+            return count;
+        }
+
+        static void ClearTransientShortcuts()
+        {
+            lock (popupSync)
+                popupShortcuts = [];
+            lock (notificationShortcutSync)
+                notificationShortcutRegistrations.Clear();
+        }
+
+        static void RemoveExpiredNotificationShortcutsLocked(DateTimeOffset now)
+        {
+            foreach (var id in notificationShortcutRegistrations
+                .Where(x => x.Value.ExpiresAt <= now)
+                .Select(x => x.Key)
+                .ToArray())
+            {
+                notificationShortcutRegistrations.Remove(id);
+            }
+        }
+
         static int EstimateVisiblePopupLines()
         {
             try
@@ -1017,6 +1544,59 @@ namespace UmamusumeResponseAnalyzer
             }
         }
 
+        static async Task InvokeSafely(HotkeyEntry entry)
+        {
+            using var scope = entry.Owner is null ? null : RegisterScope(entry.Owner);
+            await InvokeSafely(entry.Handler);
+        }
+
+        sealed record TransientShortcutEntry(
+            ConsoleKey Key,
+            ConsoleModifiers Modifiers,
+            HotkeyEntry Entry);
+
+        sealed record NotificationShortcutRegistration(
+            long Id,
+            LiveDisplayWorkspace? Workspace,
+            DateTimeOffset ExpiresAt,
+            IReadOnlyList<TransientShortcutEntry> Shortcuts);
+
+        static void ResumeInput()
+        {
+            ExceptionDispatchInfo? failure = null;
+            lock (inputSync)
+            {
+                if (inputSuspensionCount == 0)
+                    throw new InvalidOperationException("Keyboard input is not suspended.");
+
+                if (inputSuspensionCount > 1)
+                {
+                    inputSuspensionCount--;
+                    return;
+                }
+
+                mouseWheelRemainder = 0;
+                try
+                {
+                    activeConsoleInputSession?.Resume();
+                }
+                catch (Exception ex)
+                {
+                    failure = ExceptionDispatchInfo.Capture(ex);
+                }
+                finally
+                {
+                    inputSuspensionCount = 0;
+                }
+            }
+
+            if (failure is not null)
+            {
+                Stop();
+                failure.Throw();
+            }
+        }
+
         sealed class InputSuspension : IDisposable
         {
             int disposed;
@@ -1024,7 +1604,7 @@ namespace UmamusumeResponseAnalyzer
             public void Dispose()
             {
                 if (Interlocked.Exchange(ref disposed, 1) == 0)
-                    Interlocked.Decrement(ref inputSuspensionCount);
+                    ResumeInput();
             }
         }
     }

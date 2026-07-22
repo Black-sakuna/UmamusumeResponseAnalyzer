@@ -1,5 +1,4 @@
 ﻿using Newtonsoft.Json;
-using Spectre.Console;
 using System.Collections.Frozen;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -96,7 +95,7 @@ namespace UmamusumeResponseAnalyzer
         {
             if (!File.Exists(filepath))
             {
-                LiveDisplayConsole.MarkupLog("Database", I18N_NotExist, LiveDisplaySeverity.Warning, Path.GetFileName(filepath).EscapeMarkup());
+                LiveDisplayConsole.Log("Database", string.Format(I18N_NotExist, Path.GetFileName(filepath)), LiveDisplaySeverity.Warning);
                 return default;
             }
 
@@ -111,15 +110,15 @@ namespace UmamusumeResponseAnalyzer
                 if (serializer.Deserialize<T>(jsonReader) is { } value)
                     return value;
 
-                LiveDisplayConsole.MarkupLog("Database", I18N_LoadFail, LiveDisplaySeverity.Warning, Path.GetFileName(filepath).EscapeMarkup());
+                LiveDisplayConsole.Log("Database", string.Format(I18N_LoadFail, Path.GetFileName(filepath)), LiveDisplaySeverity.Warning);
             }
             catch (InvalidDataException)
             {
-                LiveDisplayConsole.MarkupLog("Database", I18N_DecompressError, LiveDisplaySeverity.Warning, Path.GetFileName(filepath).EscapeMarkup());
+                LiveDisplayConsole.Log("Database", string.Format(I18N_DecompressError, Path.GetFileName(filepath)), LiveDisplaySeverity.Warning);
             }
             catch (Exception)
             {
-                LiveDisplayConsole.MarkupLog("Database", I18N_LoadFail, LiveDisplaySeverity.Warning, Path.GetFileName(filepath).EscapeMarkup());
+                LiveDisplayConsole.Log("Database", string.Format(I18N_LoadFail, Path.GetFileName(filepath)), LiveDisplaySeverity.Warning);
             }
             return default;
         }

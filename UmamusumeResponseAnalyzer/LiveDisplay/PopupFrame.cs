@@ -1,4 +1,4 @@
-using Spectre.Console;
+using Terminal.Gui.Text;
 
 namespace UmamusumeResponseAnalyzer.LiveDisplay
 {
@@ -19,7 +19,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             if (string.IsNullOrEmpty(label))
                 return Top(width);
 
-            var labelWidth = label.GetCellWidth();
+            var labelWidth = label.GetColumns();
             var dashTotal = width - 2 - labelWidth;
             if (dashTotal < 2)
                 return Top(width);
@@ -35,7 +35,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 return Bottom(width);
 
             label = " " + label + " ";
-            var labelWidth = label.GetCellWidth();
+            var labelWidth = label.GetColumns();
             var dashTotal = width - 2 - labelWidth;
             if (dashTotal < 2)
                 return Bottom(width);

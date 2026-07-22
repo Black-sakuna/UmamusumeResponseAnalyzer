@@ -1,5 +1,4 @@
 using Gallop.Endpoints;
-using Spectre.Console;
 using UmamusumeResponseAnalyzer.LiveDisplay;
 using HttpMethod = WatsonWebserver.Core.HttpMethod;
 
@@ -33,7 +32,6 @@ public interface IPlugin
 
     Task ConfigPromptAsync() => Task.CompletedTask;
 
-    Task UpdatePlugin(ProgressContext ctx);
 }
 
 public enum AnalyzerKind

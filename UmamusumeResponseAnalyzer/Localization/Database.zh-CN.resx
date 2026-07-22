@@ -118,12 +118,12 @@
     <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
   </resheader>
   <data name="I18N_DecompressError" xml:space="preserve">
-    <value>[red]读取数据文件{0}时出现错误，请先更新程序，再更新数据[/]</value>
+    <value>读取数据文件{0}时出现错误，请先更新程序，再更新数据</value>
   </data>
   <data name="I18N_LoadFail" xml:space="preserve">
-    <value>[red]加载{0}时出现错误，请尝试重新更新数据。[/]</value>
+    <value>加载{0}时出现错误，请尝试重新更新数据。</value>
   </data>
   <data name="I18N_NotExist" xml:space="preserve">
-    <value>[red]数据文件{0}不存在，请尝试重新更新数据[/]</value>
+    <value>数据文件{0}不存在，请尝试重新更新数据</value>
   </data>
 </root>
