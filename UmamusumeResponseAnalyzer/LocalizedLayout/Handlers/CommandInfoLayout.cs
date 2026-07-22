@@ -1,5 +1,6 @@
 namespace UmamusumeResponseAnalyzer.LocalizedLayout.Handlers
 {
+    [Obsolete("Migrate to the LiveDisplay layout APIs.", false)]
     public class CommandInfoLayout
     {
         public static CommandInfoLayout Current

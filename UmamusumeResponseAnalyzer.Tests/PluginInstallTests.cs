@@ -14,6 +14,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         readonly string tempDir;
         readonly string originalCwd;
         readonly Func<string, string, string, bool> originalConfirmInstall;
+        readonly HttpClient originalHttpClient;
 
         public PluginInstallTests()
         {
@@ -22,12 +23,18 @@ namespace UmamusumeResponseAnalyzer.Tests
             Directory.CreateDirectory(Path.Combine(tempDir, "Plugins"));
             originalCwd = Directory.GetCurrentDirectory();
             originalConfirmInstall = WebInstallApi.ConfirmInstall;
+            originalHttpClient = ResourceUpdater.HttpClient;
             Directory.SetCurrentDirectory(tempDir);
         }
 
         public void Dispose()
         {
             WebInstallApi.ConfirmInstall = originalConfirmInstall;
+            if (!ReferenceEquals(ResourceUpdater.HttpClient, originalHttpClient))
+            {
+                ResourceUpdater.HttpClient.Dispose();
+                ResourceUpdater.HttpClient = originalHttpClient;
+            }
             Directory.SetCurrentDirectory(originalCwd);
             try { Directory.Delete(tempDir, recursive: true); } catch { }
         }
@@ -65,6 +72,36 @@ namespace UmamusumeResponseAnalyzer.Tests
 
             Assert.Empty(installed);
             Assert.False(File.Exists(Path.Combine(tempDir, "Plugins", "SameName.zip")));
+        }
+
+        [Fact]
+        public async Task InstallPluginsAsync_IsolatesEmptyVersionsAndDownloadFailures()
+        {
+            ResourceUpdater.HttpClient = new HttpClient(new StubHttpMessageHandler(request =>
+            {
+                var path = request.RequestUri!.AbsolutePath;
+                if (path.EndsWith("/EmptyVersions/versions", StringComparison.Ordinal))
+                    return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("[]", Encoding.UTF8, "application/json") };
+                if (path.EndsWith("/FailedDownload/versions", StringComparison.Ordinal)
+                    || path.EndsWith("/Works/versions", StringComparison.Ordinal))
+                    return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("[{\"version\":\"1.0.0\"}]", Encoding.UTF8, "application/json") };
+                if (path.Contains("/FailedDownload/versions/", StringComparison.Ordinal))
+                    return new HttpResponseMessage(HttpStatusCode.InternalServerError);
+                if (path.Contains("/Works/versions/", StringComparison.Ordinal))
+                    return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("zip") };
+                return new HttpResponseMessage(HttpStatusCode.NotFound);
+            }));
+
+            var installed = await PluginRepository.InstallPluginsAsync([
+                new() { Author = "tester", InternalName = "EmptyVersions", RawVersion = "1.0.0" },
+                new() { Author = "tester", InternalName = "FailedDownload", RawVersion = "1.0.0" },
+                new() { Author = "tester", InternalName = "Works", RawVersion = "1.0.0" },
+            ], TestContext.Current.CancellationToken);
+
+            Assert.Equal(["Works"], installed);
+            Assert.False(File.Exists(Path.Combine(tempDir, "Plugins", "EmptyVersions.zip")));
+            Assert.False(File.Exists(Path.Combine(tempDir, "Plugins", "FailedDownload.zip")));
+            Assert.Equal("zip", await File.ReadAllTextAsync(Path.Combine(tempDir, "Plugins", "Works.zip"), TestContext.Current.CancellationToken));
         }
 
         [Fact]
@@ -123,6 +160,12 @@ namespace UmamusumeResponseAnalyzer.Tests
                 listener.Stop();
             });
             return $"http://127.0.0.1:{port}/plugin.zip";
+        }
+
+        sealed class StubHttpMessageHandler(Func<HttpRequestMessage, HttpResponseMessage> send) : HttpMessageHandler
+        {
+            protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+                Task.FromResult(send(request));
         }
     }
 }

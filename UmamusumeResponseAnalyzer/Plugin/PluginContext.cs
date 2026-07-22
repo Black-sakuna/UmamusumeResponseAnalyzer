@@ -5,11 +5,14 @@ namespace UmamusumeResponseAnalyzer.Plugin
     internal sealed class PluginContext(
         IPlugin plugin,
         ILiveDisplayOutput liveDisplay,
-        PluginHostEvents events) : IPluginContext
+        PluginHostEvents events) : IPluginContext, IPluginHostEvents
     {
         public ILiveDisplayOutput LiveDisplay { get; } = liveDisplay;
-        public IPluginHostEvents Events { get; } = events.ForPlugin(plugin);
+        public IPluginHostEvents Events => this;
         public IPluginAnalyzerRegistry Analyzers { get; } = PluginManager.AnalyzersFor(plugin);
+
+        public IDisposable OnStarted(Func<CancellationToken, ValueTask> handler)
+            => events.SubscribeStarted(plugin, handler);
     }
 
     internal sealed class PluginHostEvents
@@ -17,10 +20,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
         readonly object gate = new();
         readonly Dictionary<IPlugin, List<StartedSubscription>> subscriptionsByPlugin = new(ReferenceEqualityComparer.Instance);
 
-        public IPluginHostEvents ForPlugin(IPlugin plugin)
-            => new PluginScopedHostEvents(this, plugin);
-
-        IDisposable SubscribeStarted(IPlugin plugin, Func<CancellationToken, ValueTask> handler)
+        internal IDisposable SubscribeStarted(IPlugin plugin, Func<CancellationToken, ValueTask> handler)
         {
             ArgumentNullException.ThrowIfNull(handler);
 
@@ -108,12 +108,6 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 if (subscriptions.Count == 0)
                     subscriptionsByPlugin.Remove(subscription.Plugin);
             }
-        }
-
-        sealed class PluginScopedHostEvents(PluginHostEvents source, IPlugin plugin) : IPluginHostEvents
-        {
-            public IDisposable OnStarted(Func<CancellationToken, ValueTask> handler)
-                => source.SubscribeStarted(plugin, handler);
         }
 
         sealed class StartedSubscription(

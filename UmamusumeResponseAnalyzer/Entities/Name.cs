@@ -33,8 +33,7 @@ namespace UmamusumeResponseAnalyzer.Entities
         /// 支援卡的类型(如[速])
         /// </summary>
         public string TypeName => Type switch { 101 => "[速]", 102 => "[力]", 103 => "[根]", 105 => "[耐]", 106 => "[智]", 0 => "[友]", _ => "" };
-        public bool IsFriendshipTrainingGroupCard => Id is 30241;
-        public bool CanTriggerFriendshipTraining(int trainingType) => Type == trainingType || IsFriendshipTrainingGroupCard;
+        public bool CanTriggerFriendshipTraining(int trainingType) => Type == trainingType || Id is 30241;
         /// <summary>
         /// 支援卡的全名，如[ミッション『心の栄養補給』] ミホノブルボン
         /// </summary>

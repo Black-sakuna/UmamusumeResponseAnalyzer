@@ -30,8 +30,7 @@ namespace UmamusumeResponseAnalyzer
             // 猜测游戏内hint level排序顺序为先看最高的白，再看金，一致的看DisplayOrder
             if (skill.Rarity == 2)
             {
-                var infLvl = skill.Inferior?.HintLevel ?? 0;
-                skill.HintLevel = infLvl > level ? infLvl : level;
+                skill.HintLevel = Math.Max(skill.Inferior?.HintLevel ?? 0, level);
             }
             else
             {
@@ -162,10 +161,7 @@ namespace UmamusumeResponseAnalyzer
                         break;
                     }
                     // 否则把价格加上去
-                    else
-                    {
-                        skill.Cost += inferior.Cost;
-                    }
+                    skill.Cost += inferior.Cost;
                     inferior = inferior.Inferior;
                 }
             }
@@ -218,11 +214,12 @@ namespace UmamusumeResponseAnalyzer
         public void Evolve(SingleModeChara chara_info, IEnumerable<SkillData> willLearnSkills = null!)
         {
             list.ForEach(x => x.Upgrades.Clear());
+            willLearnSkills ??= [];
             if (Database.TalentSkill.TryGetValue(chara_info.card_id, out var talents))
             {
                 foreach (var talent in talents.Where(x => x.Rank <= chara_info.talent_level))
                 {
-                    if (talent.CanUpgrade(chara_info, out _, willLearnSkills ?? []))
+                    if (talent.CanUpgrade(chara_info, out _, willLearnSkills))
                     {
                         foreach (var upgradedSkillId in talent.UpgradeSkills.Keys)
                         {
@@ -243,11 +240,11 @@ namespace UmamusumeResponseAnalyzer
                 {
                     foreach (var j in upgraded.UpgradeSkills)
                     {
-                        if (j.Value.GroupBy(x => x.Group).All(x => x.Any(y => y.IsArchived(chara_info, willLearnSkills ?? []))))
+                        if (j.Value.GroupBy(x => x.Group).All(x => x.Any(y => y.IsArchived(chara_info, willLearnSkills))))
                         {
                             var upgradedSkill = SkillManagerGenerator.Default[j.Key].Clone();
                             SkillManagerGenerator.ApplyProper(upgradedSkill, chara_info);
-                            upgradedSkill.Cost = list.First(x => x.Id == upgraded.BaseSkillId).Cost;
+                            upgradedSkill.Cost = baseSkill.Cost;
                             upgradedSkill.IsScenarioEvolution = true;
                             baseSkill.Upgrades.Add(upgradedSkill);
                         }

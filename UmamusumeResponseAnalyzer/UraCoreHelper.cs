@@ -1,6 +1,5 @@
 ﻿using Microsoft.Win32;
 using Spectre.Console;
-using System.Runtime.InteropServices;
 using UmamusumeResponseAnalyzer.LiveDisplay;
 
 namespace UmamusumeResponseAnalyzer
@@ -14,14 +13,14 @@ namespace UmamusumeResponseAnalyzer
         public static List<string> GamePaths
         {
             get => _overrideGamePaths.Count != 0 ? _overrideGamePaths : _lazyGamePaths.Value;
+            [Obsolete("Migrate to caller-owned game path selection instead of setting GamePaths.", false)]
             set => _overrideGamePaths = value;
         }
 
         /// <summary>
-        /// 从一个可能内嵌 umamusume.exe 全路径的字符串（注册表 value name 或 MatchedExeFullPath）里提取游戏安装目录前缀；
-        /// 不含 exe 名则返回 null。纯函数，从注册表读取逻辑里抽出以便单测。
+        /// 从一个可能内嵌 umamusume.exe 全路径的注册表值里提取游戏安装目录前缀；不含 exe 名则返回 null。
         /// </summary>
-        public static string? ExtractGamePathPrefix(string candidate)
+        internal static string? ExtractGamePathPrefix(string candidate)
         {
             var idx = candidate.IndexOf(GameExeName, StringComparison.OrdinalIgnoreCase);
             return idx >= 0 ? candidate[..idx] : null;
@@ -29,7 +28,7 @@ namespace UmamusumeResponseAnalyzer
 
         private static List<string> LoadGamePaths()
         {
-            if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            if (!OperatingSystem.IsWindows())
                 return [];
 
             var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -65,7 +64,7 @@ namespace UmamusumeResponseAnalyzer
         {
             try
             {
-                using var key = OpenSubKey(hive, subKeyPath);
+                using var key = hive.OpenSubKey(subKeyPath);
                 if (key is null) return;
 
                 foreach (var name in key.GetValueNames())
@@ -81,7 +80,7 @@ namespace UmamusumeResponseAnalyzer
         {
             try
             {
-                using var storeKey = OpenSubKey(Registry.CurrentUser, @"System\GameConfigStore\Children");
+                using var storeKey = Registry.CurrentUser.OpenSubKey(@"System\GameConfigStore\Children");
                 if (storeKey is null) return;
 
                 foreach (var subkeyName in storeKey.GetSubKeyNames())
@@ -99,23 +98,6 @@ namespace UmamusumeResponseAnalyzer
                 }
             }
             catch { }
-        }
-
-        /// <summary>
-        /// Opens a registry sub-key by a backslash-separated relative path under <paramref name="hive"/>.
-        /// Returns <see langword="null"/> if any segment is missing.
-        /// </summary>
-        private static RegistryKey? OpenSubKey(RegistryKey hive, string relativePath)
-        {
-            var current = hive;
-            foreach (var segment in relativePath.Split('\\'))
-            {
-                var next = current?.OpenSubKey(segment);
-                if (current != hive) current?.Dispose(); // Don't dispose the caller-owned hive
-                current = next;
-                if (current is null) return null;
-            }
-            return current;
         }
 
         public static void EnableDllRedirection()

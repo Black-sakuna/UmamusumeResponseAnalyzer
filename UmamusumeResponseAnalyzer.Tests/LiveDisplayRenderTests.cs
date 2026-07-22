@@ -123,8 +123,7 @@ namespace UmamusumeResponseAnalyzer.Tests
                 "SecondPlugin",
                 "SecondLog",
                 LiveDisplaySeverity.Info,
-                IsMarkup: false,
-                DateTimeOffset.Now));
+                IsMarkup: false));
             uiHost.Notify(new LiveDisplayNotification(
                 second,
                 "SecondPlugin",
@@ -302,14 +301,11 @@ namespace UmamusumeResponseAnalyzer.Tests
                     DateTimeOffset.Now.AddSeconds(10 + i)));
             }
 
-            var popup = string.Join(Environment.NewLine, uiHost.BuildNotificationPopupPreview(120));
             var output = Render(uiHost);
 
             Assert.Contains("NotificationBody", output);
             Assert.Contains("消息 1", output);
             Assert.Contains("消息 4", output);
-            Assert.Contains("消息 1", popup);
-            Assert.Contains("消息 4", popup);
         }
 
         [Fact]
@@ -336,13 +332,11 @@ namespace UmamusumeResponseAnalyzer.Tests
                     DateTimeOffset.Now.AddSeconds(10 + i)));
             }
 
-            var popup = string.Join(Environment.NewLine, uiHost.BuildNotificationPopupPreview(120));
             var output = Render(uiHost);
 
             Assert.Contains("消息 7", output);
             Assert.Contains("消息 4", output);
             Assert.Contains("还有 3 条通知", output);
-            Assert.Contains("还有 3 条通知", popup);
         }
 
         [Fact]
@@ -402,14 +396,12 @@ namespace UmamusumeResponseAnalyzer.Tests
                 "URA",
                 "GLOG",
                 LiveDisplaySeverity.Warning,
-                IsMarkup: false,
-                DateTimeOffset.Now));
+                IsMarkup: false));
 
             var output = Render(uiHost, width: 120, height: 35);
 
             Assert.Contains("GNOTICE", output);
             Assert.Contains("GLOG", output);
-            Assert.Contains("GNOTICE", string.Join(Environment.NewLine, uiHost.BuildNotificationPopupPreview(120)));
         }
 
         [Fact]
@@ -426,15 +418,12 @@ namespace UmamusumeResponseAnalyzer.Tests
                 LiveDisplayConsole.Notify("URA", "插件 BrokenPlugin 加载失败", LiveDisplaySeverity.Warning, TimeSpan.FromSeconds(10));
 
                 var output = Render(uiHost, width: 120, height: 35);
-                var popup = string.Join(Environment.NewLine, uiHost.BuildNotificationPopupPreview(120));
-
                 Assert.Contains("已加载 1 个插件", output);
                 Assert.Contains("监听 http://127.0.0.1:4693", output);
                 Assert.Single(Regex.Matches(output, Regex.Escape("监听 http://127.0.0.1:4693")).Cast<Match>());
                 Assert.Contains("ScenarioAnalyzer", output);
                 Assert.Contains("127.0.0.1:4693", output);
                 Assert.Contains("BrokenPlugin", output);
-                Assert.Contains("BrokenPlugin", popup);
             }
             finally
             {
@@ -502,33 +491,6 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
 
         [Fact]
-        public void RenderSnapshot_LogRowsOmitTimestamp()
-        {
-            var uiHost = new UiHost();
-            var workspace = Workspace();
-            uiHost.SetPanel(new LiveDisplayPanel(
-                workspace,
-                "ScenarioAnalyzer",
-                "workspace",
-                "整页布局",
-                new Panel("WorkspaceBody").Expand(),
-                new DateTimeOffset(2026, 7, 2, 20, 9, 22, TimeSpan.Zero),
-                FullBleed: false));
-            uiHost.Log(new LiveDisplayLogLine(
-                workspace,
-                "Plugin",
-                "FixedLog",
-                LiveDisplaySeverity.Warning,
-                IsMarkup: false,
-                new DateTimeOffset(2026, 7, 2, 20, 9, 22, TimeSpan.Zero)));
-
-            var output = Render(uiHost, width: 120, height: 35);
-
-            Assert.Contains("WARN [Plugin] FixedLog", output);
-            Assert.DoesNotContain("20:09:22", output);
-        }
-
-        [Fact]
         public void RenderSnapshot_LogRowsKeepPrefixWithMessageStartOnSameLine()
         {
             var uiHost = new UiHost();
@@ -546,8 +508,7 @@ namespace UmamusumeResponseAnalyzer.Tests
                 "Plugin",
                 "WinSaddleAnalyzer初始化失败：SkillEffectPlugin 尚未配置 Race/RunningStyle，无法为 WinSaddleAnalyzer 计算技能期望收益。",
                 LiveDisplaySeverity.Error,
-                IsMarkup: false,
-                DateTimeOffset.Now));
+                IsMarkup: false));
 
             var output = Render(uiHost, width: 120, height: 35);
             var normalizedOutput = output.Replace('\u00A0', ' ');
@@ -1457,8 +1418,7 @@ namespace UmamusumeResponseAnalyzer.Tests
                 "PanelLabA",
                 "PanelLabLog",
                 LiveDisplaySeverity.Info,
-                IsMarkup: false,
-                DateTimeOffset.Now));
+                IsMarkup: false));
 
             var output = Render(uiHost, width: 120, height: 35);
 
@@ -1487,8 +1447,7 @@ namespace UmamusumeResponseAnalyzer.Tests
                 "A",
                 "[InvalidStyle]B[/]",
                 LiveDisplaySeverity.Info,
-                IsMarkup: true,
-                DateTimeOffset.Now));
+                IsMarkup: true));
 
             var output = Render(uiHost, width: 120, height: 35);
 

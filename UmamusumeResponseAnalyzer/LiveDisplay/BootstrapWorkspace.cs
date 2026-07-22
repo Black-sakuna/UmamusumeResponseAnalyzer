@@ -48,12 +48,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
 
         public void Log(string source, string text, LiveDisplaySeverity severity = LiveDisplaySeverity.Info)
         {
-            uiHost.Log(new LiveDisplayLogLine(Workspace, source, text, severity, IsMarkup: false, DateTimeOffset.Now));
-        }
-
-        public void MarkupLog(string source, string markup, LiveDisplaySeverity severity = LiveDisplaySeverity.Info)
-        {
-            uiHost.Log(new LiveDisplayLogLine(Workspace, source, markup, severity, IsMarkup: true, DateTimeOffset.Now));
+            uiHost.Log(new LiveDisplayLogLine(Workspace, source, text, severity, IsMarkup: false));
         }
 
         void Refresh()

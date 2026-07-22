@@ -1,5 +1,6 @@
 namespace UmamusumeResponseAnalyzer.LocalizedLayouts.Handlers
 {
+    [Obsolete("Migrate to the LiveDisplay layout APIs.", false)]
     public static class ParseTeamStadiumOpponentListResponse
     {
         public static int MinimumConsoleWidth => Thread.CurrentThread.CurrentUICulture.Name switch

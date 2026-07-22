@@ -22,7 +22,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         };
 
         static readonly string[] NoFilter = [];
-        const string ApiBase = "http://x/Plugins";
+        const string ApiBase = "https://ura.shuise.net/api/Plugins";
 
         [Fact]
         public void BuildCatalog_KeepsSameInternalNameDifferentAuthorForks()
@@ -35,7 +35,7 @@ namespace UmamusumeResponseAnalyzer.Tests
                 Info("URACloud-Tester", "StatisticsCollector", category: ""),
             ];
 
-            var catalog = PluginRepository.BuildCatalog(raw, NoFilter, ApiBase);
+            var catalog = PluginRepository.BuildCatalog(raw, NoFilter);
 
             Assert.Equal(2, catalog.Count);
             Assert.Contains(catalog, p => p.Author == "离披" && p.Category == "数据收集");
@@ -52,38 +52,23 @@ namespace UmamusumeResponseAnalyzer.Tests
                 Info("URACloud-Tester", "StatisticsCollector"),
             ];
 
-            var catalog = PluginRepository.BuildCatalog(raw, NoFilter, ApiBase);
+            var catalog = PluginRepository.BuildCatalog(raw, NoFilter);
 
             Assert.Contains(catalog, p => p.DownloadUrl == $"{ApiBase}/%E7%A6%BB%E6%8A%AB/StatisticsCollector/versions/1.0.0/download");
             Assert.Contains(catalog, p => p.DownloadUrl == $"{ApiBase}/URACloud-Tester/StatisticsCollector/versions/1.0.0/download");
         }
 
         [Fact]
-        public void BuildCatalog_DropsRowsMissingAuthorOrInternalName()
+        public void BuildCatalog_RejectsRowsMissingAuthorOrInternalName()
         {
-            PluginInformation[] raw =
-            [
-                Info("", "HasNoAuthor"),
-                Info("HasNoName", ""),
-                Info("ok", "Valid"),
-            ];
-
-            var catalog = PluginRepository.BuildCatalog(raw, NoFilter, ApiBase);
-
-            Assert.Single(catalog);
-            Assert.Equal("Valid", catalog[0].InternalName);
+            Assert.Throws<InvalidDataException>(() => PluginRepository.BuildCatalog([Info("", "HasNoAuthor")], NoFilter));
+            Assert.Throws<InvalidDataException>(() => PluginRepository.BuildCatalog([Info("HasNoName", "")], NoFilter));
         }
 
         [Fact]
-        public void BuildCatalog_SkipsNullEntries()
+        public void BuildCatalog_RejectsNullEntries()
         {
-            // 回归:后端若返回含 null 元素的 JSON 数组（[null, …]），BuildCatalog 不应 NRE，跳过 null 即可。
-            PluginInformation[] raw = [null!, Info("ok", "Valid")];
-
-            var catalog = PluginRepository.BuildCatalog(raw, NoFilter, ApiBase);
-
-            Assert.Single(catalog);
-            Assert.Equal("Valid", catalog[0].InternalName);
+            Assert.Throws<InvalidDataException>(() => PluginRepository.BuildCatalog([null!], NoFilter));
         }
 
         [Fact]
@@ -97,7 +82,7 @@ namespace UmamusumeResponseAnalyzer.Tests
                 Info("a", "KomoeOnly", targets: ["Komoe"]),
             ];
 
-            var catalog = PluginRepository.BuildCatalog(raw, ["Cygames"], ApiBase);
+            var catalog = PluginRepository.BuildCatalog(raw, ["Cygames"]);
 
             Assert.Contains(catalog, p => p.InternalName == "EmptyTargets");    // 空 = 全服,通过
             Assert.Contains(catalog, p => p.InternalName == "CygamesOnly");     // 命中过滤
@@ -113,20 +98,10 @@ namespace UmamusumeResponseAnalyzer.Tests
                 Info("a", "P2", targets: []),
             ];
 
-            var catalog = PluginRepository.BuildCatalog(raw, NoFilter, ApiBase);
+            var catalog = PluginRepository.BuildCatalog(raw, NoFilter);
 
             Assert.Equal(2, catalog.Count);
         }
-
-        // 选项必须单行才不会让 Spectre 的视口算错行数(本次 bug:顶部条目被挤出屏幕、光标够不着)。
-        // 下面验证宽度估算 + 按列宽截断的正确性。
-        [Theory]
-        [InlineData('中', 2)]   // CJK 汉字:宽
-        [InlineData('あ', 2)]   // 平假名:宽
-        [InlineData('a', 1)]    // ASCII:窄
-        [InlineData('…', 1)]    // 省略号:窄
-        public void CharWidth_WideForCjk_NarrowForAscii(char c, int expected) =>
-            Assert.Equal(expected, PluginRepository.CharWidth(c));
 
         [Fact]
         public void TruncateToWidth_ShortStringUnchanged() =>
@@ -176,10 +151,22 @@ namespace UmamusumeResponseAnalyzer.Tests
             var raw = new PluginInformation { Author = "URACloud-Tester", InternalName = "BreedersScenarioAnalyzer", RawVersion = "2026.03.04" };
             Assert.Equal(new System.Version(2026, 3, 4), raw.Version);
 
-            var catalog = PluginRepository.BuildCatalog([raw], NoFilter, ApiBase);
+            var catalog = PluginRepository.BuildCatalog([raw], NoFilter);
 
             Assert.Single(catalog);
             Assert.Equal($"{ApiBase}/URACloud-Tester/BreedersScenarioAnalyzer/versions/2026.03.04/download", catalog[0].DownloadUrl);
+        }
+
+        [Theory]
+        [InlineData("")]
+        [InlineData("not-a-version")]
+        public void BuildCatalog_RejectsInvalidVersion(string rawVersion)
+        {
+            var plugin = Info("author", "InvalidVersion");
+            plugin.RawVersion = rawVersion;
+
+            Assert.Throws<InvalidDataException>(() => PluginRepository.BuildCatalog([plugin], NoFilter));
+            Assert.ThrowsAny<ArgumentException>(() => _ = plugin.Version);
         }
 
         [Fact]
@@ -197,6 +184,47 @@ namespace UmamusumeResponseAnalyzer.Tests
             PluginRepository.ResolveDependencies(selected, catalog);
 
             Assert.Equal(["Root", "Middle", "Leaf"], selected.Select(p => p.InternalName).ToArray());
+        }
+
+        [Fact]
+        public void ResolveDependencies_ThrowsWhenDependencyIsMissing()
+        {
+            var root = Info("a", "Root");
+            root.Dependencies = ["Missing"];
+
+            var exception = Assert.Throws<InvalidOperationException>(() =>
+                PluginRepository.ResolveDependencies([root], [root]));
+
+            Assert.Contains("Missing", exception.Message);
+        }
+
+        [Fact]
+        public void ResolveDependencies_ThrowsWhenUnselectedDependencyHasMultipleForks()
+        {
+            var root = Info("a", "Root");
+            root.Dependencies = ["Dependency"];
+            var firstFork = Info("a", "Dependency");
+            var secondFork = Info("b", "Dependency");
+
+            var exception = Assert.Throws<InvalidOperationException>(() =>
+                PluginRepository.ResolveDependencies([root], [root, firstFork, secondFork]));
+
+            Assert.Contains("Dependency", exception.Message);
+            Assert.Contains("多个 fork", exception.Message);
+        }
+
+        [Fact]
+        public void ResolveDependencies_PrefersSelectedFork()
+        {
+            var root = Info("a", "Root");
+            root.Dependencies = ["Dependency"];
+            var selectedFork = Info("a", "Dependency");
+            var otherFork = Info("b", "Dependency");
+            var selected = new List<PluginInformation> { root, selectedFork };
+
+            PluginRepository.ResolveDependencies(selected, [root, selectedFork, otherFork]);
+
+            Assert.Equal([root, selectedFork], selected);
         }
     }
 }

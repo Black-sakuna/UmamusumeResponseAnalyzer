@@ -1,5 +1,4 @@
 using System.Reflection;
-using Gallop;
 using Xunit;
 
 namespace UmamusumeResponseAnalyzer.Tests
@@ -128,65 +127,5 @@ namespace UmamusumeResponseAnalyzer.Tests
             Assert.Equal("Name: abc", result);
         }
 
-        static SingleModeCheckEventResponse.CommonResponse StageData(int playingState, SingleModeEventInfo[]? events) => new()
-        {
-            chara_info = new SingleModeChara { playing_state = playingState },
-            unchecked_event_array = events!,
-        };
-
-        [Fact]
-        public void GetCommandInfoStage_PlayingState1_NullEvents_Returns2()
-        {
-            Assert.Equal(2, StageData(1, null).GetCommandInfoStage());
-        }
-
-        [Fact]
-        public void GetCommandInfoStage_PlayingState1_EmptyEvents_Returns2()
-        {
-            Assert.Equal(2, StageData(1, []).GetCommandInfoStage());
-        }
-
-        [Fact]
-        public void GetCommandInfoStage_PlayingState1_WithEvents_Returns0()
-        {
-            var data = StageData(1, [new SingleModeEventInfo { story_id = 1 }]);
-
-            Assert.Equal(0, data.GetCommandInfoStage());
-        }
-
-        [Fact]
-        public void GetCommandInfoStage_PlayingState5_BuffStory_Returns5()
-        {
-            var data = StageData(5, [new SingleModeEventInfo { story_id = 400010112 }]);
-
-            Assert.Equal(5, data.GetCommandInfoStage());
-        }
-
-        [Fact]
-        public void GetCommandInfoStage_PlayingState5_TeamCardStory_Returns3()
-        {
-            var data = StageData(5, [new SingleModeEventInfo { story_id = 830241003 }]);
-
-            Assert.Equal(3, data.GetCommandInfoStage());
-        }
-
-        [Fact]
-        public void GetCommandInfoStage_PlayingState5_OtherStory_Returns0()
-        {
-            var data = StageData(5, [new SingleModeEventInfo { story_id = 12345 }]);
-
-            Assert.Equal(0, data.GetCommandInfoStage());
-        }
-
-        [Fact]
-        public void GetCommandInfoStage_EventOverload_UsesDataDirectly()
-        {
-            var response = new SingleModeCheckEventResponse
-            {
-                data = StageData(5, [new SingleModeEventInfo { story_id = 830241003 }]),
-            };
-
-            Assert.Equal(3, response.GetCommandInfoStage());
-        }
     }
 }

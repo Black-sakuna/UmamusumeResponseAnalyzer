@@ -5,14 +5,13 @@ using UmamusumeResponseAnalyzer.Plugin;
 
 namespace UmamusumeResponseAnalyzer.LiveDisplay
 {
-    public sealed class UiHost : IKeyboardOverlaySink
+    internal sealed class UiHost : IKeyboardOverlaySink
     {
         const int MaxLogLines = 300;
 
         readonly Channel<UiEvent> events = CreateUiChannel<UiEvent>();
         readonly UiRefreshSignal refreshSignal = new();
         readonly NotificationPopupRenderer popupRenderer = new();
-        readonly WorkspaceLayoutBuilder layoutBuilder = new();
 
         readonly Dictionary<LiveDisplayWorkspace, WorkspaceState> workspaces = [];
         readonly Dictionary<(LiveDisplayWorkspace Workspace, string PluginId, string Key), LiveDisplayPanel> panels = [];
@@ -442,13 +441,18 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             if (height <= 0)
                 height = 35;
 
-            IRenderable content = layoutBuilder.BuildWorkspaceLayout(
-                new WorkspaceLayoutBuilder.State(activeWorkspace, panels.Values, logs, WorkspaceLabel));
+            IRenderable content = WorkspaceLayoutBuilder.BuildWorkspaceLayout(
+                activeWorkspace,
+                panels.Values,
+                logs,
+                WorkspaceLabel);
             var popupWidth = NotificationPopupRenderer.GetPopupWidth(width);
             var now = DateTimeOffset.Now;
             if (popupWidth > 0)
             {
-                var activeNotifications = GetActiveNotifications();
+                var activeNotifications = notifications
+                    .OrderByDescending(x => x.ExpiresAt)
+                    .ToList();
                 if (activeNotifications.Count > 0)
                 {
                     content = new NotificationOverlayRenderable(
@@ -465,26 +469,6 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 content = new KeyboardCommandInputOverlayRenderable(content, commandInput, width, height);
 
             return content;
-        }
-
-        List<LiveDisplayNotification> GetActiveNotifications()
-        {
-            return notifications
-                .OrderByDescending(x => x.ExpiresAt)
-                .ToList();
-        }
-
-        internal IReadOnlyList<string> BuildNotificationPopupPreview(int width)
-        {
-            DrainEvents();
-            var now = DateTimeOffset.Now;
-            RemoveExpiredNotifications(now);
-            var activeNotifications = GetActiveNotifications();
-            var popupWidth = NotificationPopupRenderer.GetPopupWidth(width);
-            if (popupWidth == 0 || activeNotifications.Count == 0)
-                return [];
-
-            return popupRenderer.BuildLines(activeNotifications, popupWidth, int.MaxValue, now, WorkspaceLabel);
         }
 
         string WorkspaceLabel(LiveDisplayWorkspace workspace)
@@ -534,7 +518,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             if (string.Equals(subcommand, "list", StringComparison.OrdinalIgnoreCase))
             {
                 if (string.IsNullOrEmpty(rest))
-                    ShowWorkspaceList();
+                    KeyboardManager.ShowPopup(BuildWorkspaceList().Context);
                 else
                     LogWorkspaceUsage();
                 return;
@@ -550,11 +534,6 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             }
 
             LogWorkspaceUsage();
-        }
-
-        void ShowWorkspaceList()
-        {
-            KeyboardManager.ShowPopup(BuildWorkspaceList().Context);
         }
 
         void ShowWorkspaceSwitcher()
@@ -716,16 +695,11 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 "reload" => "重载",
                 _ => subcommand
             };
-            ShowPluginLifecyclePopup(status.InternalName, action);
-            LogCommand($"插件 {status.InternalName} 已{action}。", LiveDisplaySeverity.Success);
-        }
-
-        void ShowPluginLifecyclePopup(string internalName, string action)
-        {
             var context = new KeyboardHandlerContext()
                 .WriteLine("Plugin command")
-                .WriteLine($"{internalName} 已{action}。", ConsoleColor.Green);
+                .WriteLine($"{status.InternalName} 已{action}。", ConsoleColor.Green);
             KeyboardManager.ShowPopup(context);
+            LogCommand($"插件 {status.InternalName} 已{action}。", LiveDisplaySeverity.Success);
         }
 
         void LogPluginUsage()
@@ -740,7 +714,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
 
         void LogCommand(string text, LiveDisplaySeverity severity)
         {
-            logs.Add(new LiveDisplayLogLine(null, "Command", text, severity, IsMarkup: false, DateTimeOffset.Now));
+            logs.Add(new LiveDisplayLogLine(null, "Command", text, severity, IsMarkup: false));
             if (logs.Count > MaxLogLines)
                 logs.RemoveRange(0, logs.Count - MaxLogLines);
         }

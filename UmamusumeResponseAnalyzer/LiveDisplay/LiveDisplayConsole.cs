@@ -1,5 +1,4 @@
 using Spectre.Console;
-using Spectre.Console.Rendering;
 
 namespace UmamusumeResponseAnalyzer.LiveDisplay
 {
@@ -10,12 +9,12 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
 
         internal static LiveDisplayWorkspace? DefaultLogWorkspace { get; set; }
 
-        public static void Bind(UiHost host)
+        internal static void Bind(UiHost host)
         {
             uiHost = host;
         }
 
-        public static void Unbind(UiHost host)
+        internal static void Unbind(UiHost host)
         {
             if (ReferenceEquals(uiHost, host))
             {
@@ -35,7 +34,9 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
 
         public static T Run<T>(Func<T> action)
         {
-            return RunAsync(() => Task.FromResult(action())).GetAwaiter().GetResult();
+            T result = default!;
+            Run(() => { result = action(); });
+            return result;
         }
 
         public static Task RunAsync(Func<Task> action)
@@ -50,26 +51,6 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             return host.IsRunning
                 ? host.RunConsoleInteractionAsync(action)
                 : RunDirectConsoleInteractionAsync(action);
-        }
-
-        public static async Task<T> RunAsync<T>(Func<Task<T>> action)
-        {
-            if (consoleInteractionActive.Value)
-                return await action();
-
-            var host = uiHost;
-            if (host is null)
-                return await action();
-
-            if (!host.IsRunning)
-            {
-                using var directInteraction = EnterConsoleInteraction();
-                return await action();
-            }
-
-            T result = default!;
-            await host.RunConsoleInteractionAsync(async () => result = await action());
-            return result;
         }
 
         static async Task RunDirectConsoleInteractionAsync(Func<Task> action)
@@ -88,11 +69,6 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         // 调用方负责配置 columns 并启动，例如：
         //   await LiveDisplayConsole.RunProgressAsync(p => p.Columns([...]).StartAsync(async ctx => { ... }));
         public static Task RunProgressAsync(Func<Progress, Task> action)
-        {
-            return RunAsync(() => action(AnsiConsole.Progress()));
-        }
-
-        public static Task<TResult> RunProgressAsync<TResult>(Func<Progress, Task<TResult>> action)
         {
             return RunAsync(() => action(AnsiConsole.Progress()));
         }
@@ -138,11 +114,6 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             return Run(() => Console.ReadLine() ?? string.Empty);
         }
 
-        public static void Write(IRenderable renderable)
-        {
-            Run(() => AnsiConsole.Write(renderable));
-        }
-
         public static void WriteException(Exception ex)
         {
             Run(() => AnsiConsole.WriteException(ex));
@@ -157,7 +128,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 return;
             }
 
-            host.Log(new LiveDisplayLogLine(DefaultLogWorkspace, source, markup, severity, IsMarkup: true, DateTimeOffset.Now));
+            host.Log(new LiveDisplayLogLine(DefaultLogWorkspace, source, markup, severity, IsMarkup: true));
         }
 
         internal static void MarkupLog(string source, string format, LiveDisplaySeverity severity, params object[] args)
@@ -174,7 +145,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 return;
             }
 
-            host.Log(new LiveDisplayLogLine(DefaultLogWorkspace, source, FormatExceptionLogMessage(ex), severity, IsMarkup: false, DateTimeOffset.Now));
+            host.Log(new LiveDisplayLogLine(DefaultLogWorkspace, source, FormatExceptionLogMessage(ex), severity, IsMarkup: false));
         }
 
         internal static string FormatExceptionLogMessage(Exception ex)
@@ -299,7 +270,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 return;
             }
 
-            host.Log(new LiveDisplayLogLine(null, source, text, severity, IsMarkup: false, DateTimeOffset.Now));
+            host.Log(new LiveDisplayLogLine(null, source, text, severity, IsMarkup: false));
         }
 
         public static void Notify(string source, string text, LiveDisplaySeverity severity = LiveDisplaySeverity.Info, TimeSpan? ttl = null)

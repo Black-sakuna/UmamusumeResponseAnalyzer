@@ -4,8 +4,6 @@ using System.IO.Compression;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Reflection;
-using System.Runtime.ExceptionServices;
-using System.Runtime.InteropServices;
 using System.Text;
 using UmamusumeResponseAnalyzer.LiveDisplay;
 using UmamusumeResponseAnalyzer.Plugin;
@@ -44,21 +42,29 @@ namespace UmamusumeResponseAnalyzer
             KeyboardManager.OverlaySink = uiHost;
             PluginManager.BindLiveDisplay(plugin => uiHost.ForPlugin(plugin.Name));
 
-            bootstrap.SetSettings(BuildBootstrapSettings());
+            bootstrap.SetSettings(
+            [
+                ("版本", Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "unknown"),
+                ("工作目录", Directory.GetCurrentDirectory()),
+                ("监听", $"http://{Config.Core.ListenAddress}:{Config.Core.ListenPort}"),
+                ("服务器目标", Config.Repository.Targets.Count == 0 ? "未限制" : string.Join(", ", Config.Repository.Targets)),
+                ("数据语言", Config.Updater.DatabaseLanguage),
+                ("训练员性别", Config.Updater.TrainerIsMale ? "男" : "女")
+            ]);
             bootstrap.SetPhase("config", "配置", LiveDisplaySeverity.Success, "已读取 config.yaml");
 
             _plugin_initialize_task = StartPluginInitializationAsync(bootstrap);
             var prompt = string.Empty;
             do
             {
-                prompt = await LiveDisplayConsole.RunAsync(ShowMenu);
+                await LiveDisplayConsole.RunAsync(async () => prompt = await ShowMenu());
             }
             while (prompt != I18N_Start); //如果不是启动则重新显示主菜单
 
             using var liveDisplayCts = new CancellationTokenSource();
             var firstRenderGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var uiTask = uiHost.RunAsync(liveDisplayCts.Token, firstRenderGate.Task);
-            Task? keyboardTask = null;
+            Task keyboardTask;
 
             try
             {
@@ -122,8 +128,7 @@ namespace UmamusumeResponseAnalyzer
                            .Where(x => x.OperationalStatus == OperationalStatus.Up && x.NetworkInterfaceType != NetworkInterfaceType.Loopback)
                            .SelectMany(x => x.GetIPProperties().UnicastAddresses)
                            .Where(x => x.Address.AddressFamily == AddressFamily.InterNetwork)
-                           .Select(x => x.Address.ToString())
-                           .ToList();
+                           .Select(x => x.Address.ToString());
                     foreach (var i in interfaces)
                     {
                         bootstrap.Log("Server", string.Format(Localization.Server.I18N_AvailableEndpointTip, i, Config.Core.ListenPort));
@@ -149,7 +154,7 @@ namespace UmamusumeResponseAnalyzer
 
                 await PluginManager.TriggerStartedAsync();
 
-                _ = Task.Run(() => CheckPluginUpdatesAsync(uiHost));
+                _ = CheckPluginUpdatesAsync(uiHost);
 
                 KeyboardManager.Register(
                     ConsoleKey.C, ConsoleModifiers.Control,
@@ -187,18 +192,11 @@ namespace UmamusumeResponseAnalyzer
 
             try
             {
-                if (keyboardTask is null)
-                    await uiTask;
-                else
-                    await Task.WhenAll(uiTask, keyboardTask);
+                await Task.WhenAll(uiTask, keyboardTask);
             }
-            catch (OperationCanceledException) when (!uiTask.IsFaulted && (keyboardTask is null || !keyboardTask.IsFaulted))
+            catch (OperationCanceledException) when (!uiTask.IsFaulted && !keyboardTask.IsFaulted)
             {
             }
-
-            ThrowIfFaulted(uiTask);
-            if (keyboardTask is not null)
-                ThrowIfFaulted(keyboardTask);
         }
 
         static Task StartPluginInitializationAsync(BootstrapWorkspace bootstrap)
@@ -229,19 +227,6 @@ namespace UmamusumeResponseAnalyzer
             });
         }
 
-        static IReadOnlyList<(string Label, string Value)> BuildBootstrapSettings()
-        {
-            return
-            [
-                ("版本", Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "unknown"),
-                ("工作目录", Directory.GetCurrentDirectory()),
-                ("监听", $"http://{Config.Core.ListenAddress}:{Config.Core.ListenPort}"),
-                ("服务器目标", Config.Repository.Targets.Count == 0 ? "未限制" : string.Join(", ", Config.Repository.Targets)),
-                ("数据语言", Config.Updater.DatabaseLanguage),
-                ("训练员性别", Config.Updater.TrainerIsMale ? "男" : "女")
-            ];
-        }
-
         static async Task CheckPluginUpdatesAsync(UiHost uiHost)
         {
             try
@@ -264,8 +249,7 @@ namespace UmamusumeResponseAnalyzer
                         "URA",
                         $"插件 {update.DisplayName} 有新版本可用: {update.CurrentVersion} -> {update.LatestVersion}",
                         LiveDisplaySeverity.Info,
-                        IsMarkup: false,
-                        DateTimeOffset.Now));
+                        IsMarkup: false));
                 }
             }
             catch (Exception ex)
@@ -290,12 +274,6 @@ namespace UmamusumeResponseAnalyzer
             var names = string.Join("、", updates.Take(3).Select(x => x.DisplayName));
             var more = updates.Count > 3 ? " 等" : string.Empty;
             return $"{updates.Count} 个插件可更新：{names}{more}。到「插件仓库」菜单里手动安装。";
-        }
-
-        static void ThrowIfFaulted(Task task)
-        {
-            if (task.Exception?.InnerExceptions.FirstOrDefault(x => x is not OperationCanceledException) is { } exception)
-                ExceptionDispatchInfo.Capture(exception).Throw();
         }
 
         static void ShowFirstLaunchPrompt()
@@ -368,7 +346,7 @@ namespace UmamusumeResponseAnalyzer
                 );
             #region 条件显示功能
             // Windows限定功能，其他平台不显示
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            if (OperatingSystem.IsWindows())
             {
                 selections.AddChoice(I18N_InstallUraCore);
             }

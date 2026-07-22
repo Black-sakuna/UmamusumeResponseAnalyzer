@@ -31,7 +31,7 @@ namespace UmamusumeResponseAnalyzer
         /// <summary>
         /// 技能
         /// </summary>
-        public static SkillManagerGenerator Skills { get; private set; } = new SkillManagerGenerator();
+        public static SkillManagerGenerator Skills { get; } = new();
         /// <summary>
         /// 剧本限定进化技能&lt;(基础技能id,剧本id),升级后&gt;
         /// </summary>
@@ -82,10 +82,7 @@ namespace UmamusumeResponseAnalyzer
             if (eventsTask.Result is { } events) Events = events.ToDictionary(y => y.Id, y => y);
             if (namesTask.Result is { } names) Names = new(names);
             if (skillsTask.Result is { } skills)
-            {
-                Skills = new();
                 SkillManagerGenerator.Default = new(skills);
-            }
             if (skillUpgradeTask.Result is { } skillUpgrade) SkillUpgradeSpeciality = skillUpgrade.ToDictionary(x => (x.BaseSkillId, x.ScenarioId), x => x).ToFrozenDictionary();
             if (talentSkillTask.Result is { } talentSkill) TalentSkill = talentSkill;
             if (factorIdsTask.Result is { } factorIds) FactorIds = factorIds;
@@ -95,43 +92,36 @@ namespace UmamusumeResponseAnalyzer
         }
         private static readonly JsonSerializer _serializer = new JsonSerializer();
 
-        static async Task<T> DeserializeAsync<T>(string filepath, JsonSerializerSettings settings = null!)
+        static async Task<T?> DeserializeAsync<T>(string filepath, JsonSerializerSettings? settings = null)
         {
-            if (File.Exists(filepath))
-            {
-                try
-                {
-                    await using var fileStream = new FileStream(filepath, FileMode.Open, FileAccess.Read, FileShare.Read, 16384, true);
-                    await using var brotliStream = new System.IO.Compression.BrotliStream(fileStream, System.IO.Compression.CompressionMode.Decompress);
-                    using var streamReader = new StreamReader(brotliStream, Encoding.UTF8);
-                    using var jsonReader = new JsonTextReader(streamReader);
-                    
-                    var serializer = settings == null ? _serializer : JsonSerializer.Create(settings);
-                    var obj = serializer.Deserialize<T>(jsonReader);
-                    
-                    if (obj != null)
-                    {
-                        return obj;
-                    }
-                    else
-                    {
-                        LiveDisplayConsole.MarkupLog("Database", I18N_LoadFail, LiveDisplaySeverity.Warning, Path.GetFileName(filepath).EscapeMarkup());
-                    }
-                }
-                catch (InvalidDataException)
-                {
-                    LiveDisplayConsole.MarkupLog("Database", I18N_DecompressError, LiveDisplaySeverity.Warning, Path.GetFileName(filepath).EscapeMarkup());
-                }
-                catch (Exception)
-                {
-                    LiveDisplayConsole.MarkupLog("Database", I18N_LoadFail, LiveDisplaySeverity.Warning, Path.GetFileName(filepath).EscapeMarkup());
-                }
-            }
-            else
+            if (!File.Exists(filepath))
             {
                 LiveDisplayConsole.MarkupLog("Database", I18N_NotExist, LiveDisplaySeverity.Warning, Path.GetFileName(filepath).EscapeMarkup());
+                return default;
             }
-            return default!;
+
+            try
+            {
+                await using var fileStream = new FileStream(filepath, FileMode.Open, FileAccess.Read, FileShare.Read, 16384, true);
+                await using var brotliStream = new System.IO.Compression.BrotliStream(fileStream, System.IO.Compression.CompressionMode.Decompress);
+                using var streamReader = new StreamReader(brotliStream, Encoding.UTF8);
+                using var jsonReader = new JsonTextReader(streamReader);
+
+                var serializer = settings is null ? _serializer : JsonSerializer.Create(settings);
+                if (serializer.Deserialize<T>(jsonReader) is { } value)
+                    return value;
+
+                LiveDisplayConsole.MarkupLog("Database", I18N_LoadFail, LiveDisplaySeverity.Warning, Path.GetFileName(filepath).EscapeMarkup());
+            }
+            catch (InvalidDataException)
+            {
+                LiveDisplayConsole.MarkupLog("Database", I18N_DecompressError, LiveDisplaySeverity.Warning, Path.GetFileName(filepath).EscapeMarkup());
+            }
+            catch (Exception)
+            {
+                LiveDisplayConsole.MarkupLog("Database", I18N_LoadFail, LiveDisplaySeverity.Warning, Path.GetFileName(filepath).EscapeMarkup());
+            }
+            return default;
         }
     }
 

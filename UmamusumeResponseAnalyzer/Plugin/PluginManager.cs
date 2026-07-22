@@ -28,9 +28,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
         Version? Version,
         bool IsLoaded,
         bool IsAvailable,
-        bool LoadInHost,
-        bool Failed,
-        string? FilePath);
+        bool LoadInHost);
 
     sealed class PluginScopedAnalyzerRegistry(IPlugin plugin) : IPluginAnalyzerRegistry
     {
@@ -70,14 +68,14 @@ namespace UmamusumeResponseAnalyzer.Plugin
             where TEndpoint : IGameEndpoint
         {
             ArgumentNullException.ThrowIfNull(handler);
-            return RegisterDto<TRequest>(AnalyzerKind.Request, typeof(TEndpoint), typeof(TRequest), (payload, _) => handler(payload), priority);
+            return RegisterDto<TRequest>(AnalyzerKind.Request, typeof(TEndpoint), (payload, _) => handler(payload), priority);
         }
 
         public IDisposable RegisterRequest<TEndpoint, TRequest>(
             Func<TRequest, GameHttpHeaders, ValueTask> handler,
             int priority = 0)
             where TEndpoint : IGameEndpoint
-            => RegisterDto(AnalyzerKind.Request, typeof(TEndpoint), typeof(TRequest), handler, priority);
+            => RegisterDto(AnalyzerKind.Request, typeof(TEndpoint), handler, priority);
 
         public IDisposable RegisterResponse<TEndpoint, TResponse>(
             Func<TResponse, ValueTask> handler,
@@ -85,14 +83,14 @@ namespace UmamusumeResponseAnalyzer.Plugin
             where TEndpoint : IGameEndpoint
         {
             ArgumentNullException.ThrowIfNull(handler);
-            return RegisterDto<TResponse>(AnalyzerKind.Response, typeof(TEndpoint), typeof(TResponse), (payload, _) => handler(payload), priority);
+            return RegisterDto<TResponse>(AnalyzerKind.Response, typeof(TEndpoint), (payload, _) => handler(payload), priority);
         }
 
         public IDisposable RegisterResponse<TEndpoint, TResponse>(
             Func<TResponse, GameHttpHeaders, ValueTask> handler,
             int priority = 0)
             where TEndpoint : IGameEndpoint
-            => RegisterDto(AnalyzerKind.Response, typeof(TEndpoint), typeof(TResponse), handler, priority);
+            => RegisterDto(AnalyzerKind.Response, typeof(TEndpoint), handler, priority);
 
         IDisposable RegisterRaw(
             AnalyzerKind kind,
@@ -114,19 +112,18 @@ namespace UmamusumeResponseAnalyzer.Plugin
         IDisposable RegisterDto<TPayload>(
             AnalyzerKind kind,
             Type endpointType,
-            Type payloadType,
             Func<TPayload, GameHttpHeaders, ValueTask> handler,
             int priority)
         {
             ArgumentNullException.ThrowIfNull(handler);
-            if (payloadType == typeof(byte[]))
+            if (typeof(TPayload) == typeof(byte[]))
                 throw new InvalidOperationException("DTO analyzer 不能使用 byte[]；raw analyzer 请使用单泛型 RegisterRequest/RegisterResponse overload。");
 
             return PluginManager.RegisterProgrammaticAnalyzer(
                 plugin,
                 kind,
                 endpointType,
-                payloadType,
+                typeof(TPayload),
                 priority,
                 context => handler((TPayload)context.GetDto(), context.Headers),
                 "programmatic DTO analyzer");
@@ -228,7 +225,6 @@ namespace UmamusumeResponseAnalyzer.Plugin
     sealed record StagedPlugin(IPlugin Plugin, PluginRegistrationPlan Plan);
 
     sealed record StagedGroupLoad(
-        HashSet<string> Group,
         string Key,
         PluginManager.PluginLoadContext Context,
         List<StagedAssembly> Assemblies,
@@ -246,7 +242,6 @@ namespace UmamusumeResponseAnalyzer.Plugin
         internal static Dictionary<string, PluginLoadContext> Contexts { get; } = [];
         internal static Dictionary<string, Assembly> AssemblyMap { get; } = [];
         internal static List<Assembly> Assemblies { get; } = [];
-        static Dictionary<string, Assembly> SharedAssemblies { get; } = new(StringComparer.Ordinal);
         static readonly string HostAssemblyName = typeof(PluginManager).Assembly.GetName().Name ?? "UmamusumeResponseAnalyzer";
         static readonly FrozenSet<string> SharedAssemblyNames = new[]
         {
@@ -257,8 +252,6 @@ namespace UmamusumeResponseAnalyzer.Plugin
             "WatsonWebserver.Core",
             "WatsonWebserver.Lite",
         }.ToFrozenSet(StringComparer.Ordinal);
-        static readonly object SharedAssemblyGate = new();
-        static bool sharedAssembliesInitialized;
         static readonly PluginHostEvents HostEvents = new();
         static Func<IPlugin, ILiveDisplayOutput>? liveDisplayFactory;
         static readonly AsyncLocal<int> PluginCallbackDepth = new();
@@ -307,8 +300,6 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 {
                     loadedByName.TryGetValue(name, out var plugin);
                     var metadata = GetValueIgnoreCase(scanned, name) ?? GetValueIgnoreCase(Metadatas, name);
-                    var filePath = metadata?.FilePath;
-                    var failed = filePath is not null && FailedPlugins.Contains(filePath);
                     statuses.Add(new(
                         metadata?.PluginName ?? name,
                         plugin?.Name ?? metadata?.PluginName ?? name,
@@ -316,9 +307,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                         plugin?.Version,
                         plugin is not null,
                         metadata is not null,
-                        metadata?.LoadInHost ?? false,
-                        failed,
-                        filePath));
+                        metadata?.LoadInHost ?? false));
                 }
 
                 return statuses;
@@ -574,8 +563,6 @@ namespace UmamusumeResponseAnalyzer.Plugin
 
         internal static void LoadPlugins()
         {
-            EnsureSharedAssembliesLoaded();
-
             foreach (var m in Metadatas.Values.Where(x => x.LoadInHost))
             {
                 LoadIntoContext(AssemblyLoadContext.Default, m);
@@ -707,72 +694,35 @@ namespace UmamusumeResponseAnalyzer.Plugin
             ctx.Unload();
         }
 
-        static void EnsureSharedAssembliesLoaded()
-        {
-            if (Volatile.Read(ref sharedAssembliesInitialized))
-                return;
-
-            lock (SharedAssemblyGate)
-            {
-                if (sharedAssembliesInitialized)
-                    return;
-
-                RegisterSharedAssembly(typeof(IPlugin).Assembly);
-                RegisterSharedAssembly(typeof(IGameEndpoint).Assembly);
-                RegisterSharedAssembly(typeof(AnsiConsole).Assembly);
-                RegisterSharedAssembly(typeof(HttpContextBase).Assembly);
-                RegisterSharedAssembly(typeof(WatsonWebserver.Lite.WebserverLite).Assembly);
-
-                foreach (var assembly in AssemblyLoadContext.Default.Assemblies)
-                    if (assembly.GetName().Name is { } name && SharedAssemblyNames.Contains(name))
-                        RegisterSharedAssembly(assembly);
-
-                Volatile.Write(ref sharedAssembliesInitialized, true);
-            }
-        }
-
-        static void RegisterSharedAssembly(Assembly assembly)
-        {
-            var name = assembly.GetName().Name;
-            if (name is not null)
-                SharedAssemblies[name] = assembly;
-        }
-
         internal static Assembly? ResolveSharedAssembly(AssemblyName requested)
         {
             if (requested.Name is not { } name || !SharedAssemblyNames.Contains(name))
                 return null;
 
-            EnsureSharedAssembliesLoaded();
-            lock (SharedAssemblyGate)
+            var shared = AssemblyLoadContext.Default.Assemblies.FirstOrDefault(assembly =>
+                string.Equals(assembly.GetName().Name, name, StringComparison.Ordinal));
+            if (shared is null)
             {
-                if (!SharedAssemblies.TryGetValue(name, out var shared))
+                try
                 {
-                    try
-                    {
-                        shared = AssemblyLoadContext.Default.LoadFromAssemblyName(requested);
-                        RegisterSharedAssembly(shared);
-                    }
-                    catch (Exception ex)
-                    {
-                        throw new FileLoadException($"shared ABI assembly {requested.FullName} 必须由 Default ALC 加载，但宿主无法加载。", requested.FullName, ex);
-                    }
+                    shared = AssemblyLoadContext.Default.LoadFromAssemblyName(requested);
                 }
-
-                ValidateSharedAssemblyVersion(name, requested, shared.GetName());
-
-                return shared;
+                catch (Exception ex)
+                {
+                    throw new FileLoadException($"shared ABI assembly {requested.FullName} 必须由 Default ALC 加载，但宿主无法加载。", requested.FullName, ex);
+                }
             }
-        }
 
-        static bool IsHostAssembly(string name) => string.Equals(name, HostAssemblyName, StringComparison.Ordinal);
+            ValidateSharedAssemblyVersion(name, requested, shared.GetName());
+            return shared;
+        }
 
         static void ValidateSharedAssemblyVersion(string name, AssemblyName requested, AssemblyName actual)
         {
             if (requested.Version is null)
                 return;
 
-            if (IsHostAssembly(name))
+            if (string.Equals(name, HostAssemblyName, StringComparison.Ordinal))
             {
                 if (actual.Version is not null && requested.Version > actual.Version)
                     LiveDisplayConsole.Log(
@@ -1083,10 +1033,10 @@ namespace UmamusumeResponseAnalyzer.Plugin
         internal static void InitializeLoadedPlugins()
         {
             foreach (var plugin in LoadedPlugins.ToList())
-                TryInitializePlugin(plugin, removeFromLoadedPlugins: true, disposeOnFailure: true);
+                TryInitializePlugin(plugin, committed: true);
         }
 
-        static bool TryInitializePlugin(IPlugin plugin, bool removeFromLoadedPlugins, bool disposeOnFailure)
+        static bool TryInitializePlugin(IPlugin plugin, bool committed)
         {
             _ = GetLiveDisplayFactory();
             try
@@ -1096,11 +1046,16 @@ namespace UmamusumeResponseAnalyzer.Plugin
             }
             catch (Exception ex)
             {
-                var failedPlugin = FailedPluginPath(plugin);
-                LiveDisplayConsole.LogException("Plugin", PluginInitializeException(plugin, ex));
+                var internalName = InternalName(plugin);
+                var failedPlugin = Metadatas.TryGetValue(internalName, out var metadata)
+                    ? metadata.FilePath
+                    : plugin.Name;
+                LiveDisplayConsole.LogException(
+                    "Plugin",
+                    new InvalidOperationException($"插件初始化失败: plugin={plugin.Name} ({internalName})", ex));
                 if (!FailedPlugins.Contains(failedPlugin))
                     FailedPlugins.Add(failedPlugin);
-                CleanupPluginAfterInitializationFailure(plugin, removeFromLoadedPlugins, disposeOnFailure);
+                CleanupPluginAfterInitializationFailure(plugin, committed);
                 return false;
             }
         }
@@ -1108,22 +1063,9 @@ namespace UmamusumeResponseAnalyzer.Plugin
         static Func<IPlugin, ILiveDisplayOutput> GetLiveDisplayFactory()
             => liveDisplayFactory ?? throw new InvalidOperationException("插件初始化前必须先绑定 LiveDisplay。");
 
-        static string FailedPluginPath(IPlugin plugin)
+        static void CleanupPluginAfterInitializationFailure(IPlugin plugin, bool committed)
         {
-            var internalName = InternalName(plugin);
-            return Metadatas.TryGetValue(internalName, out var metadata)
-                ? metadata.FilePath
-                : plugin.Name;
-        }
-
-        static InvalidOperationException PluginInitializeException(IPlugin plugin, Exception inner)
-            => new(
-                $"插件初始化失败: plugin={plugin.Name} ({InternalName(plugin)})",
-                inner);
-
-        static void CleanupPluginAfterInitializationFailure(IPlugin plugin, bool removeFromLoadedPlugins, bool dispose)
-        {
-            if (removeFromLoadedPlugins)
+            if (committed)
                 LoadedPlugins.Remove(plugin);
 
             RemoveAnalyzerMethods(plugin);
@@ -1132,7 +1074,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
             DisposeHostEventSubscriptions(plugin);
             KeyboardManager.UnregisterByOwner(plugin);
 
-            if (!dispose)
+            if (!committed)
                 return;
 
             try { plugin.Dispose(); }
@@ -1434,7 +1376,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 // 文件已被删除：卸载即完成
                 LiveDisplayConsole.MarkupLog("Plugin", $"[yellow]插件 {pluginName.EscapeMarkup()} 的文件已不存在，已卸载。[/]", LiveDisplaySeverity.Warning);
                 BuildGroups();
-                LoadAffectedGroups(affectedNames, outcomes, pendingUnloads);
+                LoadAffectedGroups(affectedNames, outcomes);
                 return outcomes[pluginName] = true;
             }
 
@@ -1446,7 +1388,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
             }
 
             BuildGroups();
-            LoadAffectedGroups(affectedNames, outcomes, pendingUnloads);
+            LoadAffectedGroups(affectedNames, outcomes);
 
             var loaded = IsPluginLoaded(pluginName);
             if (loaded)
@@ -1512,8 +1454,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
         /// <summary>加载受本轮重载影响且尚无 ALC 的上下文组，对新实例调用 Initialize，并补发一次启动事件。</summary>
         static void LoadAffectedGroups(
             IEnumerable<string> affectedNames,
-            Dictionary<string, bool> outcomes,
-            List<PendingPluginUnload> pendingUnloads)
+            Dictionary<string, bool> outcomes)
         {
             var affected = affectedNames.ToHashSet(StringComparer.OrdinalIgnoreCase);
             var pendingGroups = ContextGroups
@@ -1586,7 +1527,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
 
             var key = GroupKey(group);
             var ctx = new PluginLoadContext(key);
-            var staged = new StagedGroupLoad(group, key, ctx, [], []);
+            var staged = new StagedGroupLoad(key, ctx, [], []);
 
             foreach (var name in group)
             {
@@ -1643,9 +1584,6 @@ namespace UmamusumeResponseAnalyzer.Plugin
             {
                 if (plugin is not null)
                 {
-                    RemoveAnalyzerMethods(plugin);
-                    DisposeHostEventSubscriptions(plugin);
-                    KeyboardManager.UnregisterByOwner(plugin);
                     try { plugin.Dispose(); }
                     catch (Exception disposeEx) { LiveDisplayConsole.LogException("Plugin", disposeEx); }
                 }
@@ -1659,7 +1597,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
         static bool InitializeStagedPlugins(StagedGroupLoad staged)
         {
             foreach (var plugin in staged.Plugins)
-                if (!TryInitializePlugin(plugin.Plugin, removeFromLoadedPlugins: false, disposeOnFailure: false))
+                if (!TryInitializePlugin(plugin.Plugin, committed: false))
                     return false;
 
             return true;

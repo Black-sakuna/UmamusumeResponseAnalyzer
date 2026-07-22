@@ -3,7 +3,7 @@ using Spectre.Console.Rendering;
 
 namespace UmamusumeResponseAnalyzer.LiveDisplay
 {
-    public sealed record LiveDisplayPanel(
+    internal sealed record LiveDisplayPanel(
         LiveDisplayWorkspace Workspace,
         string PluginId,
         string Key,
@@ -12,15 +12,14 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         DateTimeOffset UpdatedAt,
         bool FullBleed = false);
 
-    public sealed record LiveDisplayLogLine(
+    internal sealed record LiveDisplayLogLine(
         LiveDisplayWorkspace? Workspace,
         string PluginId,
         string Text,
         LiveDisplaySeverity Severity,
-        bool IsMarkup,
-        DateTimeOffset Timestamp);
+        bool IsMarkup);
 
-    public sealed record LiveDisplayNotification(
+    internal sealed record LiveDisplayNotification(
         LiveDisplayWorkspace? Workspace,
         string PluginId,
         string Text,
@@ -40,7 +39,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         }
     }
 
-    public sealed class PluginLiveDisplayOutput : ILiveDisplayOutput
+    internal sealed class PluginLiveDisplayOutput : ILiveDisplayOutput
     {
         readonly string pluginId;
         readonly UiHost uiHost;
@@ -81,10 +80,10 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 switchToWorkspace);
 
         public void Log(LiveDisplayWorkspace workspace, string text, LiveDisplaySeverity severity = LiveDisplaySeverity.Info)
-            => uiHost.Log(new LiveDisplayLogLine(workspace, pluginId, text, severity, IsMarkup: false, DateTimeOffset.Now));
+            => uiHost.Log(new LiveDisplayLogLine(workspace, pluginId, text, severity, IsMarkup: false));
 
         public void MarkupLog(LiveDisplayWorkspace workspace, string markup, LiveDisplaySeverity severity = LiveDisplaySeverity.Info)
-            => uiHost.Log(new LiveDisplayLogLine(workspace, pluginId, markup, severity, IsMarkup: true, DateTimeOffset.Now));
+            => uiHost.Log(new LiveDisplayLogLine(workspace, pluginId, markup, severity, IsMarkup: true));
 
         public void Notify(LiveDisplayWorkspace workspace, string text, LiveDisplaySeverity severity = LiveDisplaySeverity.Info, TimeSpan? ttl = null)
             => uiHost.Notify(new LiveDisplayNotification(workspace, pluginId, text, severity, LiveDisplayNotification.ExpiresAtFromNow(severity, ttl)));

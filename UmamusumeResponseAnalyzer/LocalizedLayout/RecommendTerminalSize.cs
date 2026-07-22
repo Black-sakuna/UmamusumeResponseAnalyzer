@@ -1,5 +1,6 @@
 namespace UmamusumeResponseAnalyzer.LocalizedLayout
 {
+    [Obsolete("Migrate to the LiveDisplay layout APIs.", false)]
     public class RecommendTerminalSize
     {
         public static TerminalSize Current
@@ -15,6 +16,7 @@ namespace UmamusumeResponseAnalyzer.LocalizedLayout
         public static TerminalSize SimplifiedChinese = new(110, 35);
         public static TerminalSize Japanese = new(135, 35);
         public static TerminalSize English = new(110, 35);
+        [Obsolete("Migrate to the LiveDisplay layout APIs.", false)]
         public class TerminalSize
         {
             public int Width { get; }

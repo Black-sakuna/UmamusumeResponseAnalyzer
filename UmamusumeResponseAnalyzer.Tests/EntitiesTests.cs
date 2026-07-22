@@ -99,7 +99,6 @@ namespace UmamusumeResponseAnalyzer.Tests
         {
             var card = new SupportCardName(30241, "团体卡", 0, 9047);
 
-            Assert.True(card.IsFriendshipTrainingGroupCard);
             Assert.True(card.CanTriggerFriendshipTraining(trainingType));
         }
 

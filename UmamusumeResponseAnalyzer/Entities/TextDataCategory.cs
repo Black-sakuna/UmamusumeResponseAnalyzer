@@ -3,6 +3,7 @@ namespace UmamusumeResponseAnalyzer.Entities
     /// <summary>
     /// master.mdb text_data的不同category
     /// </summary>
+    [Obsolete("Migrate to the current database and domain APIs.", false)]
     public enum TextDataCategory
     {
         /// <summary>

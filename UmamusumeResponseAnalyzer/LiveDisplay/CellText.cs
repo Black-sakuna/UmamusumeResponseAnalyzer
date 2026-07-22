@@ -12,7 +12,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             if (width <= 0)
                 return string.Empty;
 
-            if (IsAscii(value))
+            if (Ascii.IsValid(value))
                 return FitAsciiToCellWidth(value, width);
 
             var trimmed = TrimToCellWidth(value, width);
@@ -25,7 +25,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             if (maxWidth <= 0)
                 return string.Empty;
 
-            if (IsAscii(value))
+            if (Ascii.IsValid(value))
                 return TrimAsciiToCellWidth(value, maxWidth);
 
             if (value.GetCellWidth() <= maxWidth)
@@ -61,7 +61,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 if (segment.IsLineBreak || segment.IsControlCode)
                     continue;
 
-                if (IsAscii(segment.Text))
+                if (Ascii.IsValid(segment.Text))
                 {
                     var segmentStart = offset;
                     var segmentEnd = offset + segment.Text.Length;
@@ -140,17 +140,6 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 var text = value.Substring(start, length);
                 yield return new TextElement(start, length, text.GetCellWidth());
             }
-        }
-
-        static bool IsAscii(string value)
-        {
-            foreach (var c in value)
-            {
-                if (c > 0x7F)
-                    return false;
-            }
-
-            return true;
         }
 
         static string FitAsciiToCellWidth(string value, int width)

@@ -23,7 +23,14 @@ namespace UmamusumeResponseAnalyzer
         /// <returns>10x为各剧本的NPC<c>BaseName</c><br/>
         /// CharaId为人物<c>BaseName</c><br/>
         /// CardId则为S卡<c>SupportCardName</c>或角色<c>UmaName</c></returns>
-        public string this[int id] => GetSimpleName(id);
+        public string this[int id] => names.TryGetValue(id, out var value)
+            ? value switch
+            {
+                SupportCardName supportCard => supportCard.SimpleName,
+                UmaName uma => uma.CharacterName,
+                _ => value.Name,
+            }
+            : I18N_Unknown;
         /// <param name="id">唯一ID，CharaId及CardId均可。</param>
         /// <returns>10x为各剧本的NPC<c>BaseName</c><br/>
         /// 其他则为人物<c>BaseName</c></returns>
@@ -40,17 +47,6 @@ namespace UmamusumeResponseAnalyzer
             if (value is not UmaName) throw new Exception(string.Format(I18N_CastToUmaNameFail, value.GetType()));
             return (UmaName)value;
         }
-        private string GetSimpleName(int id)
-        {
-            if (!names.TryGetValue(id, out var value)) return I18N_Unknown;
-            return value switch
-            {
-                SupportCardName scn => scn.SimpleName,
-                UmaName un => un.CharacterName,
-                _ => value.Name,
-            };
-        }
-
         public int GetRSupportCardTypeByCharaId(int charaId)
         {
             var matchingCards = names.Values

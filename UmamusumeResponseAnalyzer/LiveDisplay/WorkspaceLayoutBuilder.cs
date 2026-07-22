@@ -5,34 +5,28 @@ using Spectre.Console.Rendering;
 namespace UmamusumeResponseAnalyzer.LiveDisplay
 {
     // workspace 布局渲染：把 UiHost 持有的 panels/logs/activeWorkspace 组装成 IRenderable。
-    //
-    // 无可变 state 所有权——每次渲染时 UiHost 把当前状态打成快照传入。
-    // shortcutResolver 把 workspace 映射成"快捷键+标题"显示标签（同 notification popup 用）。
-    internal sealed class WorkspaceLayoutBuilder
+    internal static class WorkspaceLayoutBuilder
     {
         static readonly Color[] PluginColors = [Color.DeepSkyBlue1, Color.Green, Color.Yellow, Color.Orange1, Color.MediumPurple, Color.Aqua, Color.Lime];
 
-        // workspace 布局所需的 UiHost 状态快照。shortcutResolver 封装 workspaces→标签查询。
-        public readonly record struct State(
-            LiveDisplayWorkspace? ActiveWorkspace,
-            IReadOnlyCollection<LiveDisplayPanel> Panels,
-            IReadOnlyList<LiveDisplayLogLine> Logs,
-            Func<LiveDisplayWorkspace, string> ShortcutResolver);
-
-        public IRenderable BuildWorkspaceLayout(in State state)
+        public static IRenderable BuildWorkspaceLayout(
+            LiveDisplayWorkspace? activeWorkspace,
+            IReadOnlyCollection<LiveDisplayPanel> panels,
+            IReadOnlyList<LiveDisplayLogLine> logs,
+            Func<LiveDisplayWorkspace, string> shortcutResolver)
         {
-            if (state.ActiveWorkspace is null)
+            if (activeWorkspace is null)
             {
-                var globalLogs = state.Logs
+                var globalLogs = logs
                     .Where(x => x.Workspace is null)
                     .TakeLast(18);
                 return BuildBareLogs(globalLogs);
             }
 
-            if (TryGetFullBleedPanel(state.Panels, state.ActiveWorkspace, out var fullBleedPanel))
+            if (TryGetFullBleedPanel(panels, activeWorkspace, out var fullBleedPanel))
                 return fullBleedPanel.Content;
 
-            return BuildWorkspaceBody(state.Panels, state.Logs, state.ActiveWorkspace, state.ShortcutResolver);
+            return BuildWorkspaceBody(panels, logs, activeWorkspace, shortcutResolver);
         }
 
         static bool TryGetFullBleedPanel(

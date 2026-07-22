@@ -1,6 +1,5 @@
 using System.Collections.Concurrent;
 using System.Reflection;
-using System.Text;
 using UmamusumeResponseAnalyzer.LiveDisplay;
 
 namespace UmamusumeResponseAnalyzer
@@ -25,9 +24,8 @@ namespace UmamusumeResponseAnalyzer
         static int inputSuspensionCount;
         static int popupGeneration;
         static readonly AsyncLocal<object?> registrationOwner = new();
-        static readonly StringBuilder commandBuffer = new();
+        static string commandBuffer = string.Empty;
         static readonly List<string> commandHistory = [];
-        static IReadOnlyList<string> commandCompletionCandidates = [];
         static string commandDraft = string.Empty;
         static int commandHistoryIndex;
         static bool inCommandInput;
@@ -157,7 +155,7 @@ namespace UmamusumeResponseAnalyzer
 
         public static void ClearHandlersByAssembly(IReadOnlySet<Assembly> assemblies)
         {
-            foreach (var (combo, entry) in hotkeys.ToList())
+            foreach (var (combo, entry) in hotkeys)
             {
                 if (entry.DeclaringAssembly != null && assemblies.Contains(entry.DeclaringAssembly))
                     hotkeys.TryRemove(combo, out _);
@@ -392,12 +390,9 @@ namespace UmamusumeResponseAnalyzer
             lock (commandInputSync)
             {
                 inCommandInput = true;
-                commandBuffer.Clear();
-                commandBuffer.Append(initialText);
+                commandBuffer = initialText;
                 commandHistoryIndex = commandHistory.Count;
                 commandDraft = initialText;
-                commandCompletionCandidates = [];
-                initialText = commandBuffer.ToString();
             }
 
             OverlaySink?.ShowCommandInput(new KeyboardCommandInput(initialText));
@@ -411,8 +406,8 @@ namespace UmamusumeResponseAnalyzer
                 if (!inCommandInput)
                     return;
 
-                commandBuffer.Append(keyChar);
-                text = commandBuffer.ToString();
+                commandBuffer += keyChar;
+                text = commandBuffer;
                 ResetCommandHistoryNavigationLocked(text);
             }
 
@@ -427,8 +422,8 @@ namespace UmamusumeResponseAnalyzer
                 if (!inCommandInput || commandBuffer.Length == 0)
                     return false;
 
-                commandBuffer.Remove(commandBuffer.Length - 1, 1);
-                text = commandBuffer.ToString();
+                commandBuffer = commandBuffer[..^1];
+                text = commandBuffer;
                 ResetCommandHistoryNavigationLocked(text);
             }
 
@@ -447,11 +442,10 @@ namespace UmamusumeResponseAnalyzer
                 if (delta < 0)
                 {
                     if (commandHistoryIndex == commandHistory.Count)
-                        commandDraft = commandBuffer.ToString();
+                        commandDraft = commandBuffer;
 
                     commandHistoryIndex = Math.Max(0, commandHistoryIndex - 1);
-                    commandBuffer.Clear();
-                    commandBuffer.Append(commandHistory[commandHistoryIndex]);
+                    commandBuffer = commandHistory[commandHistoryIndex];
                 }
                 else
                 {
@@ -459,14 +453,12 @@ namespace UmamusumeResponseAnalyzer
                         return;
 
                     commandHistoryIndex++;
-                    commandBuffer.Clear();
-                    commandBuffer.Append(commandHistoryIndex == commandHistory.Count
+                    commandBuffer = commandHistoryIndex == commandHistory.Count
                         ? commandDraft
-                        : commandHistory[commandHistoryIndex]);
+                        : commandHistory[commandHistoryIndex];
                 }
 
-                commandCompletionCandidates = [];
-                text = commandBuffer.ToString();
+                text = commandBuffer;
             }
 
             OverlaySink?.ShowCommandInput(new KeyboardCommandInput(text));
@@ -481,7 +473,7 @@ namespace UmamusumeResponseAnalyzer
                 if (!inCommandInput)
                     return;
 
-                text = commandBuffer.ToString();
+                text = commandBuffer;
                 provider = commandCompletionProvider;
             }
 
@@ -513,34 +505,28 @@ namespace UmamusumeResponseAnalyzer
             IReadOnlyList<string> shownCandidates = [];
             lock (commandInputSync)
             {
-                if (!inCommandInput || commandBuffer.ToString() != originalText)
+                if (!inCommandInput || commandBuffer != originalText)
                     return;
 
                 if (candidates.Count == 0)
                 {
-                    commandCompletionCandidates = [];
-                    text = commandBuffer.ToString();
+                    text = commandBuffer;
                 }
                 else if (candidates.Count == 1)
                 {
-                    commandBuffer.Clear();
-                    commandBuffer.Append(candidates[0]);
-                    text = commandBuffer.ToString();
+                    commandBuffer = candidates[0];
+                    text = commandBuffer;
                     ResetCommandHistoryNavigationLocked(text);
                 }
                 else
                 {
                     var commonPrefix = LongestCommonPrefix(candidates);
                     if (commonPrefix.Length > commandBuffer.Length)
-                    {
-                        commandBuffer.Clear();
-                        commandBuffer.Append(commonPrefix);
-                    }
+                        commandBuffer = commonPrefix;
 
-                    text = commandBuffer.ToString();
-                    commandCompletionCandidates = candidates.ToArray();
-                    shownCandidates = commandCompletionCandidates;
-                    ResetCommandHistoryNavigationLocked(text, clearCompletions: false);
+                    text = commandBuffer;
+                    shownCandidates = candidates.ToArray();
+                    ResetCommandHistoryNavigationLocked(text);
                 }
             }
 
@@ -553,15 +539,14 @@ namespace UmamusumeResponseAnalyzer
             Func<string, Task>? handler;
             lock (commandInputSync)
             {
-                command = commandBuffer.ToString();
+                command = commandBuffer;
                 if (!string.IsNullOrWhiteSpace(command))
                     commandHistory.Add(command);
-                commandBuffer.Clear();
+                commandBuffer = string.Empty;
                 inCommandInput = false;
                 handler = commandHandler;
                 commandHistoryIndex = commandHistory.Count;
                 commandDraft = string.Empty;
-                commandCompletionCandidates = [];
             }
 
             OverlaySink?.HideCommandInput();
@@ -577,10 +562,9 @@ namespace UmamusumeResponseAnalyzer
                     shouldHide = true;
 
                 inCommandInput = false;
-                commandBuffer.Clear();
+                commandBuffer = string.Empty;
                 commandHistoryIndex = commandHistory.Count;
                 commandDraft = string.Empty;
-                commandCompletionCandidates = [];
             }
 
             if (shouldHide)
@@ -594,7 +578,6 @@ namespace UmamusumeResponseAnalyzer
                 commandHistory.Clear();
                 commandHistoryIndex = 0;
                 commandDraft = string.Empty;
-                commandCompletionCandidates = [];
             }
         }
 
@@ -606,19 +589,16 @@ namespace UmamusumeResponseAnalyzer
                 if (!inCommandInput)
                     return;
 
-                commandCompletionCandidates = [];
-                text = commandBuffer.ToString();
+                text = commandBuffer;
             }
 
             OverlaySink?.ShowCommandInput(new KeyboardCommandInput(text));
         }
 
-        static void ResetCommandHistoryNavigationLocked(string text, bool clearCompletions = true)
+        static void ResetCommandHistoryNavigationLocked(string text)
         {
             commandHistoryIndex = commandHistory.Count;
             commandDraft = text;
-            if (clearCompletions)
-                commandCompletionCandidates = [];
         }
 
         static string LongestCommonPrefix(IReadOnlyList<string> values)

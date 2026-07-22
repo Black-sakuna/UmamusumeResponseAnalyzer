@@ -7,11 +7,9 @@ using Xunit;
 namespace UmamusumeResponseAnalyzer.Tests
 {
     /// <summary>
-    /// Config 的 YAML 往返 + 各 sub-config 默认值的确定性单测。
-    /// 不触碰 <see cref="Config.Initialize"/>/<see cref="Config.Save"/>（那是文件 IO）——
-    /// 这里自建一套与 <c>Config.cs</c> 顶部 <c>_serializer/_deserializer</c> 等价的
-    /// SerializerBuilder/DeserializerBuilder（同样的 HyphenatedNamingConvention），只验证序列化逻辑本身。
+    /// Config 的 YAML 往返、Initialize 文件边界和各 sub-config 默认值测试。
     /// </summary>
+    [Collection("Database")]
     public class ConfigSerializationTests
     {
         // 复刻 Config.cs 第 19/20 行的两个 builder 设置，保持命名约定一致
@@ -23,6 +21,156 @@ namespace UmamusumeResponseAnalyzer.Tests
             .IgnoreUnmatchedProperties()
             .WithNamingConvention(HyphenatedNamingConvention.Instance)
             .Build();
+
+        static void WithConfigFile(string yaml, Action<string> test)
+        {
+            var path = Path.Combine(Path.GetTempPath(), $"ura-config-{Guid.NewGuid():N}.yaml");
+            var originalPath = Config.CONFIG_FILEPATH;
+            var currentProperty = typeof(Config).GetProperty("Current", BindingFlags.NonPublic | BindingFlags.Static)!;
+            var originalCurrent = currentProperty.GetValue(null);
+            var originalCulture = Thread.CurrentThread.CurrentCulture;
+            var originalUiCulture = Thread.CurrentThread.CurrentUICulture;
+            var resourceCultures = typeof(Config).Assembly.GetTypes()
+                .Where(type => type.Namespace?.StartsWith("UmamusumeResponseAnalyzer.Localization") == true)
+                .Select(type => type.GetField("resourceCulture", BindingFlags.NonPublic | BindingFlags.Static))
+                .OfType<FieldInfo>()
+                .Select(field => (Field: field, Value: field.GetValue(null)))
+                .ToArray();
+
+            try
+            {
+                File.WriteAllText(path, yaml);
+                Config.CONFIG_FILEPATH = path;
+                test(path);
+            }
+            finally
+            {
+                Config.CONFIG_FILEPATH = originalPath;
+                currentProperty.SetValue(null, originalCurrent);
+                Thread.CurrentThread.CurrentCulture = originalCulture;
+                Thread.CurrentThread.CurrentUICulture = originalUiCulture;
+                foreach (var (field, value) in resourceCultures)
+                    field.SetValue(null, value);
+                File.Delete(path);
+            }
+        }
+
+        [Fact]
+        public void Initialize_MissingSections_UsesDefaultsWithoutRewritingFile()
+        {
+            const string yaml = """
+                core:
+                  listen-port: 5000
+                """;
+
+            WithConfigFile(yaml, path =>
+            {
+                Config.Initialize();
+
+                Assert.Equal(5000, Config.Core.ListenPort);
+                Assert.NotNull(Config.Repository);
+                Assert.NotNull(Config.Plugin);
+                Assert.NotNull(Config.Updater);
+                Assert.NotNull(Config.Language);
+                Assert.NotNull(Config.Misc);
+                Assert.Equal(yaml, File.ReadAllText(path));
+            });
+        }
+
+        [Theory]
+        [InlineData("core")]
+        [InlineData("repository")]
+        [InlineData("plugin")]
+        [InlineData("updater")]
+        [InlineData("language")]
+        [InlineData("misc")]
+        public void Initialize_ExplicitNullSection_ThrowsWithPathAndDoesNotRewriteFile(string section)
+        {
+            var yaml = $"{section}: null";
+
+            WithConfigFile(yaml, path =>
+            {
+                var exception = Assert.Throws<InvalidDataException>(Config.Initialize);
+
+                Assert.Contains(path, exception.Message);
+                Assert.True(exception.Message.Contains(section, StringComparison.OrdinalIgnoreCase));
+                Assert.Equal(yaml, File.ReadAllText(path));
+            });
+        }
+
+        [Fact]
+        public void Initialize_NullDocument_ThrowsWithPathAndDoesNotRewriteFile()
+        {
+            const string yaml = "null";
+
+            WithConfigFile(yaml, path =>
+            {
+                var exception = Assert.Throws<InvalidDataException>(Config.Initialize);
+
+                Assert.Contains(path, exception.Message);
+                Assert.Equal(yaml, File.ReadAllText(path));
+            });
+        }
+
+        [Fact]
+        public void Initialize_V11421Config_IgnoresRemovedFieldsWithoutRewritingFile()
+        {
+            const string yaml = """
+                core:
+                  listen-address: 0.0.0.0
+                  listen-port: 5000
+                  request-additional-header: true
+                  show-first-run-prompt: false
+                repository:
+                  targets:
+                  - Cygames
+                  additional-plugin-repositories:
+                    legacy: https://example.com/plugins.json
+                plugin:
+                  plugin-settings:
+                    LegacyPlugin:
+                      enabled: true
+                updater:
+                  is-github-blocked: false
+                  trainer-is-male: false
+                  database-language: zh-TW
+                  custom-database-repository: https://example.com/assets
+                  force-use-github-to-update: true
+                net-filter:
+                  host: 127.0.0.1
+                  port: 1080
+                  username: user
+                  password: password
+                  server-type: socks5
+                  enable: false
+                dmm:
+                  launcher-infomation:
+                    client-app: DMMGamePlayer5
+                  machine-information:
+                    user-os: win
+                  accounts: []
+                  enable: false
+                language:
+                  selected: English
+                misc:
+                  save-response-for-debug: true
+                """;
+
+            WithConfigFile(yaml, path =>
+            {
+                Config.Initialize();
+
+                Assert.Equal("0.0.0.0", Config.Core.ListenAddress);
+                Assert.Equal(5000, Config.Core.ListenPort);
+                Assert.False(Config.Core.ShowFirstRunPrompt);
+                Assert.Equal(["Cygames"], Config.Repository.Targets);
+                Assert.False(Config.Updater.TrainerIsMale);
+                Assert.Equal("zh-TW", Config.Updater.DatabaseLanguage);
+                Assert.Equal(LanguageConfig.Language.English, Config.Language.Selected);
+                Assert.True(Config.Misc.SaveResponseForDebug);
+                Assert.Equal(yaml, File.ReadAllText(path));
+            });
+        }
 
         [Fact]
         public void YamlConfig_RoundTrips_PreservesKeyFields()

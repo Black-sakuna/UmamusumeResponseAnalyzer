@@ -90,7 +90,6 @@ namespace UmamusumeResponseAnalyzer
             WebInstallApi.Register(Instance);
             Instance.Start();
         }
-        internal static void Stop() => Instance.Dispose();
         internal static string ReadCanonicalUrl(HttpContextBase ctx)
         {
             var canonicalUrl = ctx.Request.Headers[CanonicalUrlHeaderName];

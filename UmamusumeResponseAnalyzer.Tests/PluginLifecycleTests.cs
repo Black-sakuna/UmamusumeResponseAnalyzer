@@ -71,6 +71,7 @@ namespace UmamusumeResponseAnalyzer.Tests
             Assert.True(context.Initialized);
             Assert.NotNull(context.Context);
             Assert.Same(liveDisplay, context.Context.LiveDisplay);
+            Assert.Same(context.Context, context.Context.Events);
         }
 
         [Fact]
@@ -357,6 +358,9 @@ namespace UmamusumeResponseAnalyzer.Tests
             {
             }
 
+            public virtual Task ConfigPromptAsync()
+                => Task.CompletedTask;
+
             public Task UpdatePlugin(ProgressContext ctx)
                 => Task.CompletedTask;
         }
@@ -535,7 +539,7 @@ namespace UmamusumeResponseAnalyzer.Tests
 
             public int ConfigPromptCalls { get; private set; }
 
-            public Task ConfigPromptAsync()
+            public override Task ConfigPromptAsync()
             {
                 ConfigPromptCalls++;
                 return Task.CompletedTask;
@@ -579,7 +583,7 @@ namespace UmamusumeResponseAnalyzer.Tests
 
             public Exception? ReloadException { get; private set; }
 
-            public async Task ConfigPromptAsync()
+            public override async Task ConfigPromptAsync()
             {
                 await Task.Yield();
                 ReloadException = Assert.Throws<InvalidOperationException>(() => PluginManager.ReloadPlugins("AnyPlugin"));

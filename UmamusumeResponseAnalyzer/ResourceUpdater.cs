@@ -160,36 +160,17 @@ namespace UmamusumeResponseAnalyzer
                         new RemainingTimeColumn(),
                         new SpinnerColumn()
                     ])
-                    .StartAsync(async ctx =>
-                    {
-                        var tasks = new List<Task>();
-
-                        var eventTask = Download(ctx, I18N_DownloadEventsInstruction, Database.EVENT_NAME_FILEPATH);
-                        tasks.Add(eventTask);
-
-                        var namesTask = Download(ctx, I18N_DownloadNamesInstruction, Database.NAMES_FILEPATH);
-                        tasks.Add(namesTask);
-
-                        var skillTask = Download(ctx, I18N_DownloadSkillDataInstruction, Database.SKILLS_FILEPATH);
-                        tasks.Add(skillTask);
-
-                        var talentSkillTask = Download(ctx, I18N_DownloadTalentSkillInstruction, Database.TALENT_SKILLS_FILEPATH);
-                        tasks.Add(talentSkillTask);
-
-                        var factorIdTask = Download(ctx, I18N_DownloadFactorIdsInstruction, Database.FACTOR_IDS_FILEPATH);
-                        tasks.Add(factorIdTask);
-
-                        var skillUpgradeSpecialityTask = Download(ctx, I18N_DownloadSkillUpgradeSpecialityInstruction, Database.SKILL_UPGRADE_SPECIALITY_FILEPATH);
-                        tasks.Add(skillUpgradeSpecialityTask);
-
-                        var winSaddleTask = Download(ctx, Database.SADDLE_IDS_FILEPATH, Database.SADDLE_IDS_FILEPATH);
-                        tasks.Add(winSaddleTask);
-
-                        var successionRelationTask = Download(ctx, Database.SUCCESSION_RELATION_FILEPATH, Database.SUCCESSION_RELATION_FILEPATH);
-                        tasks.Add(successionRelationTask);
-
-                        await Task.WhenAll(tasks);
-                    }));
+                    .StartAsync(ctx => Task.WhenAll(
+                    [
+                        Download(ctx, I18N_DownloadEventsInstruction, Database.EVENT_NAME_FILEPATH),
+                        Download(ctx, I18N_DownloadNamesInstruction, Database.NAMES_FILEPATH),
+                        Download(ctx, I18N_DownloadSkillDataInstruction, Database.SKILLS_FILEPATH),
+                        Download(ctx, I18N_DownloadTalentSkillInstruction, Database.TALENT_SKILLS_FILEPATH),
+                        Download(ctx, I18N_DownloadFactorIdsInstruction, Database.FACTOR_IDS_FILEPATH),
+                        Download(ctx, I18N_DownloadSkillUpgradeSpecialityInstruction, Database.SKILL_UPGRADE_SPECIALITY_FILEPATH),
+                        Download(ctx, Database.SADDLE_IDS_FILEPATH, Database.SADDLE_IDS_FILEPATH),
+                        Download(ctx, Database.SUCCESSION_RELATION_FILEPATH, Database.SUCCESSION_RELATION_FILEPATH)
+                    ])));
             }
             catch (Exception ex)
             {

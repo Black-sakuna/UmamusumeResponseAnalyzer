@@ -30,28 +30,27 @@ namespace UmamusumeResponseAnalyzer
         {
             if (File.Exists(CONFIG_FILEPATH))
             {
-                Current = _deserializer.Deserialize<YamlConfig>(File.ReadAllText(CONFIG_FILEPATH));
-                foreach (var property in Current.GetType().GetProperties())
+                var config = _deserializer.Deserialize<YamlConfig>(File.ReadAllText(CONFIG_FILEPATH))
+                    ?? throw new InvalidDataException($"配置文件“{CONFIG_FILEPATH}”内容为 null，请修复后重试。");
+                var nullSection = config switch
                 {
-                    var value = property.GetValue(Current);
-                    if (value == default)
-                    {
-                        property.SetValue(Current, property.PropertyType.GetConstructor(Type.EmptyTypes)!.Invoke([]));
-                    }
-                }
+                    { Core: null } => nameof(YamlConfig.Core),
+                    { Repository: null } => nameof(YamlConfig.Repository),
+                    { Plugin: null } => nameof(YamlConfig.Plugin),
+                    { Updater: null } => nameof(YamlConfig.Updater),
+                    { Language: null } => nameof(YamlConfig.Language),
+                    { Misc: null } => nameof(YamlConfig.Misc),
+                    _ => null
+                };
+                if (nullSection is not null)
+                    throw new InvalidDataException($"配置文件“{CONFIG_FILEPATH}”的 {nullSection} section 为 null，请修复后重试。");
+
+                Current = config;
                 UmamusumeResponseAnalyzer.ApplyCultureInfo();
             }
             else
             {
-                Current = new()
-                {
-                    Core = new(),
-                    Repository = new(),
-                    Plugin = new(),
-                    Updater = new(),
-                    Language = new(),
-                    Misc = new()
-                };
+                Current = new();
                 Save();
                 // 首次运行也要应用 culture,否则首启菜单会用 OS 区域(如繁中系统→无对应资源→回退英文)。
                 UmamusumeResponseAnalyzer.ApplyCultureInfo();
@@ -93,12 +92,12 @@ namespace UmamusumeResponseAnalyzer
 
     public class YamlConfig
     {
-        public CoreConfig Core { get; set; }
-        public RepositoryConfig Repository { get; set; }
-        public PluginConfig Plugin { get; set; }
-        public UpdaterConfig Updater { get; set; }
-        public LanguageConfig Language { get; set; }
-        public MiscConfig Misc { get; set; }
+        public CoreConfig Core { get; set; } = new();
+        public RepositoryConfig Repository { get; set; } = new();
+        public PluginConfig Plugin { get; set; } = new();
+        public UpdaterConfig Updater { get; set; } = new();
+        public LanguageConfig Language { get; set; } = new();
+        public MiscConfig Misc { get; set; } = new();
     }
 
     #region class
