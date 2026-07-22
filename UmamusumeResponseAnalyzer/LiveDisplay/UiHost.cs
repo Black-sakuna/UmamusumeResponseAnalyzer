@@ -443,9 +443,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 height = 35;
 
             IRenderable content = layoutBuilder.BuildWorkspaceLayout(
-                new WorkspaceLayoutBuilder.State(activeWorkspace, panels.Values, logs, WorkspaceLabel),
-                width,
-                height);
+                new WorkspaceLayoutBuilder.State(activeWorkspace, panels.Values, logs, WorkspaceLabel));
             var popupWidth = NotificationPopupRenderer.GetPopupWidth(width);
             var now = DateTimeOffset.Now;
             if (popupWidth > 0)

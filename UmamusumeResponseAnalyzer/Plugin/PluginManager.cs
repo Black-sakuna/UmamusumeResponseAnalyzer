@@ -614,7 +614,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 }
                 plugin = createdPlugin;
 
-                if (plugin.Targets.Length == 0 || plugin.Targets.Intersect(Config.Repository.Targets).Any() || Config.Repository.Targets.Count == 0)
+                if (ShouldLoadPluginForCurrentTargets(plugin))
                 {
                     phase = "注册插件入口";
                     RegisterMethods(plugin);
@@ -668,6 +668,11 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 return false;
             }
         }
+
+        static bool ShouldLoadPluginForCurrentTargets(IPlugin plugin)
+            => plugin.Targets.Length == 0 ||
+               plugin.Targets.Intersect(Config.Repository.Targets).Any() ||
+               Config.Repository.Targets.Count == 0;
 
         static InvalidOperationException PluginLoadException(PluginMetadata metadata, string phase, Exception inner)
             => new(
@@ -1092,7 +1097,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
             catch (Exception ex)
             {
                 var failedPlugin = FailedPluginPath(plugin);
-                LiveDisplayConsole.LogException("Plugin", PluginInitializeException(plugin, failedPlugin, ex));
+                LiveDisplayConsole.LogException("Plugin", PluginInitializeException(plugin, ex));
                 if (!FailedPlugins.Contains(failedPlugin))
                     FailedPlugins.Add(failedPlugin);
                 CleanupPluginAfterInitializationFailure(plugin, removeFromLoadedPlugins, disposeOnFailure);
@@ -1111,7 +1116,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 : plugin.Name;
         }
 
-        static InvalidOperationException PluginInitializeException(IPlugin plugin, string failedPlugin, Exception inner)
+        static InvalidOperationException PluginInitializeException(IPlugin plugin, Exception inner)
             => new(
                 $"插件初始化失败: plugin={plugin.Name} ({InternalName(plugin)})",
                 inner);
@@ -1627,7 +1632,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 }
                 plugin = createdPlugin;
 
-                if (plugin.Targets.Length != 0 && !plugin.Targets.Intersect(Config.Repository.Targets).Any() && Config.Repository.Targets.Count != 0)
+                if (!ShouldLoadPluginForCurrentTargets(plugin))
                     return true;
 
                 phase = "注册插件入口";

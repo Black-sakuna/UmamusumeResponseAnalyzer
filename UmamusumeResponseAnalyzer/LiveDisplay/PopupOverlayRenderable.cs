@@ -103,16 +103,6 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             return [new Segment(line)];
         }
 
-        protected static string FitToCellWidth(string value, int width)
-        {
-            return CellText.FitToCellWidth(value, width);
-        }
-
-        protected static string TrimToCellWidth(string value, int maxWidth)
-        {
-            return CellText.TrimToCellWidth(value, maxWidth);
-        }
-
         protected static IEnumerable<Segment> FitSegmentsToCellWidth(IEnumerable<Segment> segments, int width)
         {
             if (width <= 0)

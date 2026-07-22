@@ -80,7 +80,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             var contentWidth = Math.Max(0, width - (selectable ? 5 : 4));
             var fittedContent = line.IsMarkup
                 ? FitSegmentsToCellWidth(BuildMarkupContent(line.Text, contentWidth, options), contentWidth).ToArray()
-                : [BuildTextSegment(FitToCellWidth(line.Text, contentWidth), line.Color)];
+                : [BuildTextSegment(CellText.FitToCellWidth(line.Text, contentWidth), line.Color)];
             var prefix = selectable ? selected ? "│> " : "│  " : "│ ";
             return
             [
@@ -103,7 +103,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             }
             catch
             {
-                return [new Segment(TrimToCellWidth(markup, width))];
+                return [new Segment(CellText.TrimToCellWidth(markup, width))];
             }
         }
 

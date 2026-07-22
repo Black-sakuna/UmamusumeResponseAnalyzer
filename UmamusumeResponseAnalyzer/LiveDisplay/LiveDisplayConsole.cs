@@ -107,7 +107,6 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             Run(() => AnsiConsole.MarkupLine(markup));
         }
 
-        // 与 AnsiConsole.MarkupLine(string format, params object[] args) 对齐的复合格式化重载。
         public static void MarkupLine(string format, params object[] args)
         {
             Run(() => AnsiConsole.MarkupLine(format, args));
@@ -123,7 +122,6 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             Run(AnsiConsole.WriteLine);
         }
 
-        // WriteLine(string format, params object[] args) 与 string.Format 等价的复合格式化重载。
         public static void WriteLine(string format, params object[] args)
         {
             Run(() => AnsiConsole.WriteLine(format, args));

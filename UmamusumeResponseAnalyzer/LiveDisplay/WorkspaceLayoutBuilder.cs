@@ -19,7 +19,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             IReadOnlyList<LiveDisplayLogLine> Logs,
             Func<LiveDisplayWorkspace, string> ShortcutResolver);
 
-        public IRenderable BuildWorkspaceLayout(in State state, int width, int height)
+        public IRenderable BuildWorkspaceLayout(in State state)
         {
             if (state.ActiveWorkspace is null)
             {
@@ -144,8 +144,6 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
 
                 var prefixSegments = ((IRenderable)new Markup(prefixMarkup)).Render(options, maxWidth).ToArray();
                 var messageLines = BuildMessageLines(options, maxWidth);
-                if (messageLines.Count == 0)
-                    messageLines.Add(Array.Empty<Segment>());
 
                 var renderedAnyLine = false;
                 for (var i = 0; i < messageLines.Count; i++)

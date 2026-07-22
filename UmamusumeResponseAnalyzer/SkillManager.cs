@@ -3,7 +3,7 @@ using SingleModeChara = Gallop.SingleModeChara;
 
 namespace UmamusumeResponseAnalyzer
 {
-    public class SkillManagerGenerator()
+    public class SkillManagerGenerator
     {
         // 默认空 SkillManager:数据未加载(如全新用户还没下技能数据)时,Default[...] 返回空/null 而非 NPE。
         // 正常加载会在 Database.Initialize 用真实技能列表覆盖它。
@@ -50,50 +50,40 @@ namespace UmamusumeResponseAnalyzer
                 skill.Grade = skill.Propers.Max(i =>
                 {
                     var grade = skill.Grade;
-                    // 泥地技能似乎不受适性影响，gamewith报告为1.0，bwiki报告为+120，按gw的试试
-                    //switch (i.Ground)
-                    //{
-                    //    case SkillProper.GroundType.Dirt:
-                    //        grade = applyProperLevel(grade, chara_info.proper_ground_dirt);
-                    //        break;
-                    //    case SkillProper.GroundType.Turf:
-                    //        grade = applyProperLevel(grade, chara_info.proper_ground_turf);
-                    //        break;
-                    //}
                     switch (i.Style)
                     {
                         case SkillProper.StyleType.Nige:
-                            grade = applyProperLevel(grade, chara_info.proper_running_style_nige);
+                            grade = ApplyProperLevel(grade, chara_info.proper_running_style_nige);
                             break;
                         case SkillProper.StyleType.Senko:
-                            grade = applyProperLevel(grade, chara_info.proper_running_style_senko);
+                            grade = ApplyProperLevel(grade, chara_info.proper_running_style_senko);
                             break;
                         case SkillProper.StyleType.Sashi:
-                            grade = applyProperLevel(grade, chara_info.proper_running_style_sashi);
+                            grade = ApplyProperLevel(grade, chara_info.proper_running_style_sashi);
                             break;
                         case SkillProper.StyleType.Oikomi:
-                            grade = applyProperLevel(grade, chara_info.proper_running_style_oikomi);
+                            grade = ApplyProperLevel(grade, chara_info.proper_running_style_oikomi);
                             break;
                     }
                     switch (i.Distance)
                     {
                         case SkillProper.DistanceType.Short:
-                            grade = applyProperLevel(grade, chara_info.proper_distance_short);
+                            grade = ApplyProperLevel(grade, chara_info.proper_distance_short);
                             break;
                         case SkillProper.DistanceType.Mile:
-                            grade = applyProperLevel(grade, chara_info.proper_distance_mile);
+                            grade = ApplyProperLevel(grade, chara_info.proper_distance_mile);
                             break;
                         case SkillProper.DistanceType.Middle:
-                            grade = applyProperLevel(grade, chara_info.proper_distance_middle);
+                            grade = ApplyProperLevel(grade, chara_info.proper_distance_middle);
                             break;
                         case SkillProper.DistanceType.Long:
-                            grade = applyProperLevel(grade, chara_info.proper_distance_long);
+                            grade = ApplyProperLevel(grade, chara_info.proper_distance_long);
                             break;
                     }
                     return grade;
                 });
 
-                static int applyProperLevel(int grade, int level) => level switch
+                static int ApplyProperLevel(int grade, int level) => level switch
                 {
                     8 or 7 => (int)Math.Round(grade * 1.1), //S,A
                     6 or 5 => (int)Math.Round(grade * 0.9), //B,C
