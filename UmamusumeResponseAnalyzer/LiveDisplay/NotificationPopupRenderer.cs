@@ -47,17 +47,21 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             DateTimeOffset now,
             Func<LiveDisplayWorkspace, string> labelResolver)
         {
-            const int CardHeight = 5;
             const int CompactHeight = 3;
             var lines = new List<string>();
             var displayed = 0;
             var displayLimit = Math.Min(activeNotifications.Count, MaxPopupNotifications);
             for (var i = 0; i < displayLimit; i++)
             {
-                if (lines.Count + CardHeight > maxHeight)
+                var cardLines = BuildCardLines(
+                    activeNotifications[i],
+                    popupWidth,
+                    now,
+                    labelResolver);
+                if (lines.Count + cardLines.Count > maxHeight)
                     break;
 
-                lines.AddRange(BuildCardLines(activeNotifications[i], popupWidth, now, labelResolver));
+                lines.AddRange(cardLines);
                 displayed++;
             }
 
@@ -70,17 +74,29 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             return lines;
         }
 
-        static IEnumerable<string> BuildCardLines(
+        static List<string> BuildCardLines(
             LiveDisplayNotification notification,
             int popupWidth,
             DateTimeOffset now,
             Func<LiveDisplayWorkspace, string> labelResolver)
         {
-            yield return PopupFrame.Top(popupWidth);
-            yield return BuildContentLine($"{SeverityText(notification.Severity)} {notification.PluginId}", popupWidth);
-            yield return BuildContentLine(notification.Text, popupWidth);
-            yield return BuildContentLine(notification.Workspace is null ? "全局通知" : labelResolver(notification.Workspace), popupWidth);
-            yield return PopupFrame.BottomWithRightLabel(popupWidth, PopupCountdown.Format(notification.ExpiresAt, now));
+            var lines = new List<string>
+            {
+                PopupFrame.Top(popupWidth),
+                BuildContentLine($"{SeverityText(notification.Severity)} {notification.PluginId}", popupWidth)
+            };
+            lines.AddRange(
+                notification.Text
+                    .ReplaceLineEndings("\n")
+                    .Split('\n')
+                    .Select(line => BuildContentLine(line, popupWidth)));
+            lines.Add(BuildContentLine(
+                notification.Workspace is null ? "全局通知" : labelResolver(notification.Workspace),
+                popupWidth));
+            lines.Add(PopupFrame.BottomWithRightLabel(
+                popupWidth,
+                PopupCountdown.Format(notification.ExpiresAt, now)));
+            return lines;
         }
 
         static IEnumerable<string> BuildCompactLines(string text, int popupWidth)

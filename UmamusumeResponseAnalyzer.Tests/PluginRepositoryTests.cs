@@ -104,19 +104,6 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
 
         [Fact]
-        public void TruncateToWidth_ShortStringUnchanged() =>
-            Assert.Equal("abc", PluginRepository.TruncateToWidth("abc", 10));
-
-        [Fact]
-        public void TruncateToWidth_LongAsciiCutWithEllipsis() =>
-            Assert.Equal("abcd…", PluginRepository.TruncateToWidth("abcdefghij", 5));
-
-        [Fact]
-        public void TruncateToWidth_CountsCjkAsTwoColumns() =>
-            // 5 个 CJK = 10 列;maxWidth 6 → 省略号也占 1 列,最终宽度必须 <= 6。
-            Assert.Equal("中文…", PluginRepository.TruncateToWidth("中文测试啊", 6));
-
-        [Fact]
         public void InstallZipPath_PlacesZipUnderPluginsDir()
         {
             // 回归(URACloud 迁移引入):安装曾 ExtractToDirectory("./") 把插件解到 WORKING_DIRECTORY 根,
@@ -140,7 +127,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         public void BuildCatalog_DownloadUrl_PreservesRawVersionWithLeadingZeros()
         {
             // 回归(noVNC 实测):版本 "2026.03.04"(前导零)经 System.Version 归一会变 "2026.3.4",
-            // 拼出的下载 URL 与服务器(.../2026.03.04/download)不符 → 404 → 安装失败(再叠加 markup bug 就崩)。
+            // 拼出的下载 URL 与服务器(.../2026.03.04/download)不符 → 404 → 安装失败。
             // 下载 URL 必须用服务器原样的 RawVersion;比较/排序仍用强类型 Version(前导零无所谓)。
             var raw = new PluginInformation { Author = "URACloud-Tester", InternalName = "BreedersScenarioAnalyzer", RawVersion = "2026.03.04" };
             Assert.Equal(new System.Version(2026, 3, 4), raw.Version);

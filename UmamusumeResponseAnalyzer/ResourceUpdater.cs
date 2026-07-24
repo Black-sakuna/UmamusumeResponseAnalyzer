@@ -20,36 +20,36 @@ namespace UmamusumeResponseAnalyzer
                 UserAgent = { new System.Net.Http.Headers.ProductInfoHeaderValue("UmamusumeResponseAnalyzer", Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "Unknown Version") }
             }
         };
-        public static async Task<bool> NeedUpdate()
+        public static async Task<bool> NeedUpdate(CancellationToken cancellationToken = default)
         {
-            var json = JObject.Parse(await HttpClient.GetStringAsync("https://api.github.com/repos/UmamusumeResponseAnalyzer/UmamusumeResponseAnalyzer/releases/latest"));
+            var json = JObject.Parse(await HttpClient.GetStringAsync(
+                "https://api.github.com/repos/UmamusumeResponseAnalyzer/UmamusumeResponseAnalyzer/releases/latest",
+                cancellationToken));
             var latestVersion = json["tag_name"]?.ToString() ?? string.Empty;
             return !latestVersion.Equals("v" + Assembly.GetExecutingAssembly().GetName().Version);
         }
-        public static async Task UpdateProgram()
+        public static async Task UpdateProgram(CancellationToken cancellationToken = default)
         {
-            if (!await NeedUpdate())
+            if (!await NeedUpdate(cancellationToken))
             {
-                LiveDisplayConsole.WriteLine(I18N_AlreadyLatestInstruction);
-                LiveDisplayConsole.WriteLine(Localization.LaunchMenu.I18N_Options_BackToMenuInstruction);
-                LiveDisplayConsole.ReadKey();
-                return;
-            }
-            var path = Path.Combine(Path.GetTempPath(), "latest-UmamusumeResponseAnalyzer.exe");
-            try
-            {
-                await LiveDisplayConsole.RunProgressAsync(
-                    progress => Download(progress, I18N_DownloadProgramInstruction, path));
-            }
-            catch (Exception ex)
-            {
-                LiveDisplayConsole.WriteException(ex);
-                LiveDisplayConsole.ReadKey();
+                LiveDisplayConsole.Acknowledge(I18N_AlreadyLatestInstruction, cancellationToken);
                 return;
             }
 
-            LiveDisplayConsole.WriteLine(I18N_BeginUpdateProgramInstruction);
-            LiveDisplayConsole.ReadKey();
+            var path = Path.Combine(Path.GetTempPath(), "latest-UmamusumeResponseAnalyzer.exe");
+            await LiveDisplayConsole.RunProgressAsync(
+                (progress, token) => Download(
+                    progress,
+                    I18N_DownloadProgramInstruction,
+                    path,
+                    token),
+                cancellationToken);
+
+            if (!LiveDisplayConsole.Acknowledge(
+                    I18N_BeginUpdateProgramInstruction,
+                    cancellationToken))
+                return;
+
             CloseToUpdate();
         }
         public static void CloseToUpdate()
@@ -83,19 +83,16 @@ namespace UmamusumeResponseAnalyzer
                     return;
                 }
             }
-            using var Proc = new Process
+            UmamusumeResponseAnalyzer.StartAfterTerminalCleanup(new ProcessStartInfo
             {
-                StartInfo = new ProcessStartInfo
-                {
-                    FileName = Path.Combine(Path.GetTempPath(), "latest-UmamusumeResponseAnalyzer.exe"),
-                    Arguments = $"--update \"{Environment.ProcessPath}\"",
-                    UseShellExecute = true
-                }
-            };
-            Proc.Start();
-            Environment.Exit(0);
+                FileName = Path.Combine(Path.GetTempPath(), "latest-UmamusumeResponseAnalyzer.exe"),
+                Arguments = $"--update \"{Environment.ProcessPath}\"",
+                UseShellExecute = true
+            });
         }
-        public static async Task TryUpdateProgram(string savepath = null!)
+        public static async Task TryUpdateProgram(
+            string savepath = null!,
+            CancellationToken cancellationToken = default)
         {
             var path = Path.Combine(Path.GetTempPath(), "latest-UmamusumeResponseAnalyzer.exe");
             var exist = File.Exists(path);
@@ -113,7 +110,6 @@ namespace UmamusumeResponseAnalyzer
                     }
                 };
                 Proc.Start(); //把新程序复制到原来的目录后就启动
-                Environment.Exit(0);
                 return;
             }
             else if (exist && !FilesHaveSameHash(Environment.ProcessPath!, path)) //临时目录与当前目录的不一致则认为未更新
@@ -125,8 +121,7 @@ namespace UmamusumeResponseAnalyzer
             if (exist) //删除临时文件
             {
                 File.Delete(path);
-                await UpdateAssets();
-                LiveDisplayConsole.Clear();
+                await UpdateAssets(cancellationToken);
             }
         }
         static bool FilesHaveSameHash(string leftPath, string rightPath)
@@ -135,31 +130,22 @@ namespace UmamusumeResponseAnalyzer
             using var right = File.OpenRead(rightPath);
             return SHA256.HashData(left).SequenceEqual(SHA256.HashData(right));
         }
-        public static async Task UpdateAssets()
+        public static async Task UpdateAssets(CancellationToken cancellationToken = default)
         {
-            try
-            {
-                await LiveDisplayConsole.RunProgressAsync(progress => Task.WhenAll(
+            await LiveDisplayConsole.RunProgressAsync((progress, token) => Task.WhenAll(
                 [
-                    Download(progress, I18N_DownloadEventsInstruction, Database.EVENT_NAME_FILEPATH),
-                    Download(progress, I18N_DownloadNamesInstruction, Database.NAMES_FILEPATH),
-                    Download(progress, I18N_DownloadSkillDataInstruction, Database.SKILLS_FILEPATH),
-                    Download(progress, I18N_DownloadTalentSkillInstruction, Database.TALENT_SKILLS_FILEPATH),
-                    Download(progress, I18N_DownloadFactorIdsInstruction, Database.FACTOR_IDS_FILEPATH),
-                    Download(progress, I18N_DownloadSkillUpgradeSpecialityInstruction, Database.SKILL_UPGRADE_SPECIALITY_FILEPATH),
-                    Download(progress, Database.SADDLE_IDS_FILEPATH, Database.SADDLE_IDS_FILEPATH),
-                    Download(progress, Database.SUCCESSION_RELATION_FILEPATH, Database.SUCCESSION_RELATION_FILEPATH)
-                ]));
-            }
-            catch (Exception ex)
-            {
-                LiveDisplayConsole.WriteException(ex);
-                LiveDisplayConsole.ReadKey();
-                return;
-            }
+                    Download(progress, I18N_DownloadEventsInstruction, Database.EVENT_NAME_FILEPATH, token),
+                    Download(progress, I18N_DownloadNamesInstruction, Database.NAMES_FILEPATH, token),
+                    Download(progress, I18N_DownloadSkillDataInstruction, Database.SKILLS_FILEPATH, token),
+                    Download(progress, I18N_DownloadTalentSkillInstruction, Database.TALENT_SKILLS_FILEPATH, token),
+                    Download(progress, I18N_DownloadFactorIdsInstruction, Database.FACTOR_IDS_FILEPATH, token),
+                    Download(progress, I18N_DownloadSkillUpgradeSpecialityInstruction, Database.SKILL_UPGRADE_SPECIALITY_FILEPATH, token),
+                    Download(progress, Database.SADDLE_IDS_FILEPATH, Database.SADDLE_IDS_FILEPATH, token),
+                    Download(progress, Database.SUCCESSION_RELATION_FILEPATH, Database.SUCCESSION_RELATION_FILEPATH, token)
+                ]),
+                cancellationToken);
 
-            LiveDisplayConsole.WriteLine(I18N_DownloadedInstruction);
-            LiveDisplayConsole.ReadKey();
+            LiveDisplayConsole.Acknowledge(I18N_DownloadedInstruction, cancellationToken);
         }
         static string GetDownloadUrl(string filepath)
         {
@@ -173,7 +159,11 @@ namespace UmamusumeResponseAnalyzer
                 ".exe" => ProgramUrl
             };
         }
-        internal static async Task Download(IProgress<DownloadProgress>? progress = null, string? instruction = null, string? path = null)
+        internal static async Task Download(
+            IProgress<DownloadProgress>? progress = null,
+            string? instruction = null,
+            string? path = null,
+            CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(path))
                 throw new ArgumentException("下载目标路径不能为空。", nameof(path));
@@ -184,28 +174,43 @@ namespace UmamusumeResponseAnalyzer
             var tempPath = Path.Combine(directory, $".{Path.GetFileName(fullPath)}.{Guid.NewGuid():N}.tmp");
             try
             {
-                using var response = await HttpClient.GetAsync(downloadURL, HttpCompletionOption.ResponseHeadersRead);
+                using var response = await HttpClient.GetAsync(
+                    downloadURL,
+                    HttpCompletionOption.ResponseHeadersRead,
+                    cancellationToken);
                 response.EnsureSuccessStatusCode();
                 var total = response.Content.Headers.ContentLength ?? 0;
                 long completed = 0;
-                progress?.Report(new(instruction ?? Path.GetFileName(path), completed, total));
+                progress?.Report(new(
+                    fullPath,
+                    instruction ?? Path.GetFileName(path),
+                    completed,
+                    total));
 
-                using (var contentStream = await response.Content.ReadAsStreamAsync())
+                using (var contentStream = await response.Content.ReadAsStreamAsync(cancellationToken))
                 using (var fileStream = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 8192, true))
                 {
                     var buffer = new byte[8192];
                     while (true)
                     {
-                        var read = await contentStream.ReadAsync(buffer);
+                        var read = await contentStream.ReadAsync(buffer, cancellationToken);
                         if (read == 0)
                             break;
                         completed += read;
-                        progress?.Report(new(instruction ?? Path.GetFileName(path), completed, total));
-                        await fileStream.WriteAsync(buffer.AsMemory(0, read));
+                        progress?.Report(new(
+                            fullPath,
+                            instruction ?? Path.GetFileName(path),
+                            completed,
+                            total));
+                        await fileStream.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
                     }
                 }
 
                 File.Move(tempPath, fullPath, overwrite: true);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
             }
             catch (Exception) when (new Uri(downloadURL).Host == "raw.githubusercontent.com")
             {
@@ -229,5 +234,9 @@ namespace UmamusumeResponseAnalyzer
         }
     }
 
-    internal sealed record DownloadProgress(string Description, long Completed, long Total);
+    internal sealed record DownloadProgress(
+        string Id,
+        string Description,
+        long Completed,
+        long Total);
 }

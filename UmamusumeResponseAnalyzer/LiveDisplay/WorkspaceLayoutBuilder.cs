@@ -1,4 +1,6 @@
 using System.Drawing;
+using System.Runtime.CompilerServices;
+using Terminal.Gui.Text;
 using Terminal.Gui.ViewBase;
 using Terminal.Gui.Views;
 
@@ -6,108 +8,200 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay;
 
 internal static class WorkspaceLayoutBuilder
 {
-    internal sealed record Layout(View View, int MaxScroll);
+    static readonly ConditionalWeakTable<View, ViewLayoutMetadata> ViewMetadata = new();
 
-    public static Layout BuildWorkspaceLayout(
+    internal sealed class WorkspaceSurface
+    {
+        readonly LiveDisplayWorkspace? workspace;
+        readonly PanelView[] panels;
+        readonly bool fullBleed;
+        readonly Label logLabel;
+
+        public WorkspaceSurface(
+            LiveDisplayWorkspace? workspace,
+            IReadOnlyList<(LiveDisplayPanel Panel, View View)> panelViews,
+            Func<LiveDisplayWorkspace, string> workspaceLabel)
+        {
+            this.workspace = workspace;
+            fullBleed = panelViews.Count == 1 && panelViews[0].Panel.FullBleed;
+            View = new View
+            {
+                Width = Dim.Fill(),
+                Height = Dim.Fill(),
+                CanFocus = true,
+                TabStop = TabBehavior.TabGroup
+            };
+            panels = panelViews
+                .Select(x =>
+                {
+                    var declaredHeight = ViewMetadata.GetValue(
+                        x.View,
+                        static view => new(
+                            view.Height is DimAbsolute absolute
+                                ? Math.Max(0, absolute.Size)
+                                : 0)).DeclaredHeight;
+                    EnableFocusPath(x.View);
+                    return new PanelView(
+                        x.Panel,
+                        x.View,
+                        declaredHeight,
+                        fullBleed
+                            ? null
+                            : new FrameView
+                            {
+                                Title = $"{x.Panel.PluginId} - {x.Panel.Title}",
+                                X = 0,
+                                Width = Dim.Fill()
+                            });
+                })
+                .ToArray();
+
+            if (workspace is not null && panels.Length == 0)
+            {
+                View.Add(new Label
+                {
+                    Text = $"{workspaceLabel(workspace)} 还没有插件输出。",
+                    X = 1,
+                    Y = 1,
+                    Width = Dim.Fill(1),
+                    Height = 1
+                });
+            }
+            else
+            {
+                foreach (var panel in panels)
+                {
+                    if (panel.Frame is null)
+                    {
+                        View.Add(panel.View);
+                    }
+                    else
+                    {
+                        panel.Frame.Add(panel.View);
+                        View.Add(panel.Frame);
+                    }
+                }
+            }
+
+            logLabel = new Label
+            {
+                X = 0,
+                Width = Dim.Fill(),
+                Visible = false
+            };
+            View.Add(logLabel);
+        }
+
+        public View View { get; }
+        public int MaxScroll { get; private set; }
+
+        public void Update(
+            IReadOnlyList<LiveDisplayLogLine> logs,
+            int width,
+            int height,
+            int scrollOffset)
+        {
+            width = Math.Max(1, width);
+            height = Math.Max(1, height);
+            var visibleLogLines = GetVisibleLogLines(workspace, fullBleed, logs, width, height);
+            var logHeight = visibleLogLines.Length;
+            var bodyHeight = Math.Max(1, height - logHeight);
+            var panelHeights = CalculatePanelHeights(
+                panels.Select(x => (x.Panel, x.View, x.DeclaredHeight)).ToArray(),
+                bodyHeight,
+                fullBleed,
+                width);
+            var contentHeight = Math.Max(height, panelHeights.Sum() + logHeight);
+            MaxScroll = Math.Max(0, contentHeight - height);
+            scrollOffset = Math.Clamp(scrollOffset, 0, MaxScroll);
+
+            var y = 0;
+            for (var i = 0; i < panels.Length; i++)
+            {
+                var panel = panels[i];
+                var panelHeight = panelHeights[i];
+                panel.View.X = 0;
+                panel.View.Y = 0;
+                panel.View.Width = Dim.Fill();
+                if (panel.Frame is null)
+                {
+                    panel.View.Height = panelHeight;
+                    continue;
+                }
+
+                panel.Frame.Y = y;
+                panel.Frame.Height = panelHeight;
+                panel.View.Height = Math.Max(1, panelHeight - 2);
+                y += panelHeight;
+            }
+
+            logLabel.Text = string.Join(Environment.NewLine, visibleLogLines);
+            logLabel.Y = contentHeight - logHeight;
+            logLabel.Height = logHeight;
+            logLabel.Visible = logHeight > 0;
+            View.SetContentSize(new Size(width, contentHeight));
+            View.Viewport = new Rectangle(0, MaxScroll - scrollOffset, width, height);
+            View.SetNeedsLayout();
+            View.SetNeedsDraw();
+        }
+
+        static bool EnableFocusPath(View view)
+        {
+            var hasFocusableView = view.CanFocus;
+            foreach (var child in view.SubViews)
+                hasFocusableView |= EnableFocusPath(child);
+            if (hasFocusableView && view.SubViews.Count > 0)
+            {
+                view.CanFocus = true;
+                view.TabStop = TabBehavior.TabGroup;
+            }
+            return hasFocusableView;
+        }
+
+        sealed record PanelView(
+            LiveDisplayPanel Panel,
+            View View,
+            int DeclaredHeight,
+            FrameView? Frame);
+    }
+
+    sealed record ViewLayoutMetadata(int DeclaredHeight);
+
+    public static WorkspaceSurface BuildWorkspaceLayout(
         LiveDisplayWorkspace? workspace,
         IReadOnlyCollection<LiveDisplayPanel> panels,
         IReadOnlyList<LiveDisplayLogLine> logs,
         Func<LiveDisplayWorkspace, string> workspaceLabel,
         int width,
         int height,
-        int scrollOffset)
+        int scrollOffset,
+        Func<LiveDisplayPanel, View> createView)
     {
-        var viewport = new View
-        {
-            Width = Dim.Fill(),
-            Height = Dim.Fill(),
-            CanFocus = false
-        };
         var activePanels = SelectPanels(workspace, panels);
         var activePanelViews = activePanels
-            .Select(panel => (Panel: panel, View: panel.Content.CreateView()))
+            .Select(panel => (Panel: panel, View: createView(panel)))
             .ToArray();
-        var visibleLogs = logs.TakeLast(14).ToArray();
-        var logHeight = visibleLogs.Length == 0 ? 0 : Math.Min(visibleLogs.Length, Math.Max(1, height / 3));
-        var bodyHeight = Math.Max(1, height - logHeight);
-        var contentHeight = Math.Max(height, EstimateContentHeight(activePanelViews, bodyHeight) + logHeight);
-        var maxScroll = Math.Max(0, contentHeight - height);
-        scrollOffset = Math.Clamp(scrollOffset, 0, maxScroll);
-        viewport.SetContentSize(new Size(Math.Max(1, width), contentHeight));
-        viewport.Viewport = new Rectangle(0, scrollOffset, Math.Max(1, width), Math.Max(1, height));
-
-        if (workspace is null)
-        {
-            viewport.Add(new Label
-            {
-                Text = "等待插件创建 workspace…",
-                X = 1,
-                Y = 1,
-                Width = Dim.Fill(1),
-                Height = 1
-            });
-        }
-        else if (activePanels.Length == 0)
-        {
-            viewport.Add(new Label
-            {
-                Text = $"{workspaceLabel(workspace)} 还没有插件输出。",
-                X = 1,
-                Y = 1,
-                Width = Dim.Fill(1),
-                Height = 1
-            });
-        }
-        else
-        {
-            AddPanels(viewport, activePanelViews, bodyHeight);
-        }
-
-        if (visibleLogs.Length > 0)
-        {
-            viewport.Add(new TextView
-            {
-                Text = string.Join(Environment.NewLine, visibleLogs.Select(FormatLog)),
-                ReadOnly = true,
-                WordWrap = false,
-                CanFocus = false,
-                X = 0,
-                Y = contentHeight - logHeight,
-                Width = Dim.Fill(),
-                Height = logHeight
-            });
-        }
-
-        return new(viewport, maxScroll);
+        var surface = new WorkspaceSurface(workspace, activePanelViews, workspaceLabel);
+        surface.Update(logs, width, height, scrollOffset);
+        return surface;
     }
 
-    internal static string BuildTextSnapshot(
+    static string[] GetVisibleLogLines(
         LiveDisplayWorkspace? workspace,
-        IReadOnlyCollection<LiveDisplayPanel> panels,
+        bool fullBleed,
         IReadOnlyList<LiveDisplayLogLine> logs,
-        Func<LiveDisplayWorkspace, string> workspaceLabel)
+        int width,
+        int height)
     {
-        var lines = new List<string>();
-        if (workspace is null)
-        {
-            lines.Add("等待插件创建 workspace…");
-        }
-        else
-        {
-            lines.Add($"Workspace: {workspaceLabel(workspace)}");
-            var activePanels = SelectPanels(workspace, panels);
-            if (activePanels.Length == 0)
-                lines.Add("当前 workspace 还没有插件输出。");
-            foreach (var panel in activePanels)
-            {
-                lines.Add($"[{panel.PluginId} - {panel.Title}]");
-                using var view = panel.Content.CreateView();
-                lines.Add(view is TextView textView ? textView.Text : view.Title);
-            }
-        }
+        if (fullBleed)
+            return [];
 
-        lines.AddRange(logs.TakeLast(14).Select(FormatLog));
-        return string.Join(Environment.NewLine, lines);
+        var logEntryLimit = workspace is null ? 18 : 14;
+        var logLines = logs.TakeLast(logEntryLimit)
+            .SelectMany(line => WrapLines(FormatLog(line), Math.Max(1, width)))
+            .ToArray();
+        var maxLogHeight = workspace is null ? height : Math.Max(1, height / 3);
+        return logLines.TakeLast(maxLogHeight).ToArray();
     }
 
     static LiveDisplayPanel[] SelectPanels(
@@ -128,55 +222,83 @@ internal static class WorkspaceLayoutBuilder
         return fullBleed is null ? workspacePanels : [fullBleed];
     }
 
-    static void AddPanels(
-        View viewport,
-        IReadOnlyList<(LiveDisplayPanel Panel, View View)> panels,
-        int bodyHeight)
+    static int[] CalculatePanelHeights(
+        IReadOnlyList<(LiveDisplayPanel Panel, View View, int DeclaredHeight)> panels,
+        int bodyHeight,
+        bool fullBleed,
+        int width)
     {
-        var panelHeight = Math.Max(3, bodyHeight / panels.Count);
-        for (var i = 0; i < panels.Count; i++)
+        if (panels.Count == 0)
+            return [];
+
+        if (fullBleed)
+            return
+            [
+                Math.Max(
+                    bodyHeight,
+                    PreferredViewHeight(
+                        panels[0].View,
+                        panels[0].DeclaredHeight,
+                        bodyHeight,
+                        width))
+            ];
+
+        var result = panels
+            .Select(x => Math.Max(
+                3,
+                PreferredViewHeight(
+                    x.View,
+                    x.DeclaredHeight,
+                    Math.Max(1, bodyHeight / panels.Count - 2),
+                    Math.Max(1, width - 2)) + 2))
+            .ToArray();
+        var remaining = bodyHeight - result.Sum();
+        if (remaining > 0)
+            result[^1] += remaining;
+        return result;
+    }
+
+    static int PreferredViewHeight(
+        View view,
+        int declaredHeight,
+        int fallback,
+        int width)
+    {
+        var text = view.Text?.ToString();
+        var textHeight = string.IsNullOrEmpty(text) ? 0 : WrapLines(text, width).Count();
+        var subViewHeight = view.SubViews.Count == 0 ? 0 : view.GetHeightRequiredForSubViews();
+        return Math.Max(
+            fallback,
+            Math.Max(declaredHeight, Math.Max(textHeight, subViewHeight)));
+    }
+
+    static IEnumerable<string> WrapLines(string text, int width)
+    {
+        width = Math.Max(1, width);
+        foreach (var logicalLine in text.ReplaceLineEndings("\n").Split('\n'))
         {
-            var (panel, view) = panels[i];
-            view.X = 0;
-            view.Y = 0;
-            view.Width = Dim.Fill();
-            view.Height = Dim.Fill();
-            if (panel.FullBleed && panels.Count == 1)
+            if (logicalLine.Length == 0)
             {
-                view.Height = bodyHeight;
-                viewport.Add(view);
+                yield return string.Empty;
                 continue;
             }
 
-            var frame = new FrameView
+            var line = new System.Text.StringBuilder();
+            var used = 0;
+            foreach (var rune in logicalLine.EnumerateRunes())
             {
-                Title = $"{panel.PluginId} - {panel.Title}",
-                X = 0,
-                Y = i * panelHeight,
-                Width = Dim.Fill(),
-                Height = i == panels.Count - 1 ? Math.Max(3, bodyHeight - i * panelHeight) : panelHeight,
-                CanFocus = false
-            };
-            frame.Add(view);
-            viewport.Add(frame);
+                var columns = Math.Max(0, rune.GetColumns());
+                if (line.Length > 0 && used + columns > width)
+                {
+                    yield return line.ToString();
+                    line.Clear();
+                    used = 0;
+                }
+                line.Append(rune);
+                used += columns;
+            }
+            yield return line.ToString();
         }
-    }
-
-    static int EstimateContentHeight(
-        IReadOnlyList<(LiveDisplayPanel Panel, View View)> panels,
-        int bodyHeight)
-    {
-        if (panels.Count == 0)
-            return bodyHeight;
-
-        var textHeight = 0;
-        foreach (var (_, view) in panels)
-        {
-            textHeight += view is TextView textView
-                ? Math.Max(3, textView.Text.Count(x => x == '\n') + 3)
-                : Math.Max(3, bodyHeight / panels.Count);
-        }
-        return Math.Max(bodyHeight, textHeight);
     }
 
     static string FormatLog(LiveDisplayLogLine line)

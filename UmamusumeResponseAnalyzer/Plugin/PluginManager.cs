@@ -5,6 +5,7 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.ExceptionServices;
 using System.Runtime.Loader;
+using Terminal.Gui.App;
 using UmamusumeResponseAnalyzer;
 using UmamusumeResponseAnalyzer.LiveDisplay;
 using WatsonWebserver.Core;
@@ -28,6 +29,109 @@ namespace UmamusumeResponseAnalyzer.Plugin
         bool IsLoaded,
         bool IsAvailable,
         bool LoadInHost);
+
+    sealed class AsyncCallbackBarrier
+    {
+        readonly object gate = new();
+        int activeReaders;
+        bool writerPending;
+        TaskCompletionSource reopened = CompletedSignal();
+        TaskCompletionSource? drained;
+
+        public async ValueTask<IDisposable> EnterReadAsync(CancellationToken cancellationToken = default)
+        {
+            while (true)
+            {
+                Task wait;
+                lock (gate)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (!writerPending)
+                    {
+                        activeReaders++;
+                        return new Lease(ExitRead);
+                    }
+
+                    wait = reopened.Task;
+                }
+
+                await wait.WaitAsync(cancellationToken);
+            }
+        }
+
+        public async ValueTask<IDisposable> EnterExclusiveAsync(CancellationToken cancellationToken = default)
+        {
+            Task? wait = null;
+            lock (gate)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (writerPending)
+                    throw new InvalidOperationException("已有插件 mutation 正在等待或运行。");
+
+                writerPending = true;
+                reopened = NewSignal();
+                if (activeReaders != 0)
+                {
+                    drained = NewSignal();
+                    wait = drained.Task;
+                }
+            }
+
+            try
+            {
+                if (wait is not null)
+                    await wait.WaitAsync(cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
+                return new Lease(ExitExclusive);
+            }
+            catch
+            {
+                ExitExclusive();
+                throw;
+            }
+        }
+
+        void ExitRead()
+        {
+            TaskCompletionSource? signal = null;
+            lock (gate)
+            {
+                if (--activeReaders == 0 && writerPending)
+                    signal = drained;
+            }
+            signal?.TrySetResult();
+        }
+
+        void ExitExclusive()
+        {
+            TaskCompletionSource signal;
+            lock (gate)
+            {
+                writerPending = false;
+                drained = null;
+                signal = reopened;
+            }
+            signal.TrySetResult();
+        }
+
+        static TaskCompletionSource NewSignal()
+            => new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        static TaskCompletionSource CompletedSignal()
+        {
+            var signal = NewSignal();
+            signal.SetResult();
+            return signal;
+        }
+
+        sealed class Lease(Action release) : IDisposable
+        {
+            Action? release = release;
+
+            public void Dispose()
+                => Interlocked.Exchange(ref release, null)?.Invoke();
+        }
+    }
 
     sealed class PluginScopedAnalyzerRegistry(IPlugin plugin) : IPluginAnalyzerRegistry
     {
@@ -158,7 +262,8 @@ namespace UmamusumeResponseAnalyzer.Plugin
 
         public async Task InvokeAsync(HttpContextBase ctx)
         {
-            PluginManager.EnterDispatch();
+            using var callbackLease = await PluginManager.EnterPluginCallbackAsync();
+            PluginManager.EnterStateRead();
             try
             {
                 if (!TryEnter())
@@ -166,12 +271,12 @@ namespace UmamusumeResponseAnalyzer.Plugin
             }
             finally
             {
-                PluginManager.ExitDispatch();
+                PluginManager.ExitStateRead();
             }
 
             try
             {
-                using var callback = PluginManager.EnterPluginCallbackScope();
+                using var callbackScope = PluginManager.EnterPluginCallbackScope();
                 await handler(ctx);
             }
             finally
@@ -216,8 +321,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
         PluginManager.PluginLoadContext Context,
         List<IPlugin> Plugins,
         List<RouteRegistration> Routes,
-        List<Action> EventWaits,
-        HashSet<Assembly> Assemblies);
+        List<Action> EventWaits);
 
     sealed record StagedAssembly(string Name, Assembly Assembly);
 
@@ -251,6 +355,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
             "WatsonWebserver.Lite",
         }.ToFrozenSet(StringComparer.Ordinal);
         static readonly PluginHostEvents HostEvents = new();
+        static IApplication? application;
         static Func<IPlugin, ILiveDisplayOutput>? liveDisplayFactory;
         static readonly AsyncLocal<int> PluginCallbackDepth = new();
         static readonly object AnalyzerGate = new();
@@ -258,15 +363,58 @@ namespace UmamusumeResponseAnalyzer.Plugin
         // 每个插件注册的 HTTP 路由，卸载时凭此精确移除（Watson 的 StaticRouteManager 支持 Remove）
         private static Dictionary<IPlugin, List<RouteRegistration>> PluginRoutes { get; } = new(ReferenceEqualityComparer.Instance);
 
-        // 分发(读) 与 卸载/重载(写) 的互斥：reload 会等待在途分发结束并阻塞新分发，
-        // 避免 Invoke 一个正在被拆毁的插件。非递归——分发线程不会重入。
-        private static readonly ReaderWriterLockSlim ReloadLock = new(LockRecursionPolicy.SupportsRecursion);
-        static int reloadTransactionActive;
+        // CallbackBarrier 可跨 await 持有；StateLock 只保护同步 collection 访问，绝不跨 await。
+        private static readonly AsyncCallbackBarrier CallbackBarrier = new();
+        private static readonly ReaderWriterLockSlim StateLock = new(LockRecursionPolicy.SupportsRecursion);
+        static readonly object ReloadTransactionGate = new();
+        static readonly AsyncLocal<int> ReloadTransactionDepth = new();
+        static bool reloadTransactionActive;
+        static bool shuttingDown;
+        static TaskCompletionSource? reloadCompleted;
+        static TaskCompletionSource shutdownCompleted = CompletedTaskSource();
 
-        /// <summary>进入分发读锁；Server 的 analyzer dispatch 包在 <see cref="EnterDispatch"/>/<see cref="ExitDispatch"/> 之间。</summary>
-        internal static void EnterDispatch() => ReloadLock.EnterReadLock();
-        /// <summary>退出分发读锁。务必放在 finally 中。</summary>
-        internal static void ExitDispatch() => ReloadLock.ExitReadLock();
+        internal static async ValueTask<IDisposable> EnterPluginCallbackAsync(CancellationToken cancellationToken = default)
+        {
+            if (IsShuttingDown() && ReloadTransactionDepth.Value == 0)
+                throw new InvalidOperationException("插件系统正在关闭，拒绝启动新的插件回调。");
+
+            var callback = await CallbackBarrier.EnterReadAsync(cancellationToken);
+            if (!IsShuttingDown() || ReloadTransactionDepth.Value != 0)
+                return callback;
+
+            callback.Dispose();
+            throw new InvalidOperationException("插件系统正在关闭，拒绝启动新的插件回调。");
+        }
+
+        static ValueTask<IDisposable> EnterPluginMutationAsync(CancellationToken cancellationToken = default)
+            => CallbackBarrier.EnterExclusiveAsync(cancellationToken);
+
+        static bool IsShuttingDown()
+        {
+            lock (ReloadTransactionGate)
+                return shuttingDown;
+        }
+
+        static TaskCompletionSource NewTaskSource()
+            => new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        static TaskCompletionSource CompletedTaskSource()
+        {
+            var completion = NewTaskSource();
+            completion.SetResult();
+            return completion;
+        }
+
+        internal static void EnterStateRead() => StateLock.EnterReadLock();
+
+        internal static void ExitStateRead() => StateLock.ExitReadLock();
+
+        internal static bool IsLoadedPluginInstance(IPlugin plugin)
+        {
+            EnterStateRead();
+            try { return LoadedPlugins.Any(loaded => ReferenceEquals(loaded, plugin)); }
+            finally { ExitStateRead(); }
+        }
 
         /// <summary>
         /// 线程安全地快照当前已加载插件。分发路径之外的消费者（菜单、更新检查等）应经此枚举：
@@ -274,15 +422,15 @@ namespace UmamusumeResponseAnalyzer.Plugin
         /// </summary>
         public static IReadOnlyList<IPlugin> SnapshotLoadedPlugins()
         {
-            EnterDispatch();
+            EnterStateRead();
             try { return [.. LoadedPlugins]; }
-            finally { ExitDispatch(); }
+            finally { ExitStateRead(); }
         }
 
         internal static IReadOnlyList<PluginRuntimeStatus> SnapshotPluginStatuses()
         {
             var scanned = ScanPluginMetadataForStatus();
-            EnterDispatch();
+            EnterStateRead();
             try
             {
                 var loadedByName = LoadedPlugins
@@ -310,18 +458,29 @@ namespace UmamusumeResponseAnalyzer.Plugin
 
                 return statuses;
             }
-            finally { ExitDispatch(); }
+            finally { ExitStateRead(); }
         }
 
         internal static string InternalName(IPlugin plugin) => plugin.GetType().Assembly.GetName().Name ?? plugin.Name;
 
-        internal static void BindLiveDisplay(Func<IPlugin, ILiveDisplayOutput> factory)
+        internal static IApplication Application
+            => application ?? throw new InvalidOperationException("插件初始化前必须先绑定 Terminal.Gui application。");
+
+        internal static void BindLiveDisplay(IApplication application, Func<IPlugin, ILiveDisplayOutput> factory)
         {
+            PluginManager.application = application;
             liveDisplayFactory = factory;
         }
 
         internal static void Init()
         {
+            lock (ReloadTransactionGate)
+            {
+                if (reloadTransactionActive || shuttingDown && !shutdownCompleted.Task.IsCompletedSuccessfully)
+                    throw new InvalidOperationException("上一次插件 shutdown 尚未完成，无法重新初始化。");
+                shuttingDown = false;
+            }
+
             Directory.CreateDirectory("Plugins");
             LoadMetadatas();
             BuildGroups();
@@ -1024,7 +1183,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 var factory = GetLiveDisplayFactory();
                 var liveDisplay = factory(plugin);
                 using var callback = EnterPluginCallbackScope();
-                InvokeContextInitialize(plugin, new PluginContext(plugin, liveDisplay, HostEvents));
+                InvokeContextInitialize(plugin, new PluginContext(Application, plugin, liveDisplay, HostEvents));
             }
         }
 
@@ -1120,129 +1279,268 @@ namespace UmamusumeResponseAnalyzer.Plugin
         internal static void ClearHostEventSubscriptions()
             => HostEvents.Clear();
 
+        internal static async Task ShutdownAsync()
+        {
+            Task transactionWait;
+            TaskCompletionSource completion;
+            var performShutdown = false;
+            lock (ReloadTransactionGate)
+            {
+                if (shuttingDown)
+                {
+                    completion = shutdownCompleted;
+                    transactionWait = Task.CompletedTask;
+                }
+                else
+                {
+                    shuttingDown = true;
+                    completion = shutdownCompleted = NewTaskSource();
+                    transactionWait = reloadCompleted?.Task ?? Task.CompletedTask;
+                    performShutdown = true;
+                }
+            }
+
+            if (!performShutdown)
+            {
+                await completion.Task;
+                return;
+            }
+
+            try
+            {
+                await transactionWait;
+                {
+                    using var mutation = await EnterPluginMutationAsync();
+
+                    List<IPlugin> plugins;
+                    List<RouteRegistration> routes = [];
+                    List<Action> eventWaits = [];
+                    List<PluginLoadContext> contexts;
+                    StateLock.EnterWriteLock();
+                    try
+                    {
+                        plugins = [.. LoadedPlugins];
+                        contexts = Contexts.Values.Distinct().ToList();
+
+                        foreach (var plugin in plugins)
+                        {
+                            RemoveAnalyzerMethods(plugin);
+                            routes.AddRange(RemoveRoutes(plugin));
+                            eventWaits.Add(DisposeHostEventSubscriptionsLater(plugin));
+                        }
+
+                        foreach (var plugin in PluginRoutes.Keys.ToList())
+                            routes.AddRange(RemoveRoutes(plugin));
+
+                        LoadedPlugins.Clear();
+                        Metadatas.Clear();
+                        AssemblyMetadatas.Clear();
+                        FailedPlugins.Clear();
+                        ContextGroups.Clear();
+                        Contexts.Clear();
+                        AssemblyMap.Clear();
+                        Assemblies.Clear();
+                        PluginRoutes.Clear();
+                        lock (AnalyzerGate)
+                        {
+                            RequestAnalyzerMethods.Clear();
+                            ResponseAnalyzerMethods.Clear();
+                        }
+                        application = null;
+                        liveDisplayFactory = null;
+                    }
+                    finally
+                    {
+                        StateLock.ExitWriteLock();
+                    }
+
+                    foreach (var route in routes)
+                        route.WaitForIdle();
+                    foreach (var wait in eventWaits)
+                        wait();
+                    ClearHostEventSubscriptions();
+
+                    foreach (var plugin in plugins)
+                    {
+                        try
+                        {
+                            using var callbackScope = EnterPluginCallbackScope();
+                            using var registrationScope = KeyboardManager.RegisterScope(plugin);
+                            plugin.Dispose();
+                        }
+                        catch (Exception ex) { LiveDisplayConsole.LogException("Plugin", ex); }
+                        KeyboardManager.UnregisterByOwner(plugin);
+                    }
+                    foreach (var context in contexts)
+                    {
+                        try { context.Unload(); }
+                        catch (Exception ex) { LiveDisplayConsole.LogException("Plugin", ex); }
+                    }
+                }
+
+                completion.TrySetResult();
+            }
+            catch (Exception ex)
+            {
+                completion.TrySetException(ex);
+                throw;
+            }
+        }
+
         // ── 热重载 ───────────────────────────────────────────────────────────
 
         /// <summary>
         /// 批量应用插件重载，返回仍需重启才能生效的插件名。
         /// 新安装的共享上下文成员会先把已加载的同组插件排入重载顺序，避免共享锚点被加载进两个 ALC。
         /// </summary>
-        public static IReadOnlyList<string> ReloadPlugins(params string[] pluginNames)
+        public static async Task<IReadOnlyList<string>> ReloadPluginsAsync(params string[] pluginNames)
         {
             var requested = pluginNames.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
             if (requested.Count == 0) return [];
 
             using var transaction = EnterReloadTransaction();
-            var scanned = ScanPluginMetadata();
             var pendingUnloads = new List<PendingPluginUnload>();
-            ReloadLock.EnterWriteLock();
+            var startedPluginBatches = new List<IPlugin[]>();
             List<string> needRestart = [];
-            try
+            using (var mutation = await EnterPluginMutationAsync())
             {
-                requested = requested
-                    .Select(name => ResolvePluginName(name, scanned.Keys, Metadatas.Keys, LoadedPlugins.Select(InternalName)))
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .ToList();
-                var ordered = BuildReloadOrder(requested, scanned);
-                var outcomes = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
-                foreach (var name in ordered)
+                var (scanned, assemblyMetadatas) = ScanPluginMetadata();
+                StateLock.EnterWriteLock();
+                try
                 {
-                    try
+                    ReplaceAssemblyMetadatas(assemblyMetadatas);
+                    requested = requested
+                        .Select(name => ResolvePluginName(name, scanned.Keys, Metadatas.Keys, LoadedPlugins.Select(InternalName)))
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToList();
+                    var ordered = BuildReloadOrder(requested, scanned);
+                    var outcomes = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var name in ordered)
                     {
-                        ReloadPluginLocked(name, scanned, outcomes, pendingUnloads);
-                    }
-                    catch (Exception ex)
-                    {
-                        LiveDisplayConsole.LogException("Plugin", ex);
+                        try
+                        {
+                            ReloadPluginLocked(name, scanned, outcomes, pendingUnloads, startedPluginBatches);
+                        }
+                        catch (Exception ex)
+                        {
+                            LiveDisplayConsole.LogException("Plugin", ex);
 #if DEBUG
-                        throw;
+                            throw;
 #endif
+                        }
                     }
+
+                    needRestart = requested.Where(name =>
+                        outcomes.TryGetValue(name, out var ok) ? !ok : Metadatas.ContainsKey(name) && !IsPluginLoaded(name))
+                        .ToList();
                 }
-
-                needRestart = requested.Where(name =>
-                    outcomes.TryGetValue(name, out var ok) ? !ok : Metadatas.ContainsKey(name) && !IsPluginLoaded(name))
-                    .ToList();
-            }
-            finally
-            {
-                ReloadLock.ExitWriteLock();
-                CompletePendingUnloads(pendingUnloads);
-            }
-
-            return needRestart;
-        }
-
-        internal static IReadOnlyList<string> LoadPlugins(params string[] pluginNames)
-        {
-            var requested = pluginNames.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-            if (requested.Count == 0) return [];
-
-            using var transaction = EnterReloadTransaction();
-            var scanned = ScanPluginMetadata();
-            var pendingUnloads = new List<PendingPluginUnload>();
-            ReloadLock.EnterWriteLock();
-            List<string> needRestart = [];
-            try
-            {
-                var outcomes = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
-                foreach (var rawName in requested)
+                finally
                 {
-                    var name = ResolvePluginName(rawName, scanned.Keys, Metadatas.Keys, LoadedPlugins.Select(InternalName));
-                    if (IsPluginLoaded(name))
-                    {
-                        outcomes[rawName] = true;
-                        continue;
-                    }
-
-                    if (!scanned.ContainsKey(name) && !Metadatas.ContainsKey(name))
-                    {
-                        LiveDisplayConsole.Log("Plugin", $"插件 {rawName} 不存在，无法加载。", LiveDisplaySeverity.Warning);
-                        outcomes[rawName] = false;
-                        continue;
-                    }
-
-                    outcomes[rawName] = ReloadPluginLocked(name, scanned, outcomes, pendingUnloads);
+                    StateLock.ExitWriteLock();
+                    CompletePendingUnloads(pendingUnloads);
                 }
-
-                needRestart = requested.Where(name => !outcomes.TryGetValue(name, out var ok) || !ok).ToList();
             }
-            finally
+
+            foreach (var plugins in startedPluginBatches)
             {
-                ReloadLock.ExitWriteLock();
-                CompletePendingUnloads(pendingUnloads);
+                try
+                {
+                    await TriggerStartedForPluginsAsync(plugins);
+                }
+                catch (Exception ex)
+                {
+                    LiveDisplayConsole.LogException("Plugin", ex);
+#if DEBUG
+                    throw;
+#endif
+                }
             }
 
             return needRestart;
         }
 
-        internal static IReadOnlyList<string> UnloadPlugins(params string[] pluginNames)
+        internal static async Task<IReadOnlyList<string>> LoadPluginsAsync(params string[] pluginNames)
         {
             var requested = pluginNames.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
             if (requested.Count == 0) return [];
 
             using var transaction = EnterReloadTransaction();
             var pendingUnloads = new List<PendingPluginUnload>();
-            ReloadLock.EnterWriteLock();
+            var startedPluginBatches = new List<IPlugin[]>();
             List<string> needRestart = [];
-            try
+            using (var mutation = await EnterPluginMutationAsync())
             {
-                var outcomes = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
-                foreach (var rawName in requested)
+                var (scanned, assemblyMetadatas) = ScanPluginMetadata();
+                StateLock.EnterWriteLock();
+                try
                 {
-                    var name = ResolvePluginName(
-                        rawName,
-                        Metadatas.Keys,
-                        LoadedPlugins.Select(InternalName),
-                        ContextGroups.SelectMany(x => x));
-                    outcomes[rawName] = UnloadPluginLocked(name, outcomes, pendingUnloads);
-                }
+                    ReplaceAssemblyMetadatas(assemblyMetadatas);
+                    var outcomes = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var rawName in requested)
+                    {
+                        var name = ResolvePluginName(rawName, scanned.Keys, Metadatas.Keys, LoadedPlugins.Select(InternalName));
+                        if (IsPluginLoaded(name))
+                        {
+                            outcomes[rawName] = true;
+                            continue;
+                        }
 
-                needRestart = requested.Where(name => !outcomes.TryGetValue(name, out var ok) || !ok).ToList();
+                        if (!scanned.ContainsKey(name) && !Metadatas.ContainsKey(name))
+                        {
+                            LiveDisplayConsole.Log("Plugin", $"插件 {rawName} 不存在，无法加载。", LiveDisplaySeverity.Warning);
+                            outcomes[rawName] = false;
+                            continue;
+                        }
+
+                        outcomes[rawName] = ReloadPluginLocked(name, scanned, outcomes, pendingUnloads, startedPluginBatches);
+                    }
+
+                    needRestart = requested.Where(name => !outcomes.TryGetValue(name, out var ok) || !ok).ToList();
+                }
+                finally
+                {
+                    StateLock.ExitWriteLock();
+                    CompletePendingUnloads(pendingUnloads);
+                }
             }
-            finally
+
+            foreach (var plugins in startedPluginBatches)
+                await TriggerStartedForPluginsAsync(plugins);
+
+            return needRestart;
+        }
+
+        internal static async Task<IReadOnlyList<string>> UnloadPluginsAsync(params string[] pluginNames)
+        {
+            var requested = pluginNames.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            if (requested.Count == 0) return [];
+
+            using var transaction = EnterReloadTransaction();
+            var pendingUnloads = new List<PendingPluginUnload>();
+            List<string> needRestart = [];
+            using (var mutation = await EnterPluginMutationAsync())
             {
-                ReloadLock.ExitWriteLock();
-                CompletePendingUnloads(pendingUnloads);
+                StateLock.EnterWriteLock();
+                try
+                {
+                    var outcomes = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var rawName in requested)
+                    {
+                        var name = ResolvePluginName(
+                            rawName,
+                            Metadatas.Keys,
+                            LoadedPlugins.Select(InternalName),
+                            ContextGroups.SelectMany(x => x));
+                        outcomes[rawName] = UnloadPluginLocked(name, outcomes, pendingUnloads);
+                    }
+
+                    needRestart = requested.Where(name => !outcomes.TryGetValue(name, out var ok) || !ok).ToList();
+                }
+                finally
+                {
+                    StateLock.ExitWriteLock();
+                    CompletePendingUnloads(pendingUnloads);
+                }
             }
 
             return needRestart;
@@ -1253,16 +1551,39 @@ namespace UmamusumeResponseAnalyzer.Plugin
             if (PluginCallbackDepth.Value != 0)
                 throw new InvalidOperationException("插件回调内禁止执行热重载；请在当前回调返回后由宿主侧重新发起 reload。");
 
-            if (Interlocked.CompareExchange(ref reloadTransactionActive, 1, 0) != 0)
-                throw new InvalidOperationException("已有插件热重载事务正在运行，拒绝并发或重入 reload。");
+            lock (ReloadTransactionGate)
+            {
+                if (shuttingDown)
+                    throw new InvalidOperationException("插件系统正在关闭，拒绝执行热重载。");
+                if (reloadTransactionActive)
+                    throw new InvalidOperationException("已有插件热重载事务正在运行，拒绝并发或重入 reload。");
 
-            return new ReloadTransaction();
+                reloadTransactionActive = true;
+                reloadCompleted = NewTaskSource();
+                ReloadTransactionDepth.Value++;
+                return new ReloadTransaction();
+            }
         }
 
         sealed class ReloadTransaction : IDisposable
         {
+            int disposed;
+
             public void Dispose()
-                => Volatile.Write(ref reloadTransactionActive, 0);
+            {
+                if (Interlocked.Exchange(ref disposed, 1) != 0)
+                    return;
+
+                TaskCompletionSource? completion;
+                lock (ReloadTransactionGate)
+                {
+                    reloadTransactionActive = false;
+                    completion = reloadCompleted;
+                    reloadCompleted = null;
+                }
+                ReloadTransactionDepth.Value--;
+                completion?.TrySetResult();
+            }
         }
 
         internal static IDisposable EnterPluginCallbackScope()
@@ -1285,13 +1606,12 @@ namespace UmamusumeResponseAnalyzer.Plugin
             }
         }
 
-        static Dictionary<string, PluginMetadata> ScanPluginMetadata()
+        static (Dictionary<string, PluginMetadata> Plugins, Dictionary<string, PluginMetadata> Assemblies) ScanPluginMetadata()
         {
             Dictionary<string, PluginMetadata> scanned = [];
             Dictionary<string, PluginMetadata> assemblies = [];
             ScanAll(scanned, assemblies);
-            ReplaceAssemblyMetadatas(assemblies);
-            return scanned;
+            return (scanned, assemblies);
         }
 
         static Dictionary<string, PluginMetadata> ScanPluginMetadataForStatus()
@@ -1327,7 +1647,8 @@ namespace UmamusumeResponseAnalyzer.Plugin
             string pluginName,
             IReadOnlyDictionary<string, PluginMetadata> scanned,
             Dictionary<string, bool> outcomes,
-            List<PendingPluginUnload> pendingUnloads)
+            List<PendingPluginUnload> pendingUnloads,
+            List<IPlugin[]> startedPluginBatches)
         {
             // 同批次内该插件已随所属组一并处理过 → 复用既得结果，避免整组被二次卸载/重载
             if (outcomes.TryGetValue(pluginName, out var prior)) return prior;
@@ -1363,7 +1684,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                     foreach (var name in group) outcomes[name] = false;
                     return false;
                 }
-                CompletePendingUnloadsOutsideReloadLock(pendingUnloads);
+                CompletePendingUnloadsOutsideStateLock(pendingUnloads);
             }
 
             // 重新扫描磁盘，补回所有"当前未加载"的插件元数据（含刚卸载的、以及全新增的）
@@ -1374,7 +1695,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 // 文件已被删除：卸载即完成
                 LiveDisplayConsole.Log("Plugin", $"插件 {pluginName} 的文件已不存在，已卸载。", LiveDisplaySeverity.Warning);
                 BuildGroups();
-                LoadAffectedGroups(affectedNames, outcomes);
+                LoadAffectedGroups(affectedNames, outcomes, startedPluginBatches);
                 return outcomes[pluginName] = true;
             }
 
@@ -1386,7 +1707,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
             }
 
             BuildGroups();
-            LoadAffectedGroups(affectedNames, outcomes);
+            LoadAffectedGroups(affectedNames, outcomes, startedPluginBatches);
 
             var loaded = IsPluginLoaded(pluginName);
             if (loaded)
@@ -1433,7 +1754,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                     return outcomes[pluginName] = false;
                 }
 
-                CompletePendingUnloadsOutsideReloadLock(pendingUnloads);
+                CompletePendingUnloadsOutsideStateLock(pendingUnloads);
             }
             else
             {
@@ -1452,7 +1773,8 @@ namespace UmamusumeResponseAnalyzer.Plugin
         /// <summary>加载受本轮重载影响且尚无 ALC 的上下文组，对新实例调用 Initialize，并补发一次启动事件。</summary>
         static void LoadAffectedGroups(
             IEnumerable<string> affectedNames,
-            Dictionary<string, bool> outcomes)
+            Dictionary<string, bool> outcomes,
+            List<IPlugin[]> startedPluginBatches)
         {
             var affected = affectedNames.ToHashSet(StringComparer.OrdinalIgnoreCase);
             var pendingGroups = ContextGroups
@@ -1476,12 +1798,12 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 if (Server.IsRunning)
                 {
                     var initialized = true;
-                    RunOutsideReloadWriteLock(() => initialized = InitializeStagedPlugins(staged));
+                    RunOutsideStateWriteLock(() => initialized = InitializeStagedPlugins(staged));
                     if (!initialized)
                     {
                         foreach (var name in group.Where(Metadatas.ContainsKey))
                             outcomes[name] = false;
-                        RunOutsideReloadWriteLock(() => DisposeStagedGroup(staged));
+                        RunOutsideStateWriteLock(() => DisposeStagedGroup(staged));
                         continue;
                     }
                 }
@@ -1494,15 +1816,12 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 {
                     foreach (var name in group.Where(Metadatas.ContainsKey))
                         outcomes[name] = false;
-                    RunOutsideReloadWriteLock(() => DisposeStagedGroup(staged));
+                    RunOutsideStateWriteLock(() => DisposeStagedGroup(staged));
                     throw;
                 }
 
                 if (Server.IsRunning && staged.Plugins.Count != 0)
-                {
-                    RunOutsideReloadWriteLock(() =>
-                        TriggerStartedForPluginsAsync(staged.Plugins.Select(x => x.Plugin)).GetAwaiter().GetResult());
-                }
+                    startedPluginBatches.Add([.. staged.Plugins.Select(x => x.Plugin)]);
 
                 foreach (var name in group.Where(Metadatas.ContainsKey))
                     outcomes[name] = IsPluginLoaded(name);
@@ -1658,25 +1977,25 @@ namespace UmamusumeResponseAnalyzer.Plugin
             staged.Context.Unload();
         }
 
-        static void RunOutsideReloadWriteLock(Action action)
+        static void RunOutsideStateWriteLock(Action action)
         {
-            ReloadLock.ExitWriteLock();
+            StateLock.ExitWriteLock();
             try
             {
                 action();
             }
             finally
             {
-                ReloadLock.EnterWriteLock();
+                StateLock.EnterWriteLock();
             }
         }
 
-        static void CompletePendingUnloadsOutsideReloadLock(List<PendingPluginUnload> pendingUnloads)
+        static void CompletePendingUnloadsOutsideStateLock(List<PendingPluginUnload> pendingUnloads)
         {
             if (pendingUnloads.Count == 0)
                 return;
 
-            RunOutsideReloadWriteLock(() =>
+            RunOutsideStateWriteLock(() =>
             {
                 CompletePendingUnloads(pendingUnloads);
                 pendingUnloads.Clear();
@@ -1725,13 +2044,6 @@ namespace UmamusumeResponseAnalyzer.Plugin
         {
             var ctx = Contexts[key];
 
-            // 组内主程序集集合：用于快捷键按程序集兜底清扫
-            var groupAssemblies = group
-                .Select(n => AssemblyMap.GetValueOrDefault(n))
-                .Where(a => a != null)
-                .Cast<Assembly>()
-                .ToHashSet();
-
             var plugins = new List<IPlugin>();
             var routes = new List<RouteRegistration>();
             var eventWaits = new List<Action>();
@@ -1759,7 +2071,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
             Contexts.Remove(key);
             ContextGroups.RemoveAll(g => g.SetEquals(group));
 
-            return new(ctx, plugins, routes, eventWaits, groupAssemblies);
+            return new(ctx, plugins, routes, eventWaits);
         }
 
         static void CompletePendingUnloads(List<PendingPluginUnload> pendingUnloads)
@@ -1781,9 +2093,6 @@ namespace UmamusumeResponseAnalyzer.Plugin
 
                     KeyboardManager.UnregisterByOwner(plugin);
                 }
-
-                // 兜底清扫遗漏的快捷键（如未走 owner 作用域的）
-                KeyboardManager.ClearHandlersByAssembly(unload.Assemblies);
                 unload.Context.Unload();
             }
         }

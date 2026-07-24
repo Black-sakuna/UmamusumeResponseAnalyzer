@@ -13,7 +13,7 @@ namespace UmamusumeResponseAnalyzer.Tests
     {
         readonly string tempDir;
         readonly string originalCwd;
-        readonly Func<string, string, string, bool> originalConfirmInstall;
+        readonly Func<string, string, string, CancellationToken, bool> originalConfirmInstall;
         readonly HttpClient originalHttpClient;
 
         public PluginInstallTests()
@@ -42,10 +42,16 @@ namespace UmamusumeResponseAnalyzer.Tests
         [Fact]
         public async Task WebInstall_RequiresLocalConfirmationBeforeDownload()
         {
-            WebInstallApi.ConfirmInstall = (_, _, _) => false;
+            var confirmationToken = CancellationToken.None;
+            WebInstallApi.ConfirmInstall = (_, _, _, cancellationToken) =>
+            {
+                confirmationToken = cancellationToken;
+                return false;
+            };
             var port = GetFreePort();
             using var server = new WebserverLite(new WebserverSettings("127.0.0.1", port), ctx => ctx.Response.Send(string.Empty));
-            WebInstallApi.Register(server);
+            using var requests = new ServerRequestBarrier(TestContext.Current.CancellationToken);
+            WebInstallApi.Register(server, requests);
             server.Start(TestContext.Current.CancellationToken);
 
             using var client = new HttpClient();
@@ -60,6 +66,7 @@ namespace UmamusumeResponseAnalyzer.Tests
 
             Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
             Assert.False(File.Exists(Path.Combine(tempDir, "Plugins", "NoConfirm.zip")));
+            Assert.Equal(requests.Token, confirmationToken);
         }
 
         [Fact]

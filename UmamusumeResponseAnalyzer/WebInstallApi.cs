@@ -30,15 +30,15 @@ namespace UmamusumeResponseAnalyzer
             "https://ura.shuise.net",
             "http://localhost:5173",
         };
-        internal static Func<string, string, string, bool> ConfirmInstall = ConfirmInstallCore;
+        internal static Func<string, string, string, CancellationToken, bool> ConfirmInstall = ConfirmInstallCore;
 
-        public static void Register(WebserverLite server)
+        public static void Register(WebserverLite server, ServerRequestBarrier requests)
         {
             var routes = server.Routes.PreAuthentication.Static;
-            routes.Add(WatsonWebserver.Core.HttpMethod.OPTIONS, "/uracloud/status", Preflight);
-            routes.Add(WatsonWebserver.Core.HttpMethod.OPTIONS, "/uracloud/install", Preflight);
-            routes.Add(WatsonWebserver.Core.HttpMethod.GET, "/uracloud/status", StatusAsync);
-            routes.Add(WatsonWebserver.Core.HttpMethod.POST, "/uracloud/install", InstallAsync);
+            routes.Add(WatsonWebserver.Core.HttpMethod.OPTIONS, "/uracloud/status", requests.Wrap(Preflight));
+            routes.Add(WatsonWebserver.Core.HttpMethod.OPTIONS, "/uracloud/install", requests.Wrap(Preflight));
+            routes.Add(WatsonWebserver.Core.HttpMethod.GET, "/uracloud/status", requests.Wrap(StatusAsync));
+            routes.Add(WatsonWebserver.Core.HttpMethod.POST, "/uracloud/install", requests.Wrap(InstallAsync));
         }
 
         // 仅对白名单来源回放行头;未命中则不加任何 CORS 头,浏览器自然拦截。
@@ -56,16 +56,18 @@ namespace UmamusumeResponseAnalyzer
             }
         }
 
-        static async Task Preflight(HttpContextBase ctx)
+        static async Task Preflight(HttpContextBase ctx, CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             ApplyCors(ctx);
             ctx.Response.StatusCode = 204;
             await ctx.Response.Send(string.Empty);
         }
 
         // GET /uracloud/status —— 探测用:返回 URA 版本 + 当前已加载插件(供前端标注「已安装/可更新」)。
-        static async Task StatusAsync(HttpContextBase ctx)
+        static async Task StatusAsync(HttpContextBase ctx, CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             ApplyCors(ctx);
             ctx.Response.ContentType = "application/json";
             var plugins = PluginManager.SnapshotLoadedPlugins().Select(p => new
@@ -85,8 +87,9 @@ namespace UmamusumeResponseAnalyzer
         }
 
         // POST /uracloud/install  body: {author, internalName, version} —— 下载并热重载。
-        static async Task InstallAsync(HttpContextBase ctx)
+        static async Task InstallAsync(HttpContextBase ctx, CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             ApplyCors(ctx);
             ctx.Response.ContentType = "application/json";
 
@@ -117,7 +120,7 @@ namespace UmamusumeResponseAnalyzer
                 return;
             }
 
-            if (!ConfirmInstall(req.Author, req.InternalName, req.Version))
+            if (!ConfirmInstall(req.Author, req.InternalName, req.Version, cancellationToken))
             {
                 await SendJson(ctx, 409, new { ok = false, error = "cancelled" });
                 return;
@@ -125,12 +128,16 @@ namespace UmamusumeResponseAnalyzer
 
             try
             {
-                await PluginRepository.InstallByReferenceAsync(req.Author, req.InternalName, req.Version);
-                // 热重载。本路由是 Server 核心路由,未走插件 [Route] 的 EnterRoute 读锁,故 ReloadPlugins
-                // 取写锁不会自锁;它内部会与 /notify 派发互斥并等在途路由排空(best-effort 5s)。
-                var needRestart = PluginManager.ReloadPlugins(req.InternalName);
+                await PluginRepository.InstallByReferenceAsync(req.Author, req.InternalName, req.Version, cancellationToken);
+                // 核心安装路由由 Server barrier 跟踪；热重载会等待插件 callback 排空。
+                var needRestart = await PluginManager.ReloadPluginsAsync(req.InternalName);
+                cancellationToken.ThrowIfCancellationRequested();
                 LiveDisplayConsole.WriteLine($"URACloud 网页请求已安装插件 {req.InternalName} v{req.Version}");
                 await SendJson(ctx, 200, new { ok = true, installed = req.InternalName, needsRestart = needRestart });
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
             }
             catch (ArgumentException)
             {
@@ -150,10 +157,15 @@ namespace UmamusumeResponseAnalyzer
             return ctx.Response.Send(JsonConvert.SerializeObject(payload));
         }
 
-        static bool ConfirmInstallCore(string author, string internalName, string version)
+        static bool ConfirmInstallCore(
+            string author,
+            string internalName,
+            string version,
+            CancellationToken cancellationToken)
         {
             return LiveDisplayConsole.Confirm(
-                $"URACloud 请求安装插件 {author}/{internalName} v{version}，是否允许？");
+                $"URACloud 请求安装插件 {author}/{internalName} v{version}，是否允许？",
+                cancellationToken: cancellationToken);
         }
 
         sealed class InstallRequest

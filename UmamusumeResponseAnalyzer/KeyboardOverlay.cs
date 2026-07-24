@@ -4,6 +4,7 @@ namespace UmamusumeResponseAnalyzer
 {
     internal interface IKeyboardOverlaySink
     {
+        int PopupVisibleLineCount => 1;
         Task<bool> TryHandleWorkspaceKeyAsync(ConsoleKeyInfo keyInfo);
         void ShowPopup(KeyboardPopup popup, int generation);
         void HidePopup(int generation);

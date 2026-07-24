@@ -74,15 +74,10 @@ namespace UmamusumeResponseAnalyzer
         public static string AppendValue(this PropertyInfo property, object? obj, Dictionary<string, string> translatedDic = null!)
         {
             var value = property.GetValue(obj);
-            var valueString = string.Empty;
-            if (value is IEnumerable<string> enumerable)
-            {
-                valueString = string.Join(",", enumerable.Select(x => x.Replace("[", "[[").Replace("]", "]]")));
-            }
-            else
-            {
-                valueString = value?.ToString()?.Replace("[", "[[").Replace("]", "]]") ?? string.Empty;
-            }
+            var valueString = value is IEnumerable<string> enumerable
+                ? string.Join(",", enumerable)
+                : value?.ToString() ?? string.Empty;
+
             if (translatedDic == null) return $"{property.Name}: {valueString}";
 
             translatedDic.TryGetValue(property.Name, out var translated);

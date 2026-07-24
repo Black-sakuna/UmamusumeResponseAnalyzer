@@ -151,15 +151,6 @@ namespace UmamusumeResponseAnalyzer.Localization {
         }
         
         /// <summary>
-        ///   查找类似 (Toggle options with &lt;space&gt;, press &lt;Enter&gt; to save and return, [[X]] indicates selected status) 的本地化字符串。
-        /// </summary>
-        internal static string I18N_Options_Instruction {
-            get {
-                return ResourceManager.GetString("I18N_Options_Instruction", resourceCulture);
-            }
-        }
-        
-        /// <summary>
         ///   查找类似 Multiple languages selected at the same time, reset to default, please reset 的本地化字符串。
         /// </summary>
         internal static string I18N_Options_MultipleLanguagesSelected {

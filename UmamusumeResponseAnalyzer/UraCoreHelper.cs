@@ -106,37 +106,26 @@ namespace UmamusumeResponseAnalyzer
 
             if (registry == null)
             {
-                LiveDisplayConsole.WriteLine("打开注册表失败，请手动操作：https://learn.microsoft.com/en-us/windows/win32/dlls/dynamic-link-library-redirection#optional-configure-the-registry");
+                Console.Error.WriteLine("打开注册表失败，请手动操作：https://learn.microsoft.com/en-us/windows/win32/dlls/dynamic-link-library-redirection#optional-configure-the-registry");
                 return;
             }
 
-            // Only skip the prompt when the value is already correctly set to 1.
             if (registry.GetValue("DevOverrideEnable") is int current && current == 1)
             {
-                LiveDisplayConsole.WriteLine("注册表已启用DLL重定向，将在三秒后自动关闭。没有做任何改动。");
+                Console.WriteLine("注册表已启用 DLL redirection，没有做任何改动。");
                 Environment.ExitCode = 0;
-                return;
-            }
-
-            var registryCaution =
-                @"该行为具有一定风险，将注册表HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\DevOverrideEnable的值改为1。" + "\n" +
-                "请仔细阅读https://learn.microsoft.com/en-us/windows/win32/dlls/dynamic-link-library-redirection 了解其风险后再做决定，我们不对此负责。";
-
-            if (!LiveDisplayConsole.Confirm(registryCaution))
-            {
-                LiveDisplayConsole.WriteLine("已取消启用DLL重定向。");
                 return;
             }
 
             registry.SetValue("DevOverrideEnable", 1, RegistryValueKind.DWord);
             if (registry.GetValue("DevOverrideEnable") is int value && value == 1)
             {
-                LiveDisplayConsole.WriteLine("已启用DLL重定向，请手动重启Windows使其生效。");
+                Console.WriteLine("已启用 DLL redirection，请手动重启 Windows 使其生效。");
                 Environment.ExitCode = 0;
             }
             else
             {
-                LiveDisplayConsole.WriteLine("注册表启用DLL重定向失败，请手动检查。");
+                Console.Error.WriteLine("注册表启用 DLL redirection 失败，请手动检查。");
             }
         }
     }

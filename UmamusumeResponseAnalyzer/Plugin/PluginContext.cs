@@ -1,12 +1,15 @@
+using Terminal.Gui.App;
 using UmamusumeResponseAnalyzer.LiveDisplay;
 
 namespace UmamusumeResponseAnalyzer.Plugin
 {
     internal sealed class PluginContext(
+        IApplication application,
         IPlugin plugin,
         ILiveDisplayOutput liveDisplay,
         PluginHostEvents events) : IPluginContext, IPluginHostEvents
     {
+        public IApplication Application { get; } = application;
         public ILiveDisplayOutput LiveDisplay { get; } = liveDisplay;
         public IPluginHostEvents Events => this;
         public IPluginAnalyzerRegistry Analyzers { get; } = PluginManager.AnalyzersFor(plugin);
@@ -39,6 +42,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
 
         internal async Task TriggerStartedAsync(IEnumerable<IPlugin>? plugins = null, CancellationToken cancellationToken = default)
         {
+            using var callback = await PluginManager.EnterPluginCallbackAsync(cancellationToken);
             var subscriptions = Snapshot(plugins);
             foreach (var subscription in subscriptions)
                 await subscription.InvokeAsync(cancellationToken);

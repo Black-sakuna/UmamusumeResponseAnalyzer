@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Runtime.ExceptionServices;
 using Terminal.Gui.App;
 using Terminal.Gui.ViewBase;
 using Terminal.Gui.Views;
@@ -7,51 +8,237 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay;
 
 static class TerminalGuiDialogs
 {
-    public static async Task RunProgressAsync(Func<IProgress<DownloadProgress>, Task> action)
+    const int PromptHeight = 3;
+    static readonly object ownerGate = new();
+    static IApplication? ownerApplication;
+    static SynchronizationContext? ownerContext;
+
+    internal static void BindOwner(IApplication app, SynchronizationContext context)
     {
-        using IApplication app = Application.Create();
-        app.Init();
-        using var dialog = CreateDialog("正在处理", height: 7);
-        var label = new Label { X = 1, Y = 0, Width = Dim.Fill(1), Text = "准备中…" };
-        var bar = new ProgressBar { X = 1, Y = 2, Width = Dim.Fill(1) };
-        dialog.Add(label, bar);
-        var progress = new Progress<DownloadProgress>(value => app.Invoke(() =>
+        lock (ownerGate)
         {
-            label.Text = value.Description;
-            bar.Fraction = value.Total <= 0 ? 0 : Math.Clamp((float)value.Completed / value.Total, 0, 1);
-        }));
-        var task = Task.Run(() => action(progress));
-        _ = task.ContinueWith(
-            _ => app.Invoke(() => app.RequestStop(dialog)),
-            CancellationToken.None,
-            TaskContinuationOptions.None,
-            TaskScheduler.Default);
-        app.Run(dialog);
-        await task;
+            ownerApplication = app;
+            ownerContext = context;
+        }
     }
 
-    public static T Select<T>(string title, IEnumerable<T> choices, Func<T, string>? converter)
+    internal static void UnbindOwner(IApplication app)
     {
+        lock (ownerGate)
+        {
+            if (!ReferenceEquals(ownerApplication, app))
+                return;
+            ownerApplication = null;
+            ownerContext = null;
+        }
+    }
+
+    public static async Task RunProgressAsync(
+        IApplication app,
+        Func<IProgress<DownloadProgress>, CancellationToken, Task> action,
+        CancellationToken cancellationToken = default)
+    {
+        if (Environment.CurrentManagedThreadId != app.MainThreadId)
+        {
+            await InvokeOnOwnerAsync(
+                app,
+                () => RunProgressAsync(app, action, cancellationToken));
+            return;
+        }
+
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        using var dialog = CreateDialog("正在处理");
+        var body = new View
+        {
+            X = 1,
+            Y = PromptHeight,
+            Width = Dim.Fill(1),
+            Height = Dim.Fill(2)
+        };
+        var rows = new Dictionary<string, (Label Label, ProgressBar Bar)>(StringComparer.Ordinal);
+        var running = 1;
+        var progress = new DialogProgress(
+            app,
+            () => Volatile.Read(ref running) != 0,
+            value =>
+        {
+            if (!rows.TryGetValue(value.Id, out var row))
+            {
+                var y = rows.Count;
+                row = (
+                    new Label
+                    {
+                        X = 0,
+                        Y = y,
+                        Width = Dim.Percent(60),
+                        Text = value.Description
+                    },
+                    new ProgressBar
+                    {
+                        X = Pos.Percent(60),
+                        Y = y,
+                        Width = Dim.Fill()
+                    });
+                rows.Add(value.Id, row);
+                body.Add(row.Label, row.Bar);
+            }
+
+            row.Label.Text = value.Description;
+            row.Bar.Fraction = value.Total <= 0
+                ? 0
+                : Math.Clamp((float)value.Completed / value.Total, 0, 1);
+        });
+
+        var userCancelled = 0;
+        var cancel = CreateButton("取消", false, () =>
+        {
+            Interlocked.Exchange(ref userCancelled, 1);
+            linkedCts.Cancel();
+            app.RequestStop(dialog);
+        });
+        cancel.X = Pos.Center();
+        cancel.Y = Pos.Bottom(body);
+        dialog.Add(body, cancel);
+
+        Task? task = null;
+        var actionStarted = 0;
+        void StartAction(object? sender, Terminal.Gui.App.EventArgs<bool> args)
+        {
+            if (!args.Value || Interlocked.Exchange(ref actionStarted, 1) != 0)
+                return;
+
+            task = Task.Run(
+                () => action(progress, linkedCts.Token),
+                CancellationToken.None);
+            _ = task.ContinueWith(
+                _ =>
+                {
+                    if (Volatile.Read(ref running) != 0)
+                        app.Invoke(() =>
+                        {
+                            if (Volatile.Read(ref running) != 0)
+                                app.RequestStop(dialog);
+                        });
+                },
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+        }
+        dialog.IsRunningChanged += StartAction;
+
+        Exception? runFailure = null;
+        Exception? actionFailure = null;
+        try
+        {
+            Run(app, dialog, linkedCts.Token);
+        }
+        catch (Exception ex)
+        {
+            runFailure = ex;
+        }
+        finally
+        {
+            dialog.IsRunningChanged -= StartAction;
+            Volatile.Write(ref running, 0);
+            if (task is not { IsCompleted: true })
+            {
+                Interlocked.Exchange(ref userCancelled, 1);
+                await linkedCts.CancelAsync();
+            }
+            if (task is not null)
+            {
+                try
+                {
+                    await task;
+                }
+                catch (Exception ex)
+                {
+                    actionFailure = ex;
+                }
+            }
+        }
+
+        if (task is null)
+        {
+            if (runFailure is not null)
+                ExceptionDispatchInfo.Capture(runFailure).Throw();
+            cancellationToken.ThrowIfCancellationRequested();
+            throw new OperationCanceledException(linkedCts.Token);
+        }
+
+        if (actionFailure is not null &&
+            actionFailure is not OperationCanceledException)
+        {
+            ExceptionDispatchInfo.Capture(actionFailure).Throw();
+        }
+        if (runFailure is not null &&
+            runFailure is not OperationCanceledException)
+        {
+            ExceptionDispatchInfo.Capture(runFailure).Throw();
+        }
+
+        if (Volatile.Read(ref userCancelled) != 0 ||
+            cancellationToken.IsCancellationRequested ||
+            runFailure is OperationCanceledException)
+        {
+            throw new OperationCanceledException(
+                "操作已取消。",
+                actionFailure as OperationCanceledException ?? runFailure,
+                cancellationToken.IsCancellationRequested ? cancellationToken : linkedCts.Token);
+        }
+
+        if (actionFailure is not null)
+            ExceptionDispatchInfo.Capture(actionFailure).Throw();
+        if (runFailure is not null)
+            ExceptionDispatchInfo.Capture(runFailure).Throw();
+        cancellationToken.ThrowIfCancellationRequested();
+    }
+
+    public static T Select<T>(
+        IApplication app,
+        string title,
+        IEnumerable<T> choices,
+        Func<T, string>? converter = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (Environment.CurrentManagedThreadId != app.MainThreadId)
+        {
+            return InvokeOnOwner(
+                app,
+                () => Select(app, title, choices, converter, cancellationToken));
+        }
+
         var values = choices.ToArray();
         if (values.Length == 0)
             throw new ArgumentException("选择列表不能为空。", nameof(choices));
 
-        var index = RunList(title, values.Select(x => converter?.Invoke(x) ?? x?.ToString() ?? string.Empty).ToArray());
+        var index = RunList(
+            app,
+            title,
+            values.Select(x => converter?.Invoke(x) ?? x?.ToString() ?? string.Empty).ToArray(),
+            cancellationToken);
         return values[index];
     }
 
     public static IReadOnlyList<T> MultiSelect<T>(
+        IApplication app,
         string title,
         IEnumerable<T> choices,
-        IEnumerable<T>? selected,
-        Func<T, string>? converter)
+        IEnumerable<T>? selected = null,
+        Func<T, string>? converter = null,
+        CancellationToken cancellationToken = default)
     {
+        if (Environment.CurrentManagedThreadId != app.MainThreadId)
+        {
+            return InvokeOnOwner(
+                app,
+                () => MultiSelect(app, title, choices, selected, converter, cancellationToken));
+        }
+
         var values = choices.ToArray();
         if (values.Length == 0)
-            return [];
+            throw new ArgumentException("多选列表不能为空。", nameof(choices));
 
-        using IApplication app = Application.Create();
-        app.Init();
         using var dialog = CreateDialog(title);
         var list = CreateList(values.Select(x => converter?.Invoke(x) ?? x?.ToString() ?? string.Empty));
         list.MarkMultiple = true;
@@ -60,7 +247,7 @@ static class TerminalGuiDialogs
         for (var i = 0; i < values.Length; i++)
         {
             if (selectedValues.Contains(values[i]))
-                list.SetSelection(i, true);
+                list.Source?.SetMark(i, true);
         }
 
         var accepted = false;
@@ -71,54 +258,65 @@ static class TerminalGuiDialogs
         });
         var cancel = CreateButton("取消", isDefault: false, () => app.RequestStop(dialog));
         Layout(dialog, list, ok, cancel);
-        app.Run(dialog);
-        return accepted ? list.GetAllMarkedItems().Select(x => values[x]).ToArray() : [];
+        list.SetFocus();
+        Run(app, dialog, cancellationToken);
+        if (!accepted)
+            throw new OperationCanceledException("多选已取消。");
+        return list.GetAllMarkedItems().Select(x => values[x]).ToArray();
     }
 
-    public static string Ask(string title, string? value, bool allowEmpty)
+    public static string Ask(
+        IApplication app,
+        string title,
+        string? value = null,
+        bool allowEmpty = false,
+        CancellationToken cancellationToken = default)
     {
-        while (true)
+        if (Environment.CurrentManagedThreadId != app.MainThreadId)
+            return InvokeOnOwner(app, () => Ask(app, title, value, allowEmpty, cancellationToken));
+
+        using var dialog = CreateDialog(title, height: 10);
+        var input = new TextField
         {
-            using IApplication app = Application.Create();
-            app.Init();
-            using var dialog = CreateDialog(title, height: 7);
-            var input = new TextField
-            {
-                Text = value ?? string.Empty,
-                X = 1,
-                Y = 1,
-                Width = Dim.Fill(1)
-            };
-            var accepted = false;
-            var ok = CreateButton("确定", true, () =>
+            Text = value ?? string.Empty,
+            X = 1,
+            Y = PromptHeight,
+            Width = Dim.Fill(1)
+        };
+        var accepted = false;
+        var ok = CreateButton("确定", true, () =>
+        {
+            if (allowEmpty || !string.IsNullOrWhiteSpace(input.Text))
             {
                 accepted = true;
                 app.RequestStop(dialog);
-            });
-            var cancel = CreateButton("取消", false, () => app.RequestStop(dialog));
-            ok.X = Pos.Center() - 10;
-            ok.Y = Pos.Bottom(input) + 1;
-            cancel.X = Pos.Right(ok) + 2;
-            cancel.Y = ok.Y;
-            dialog.Add(input, ok, cancel);
-            input.SetFocus();
-            app.Run(dialog);
+            }
+        });
+        var cancel = CreateButton("取消", false, () => app.RequestStop(dialog));
+        ok.X = Pos.Center() - 10;
+        ok.Y = Pos.Bottom(input) + 1;
+        cancel.X = Pos.Right(ok) + 2;
+        cancel.Y = ok.Y;
+        dialog.Add(input, ok, cancel);
+        input.SetFocus();
+        Run(app, dialog, cancellationToken);
 
-            var result = input.Text;
-            if (!accepted)
-                throw new OperationCanceledException("输入已取消。");
-            if (allowEmpty || !string.IsNullOrWhiteSpace(result))
-                return result;
-            value = result;
-        }
+        if (!accepted)
+            throw new OperationCanceledException("输入已取消。");
+        return input.Text;
     }
 
-    public static bool Confirm(string title, bool defaultValue)
+    public static bool Confirm(
+        IApplication app,
+        string title,
+        bool defaultValue = false,
+        CancellationToken cancellationToken = default)
     {
-        using IApplication app = Application.Create();
-        app.Init();
-        using var dialog = CreateDialog(title, height: 7);
-        var result = defaultValue;
+        if (Environment.CurrentManagedThreadId != app.MainThreadId)
+            return InvokeOnOwner(app, () => Confirm(app, title, defaultValue, cancellationToken));
+
+        using var dialog = CreateDialog(title, height: 9);
+        var result = false;
         var yes = CreateButton("是", defaultValue, () =>
         {
             result = true;
@@ -130,19 +328,44 @@ static class TerminalGuiDialogs
             app.RequestStop(dialog);
         });
         yes.X = Pos.Center() - 8;
-        yes.Y = 1;
+        yes.Y = PromptHeight + 1;
         no.X = Pos.Right(yes) + 2;
         no.Y = yes.Y;
         dialog.Add(yes, no);
         (defaultValue ? yes : no).SetFocus();
-        app.Run(dialog);
+        Run(app, dialog, cancellationToken);
         return result;
     }
 
-    static int RunList(string title, IReadOnlyList<string> choices)
+    public static bool Acknowledge(
+        IApplication app,
+        string title = "按 Enter 返回",
+        CancellationToken cancellationToken = default)
     {
-        using IApplication app = Application.Create();
-        app.Init();
+        if (Environment.CurrentManagedThreadId != app.MainThreadId)
+            return InvokeOnOwner(app, () => Acknowledge(app, title, cancellationToken));
+
+        using var dialog = CreateDialog(title, height: 9);
+        var accepted = false;
+        var ok = CreateButton("确定", true, () =>
+        {
+            accepted = true;
+            app.RequestStop(dialog);
+        });
+        ok.X = Pos.Center();
+        ok.Y = PromptHeight + 1;
+        dialog.Add(ok);
+        ok.SetFocus();
+        Run(app, dialog, cancellationToken);
+        return accepted;
+    }
+
+    static int RunList(
+        IApplication app,
+        string title,
+        IReadOnlyList<string> choices,
+        CancellationToken cancellationToken)
+    {
         using var dialog = CreateDialog(title);
         var list = CreateList(choices);
         var accepted = false;
@@ -159,26 +382,52 @@ static class TerminalGuiDialogs
         };
         Layout(dialog, list, ok, cancel);
         list.SetFocus();
-        app.Run(dialog);
+        Run(app, dialog, cancellationToken);
         if (!accepted)
             throw new OperationCanceledException("选择已取消。");
         return list.SelectedItem ?? 0;
     }
 
-    static Dialog CreateDialog(string title, int height = 20)
-        => new()
+    static void Run(
+        IApplication app,
+        Dialog dialog,
+        CancellationToken cancellationToken)
+    {
+        if (Environment.CurrentManagedThreadId != app.MainThreadId)
+            throw new InvalidOperationException("Terminal.Gui dialog 必须在 UI owner thread 运行。");
+
+        cancellationToken.ThrowIfCancellationRequested();
+        using var cancellationRegistration = cancellationToken.Register(
+            () => app.Invoke(() => app.RequestStop(dialog)));
+        app.Run(dialog);
+        cancellationToken.ThrowIfCancellationRequested();
+    }
+
+    static Dialog CreateDialog(string title, int? height = null)
+    {
+        var dialog = new Dialog
         {
-            Title = title,
+            Title = "URA",
             Width = Dim.Percent(80),
-            Height = Math.Min(height, Math.Max(5, Console.WindowHeight - 2))
+            Height = height is null ? Dim.Percent(80) : height.Value
         };
+        dialog.Add(new Label
+        {
+            X = 0,
+            Y = 0,
+            Width = Dim.Fill(),
+            Height = PromptHeight,
+            Text = title
+        });
+        return dialog;
+    }
 
     static ListView CreateList(IEnumerable<string> choices)
     {
         var list = new ListView
         {
             X = 0,
-            Y = 0,
+            Y = PromptHeight,
             Width = Dim.Fill(),
             Height = Dim.Fill(2),
             CanFocus = true
@@ -202,5 +451,99 @@ static class TerminalGuiDialogs
         cancel.X = Pos.Right(ok) + 2;
         cancel.Y = ok.Y;
         dialog.Add(list, ok, cancel);
+    }
+
+    static T InvokeOnOwner<T>(IApplication app, Func<T> action)
+    {
+        var context = GetOwnerContext(app);
+        T result = default!;
+        ExceptionDispatchInfo? failure = null;
+        context.Send(_ =>
+        {
+            try
+            {
+                result = action();
+            }
+            catch (Exception ex)
+            {
+                failure = ExceptionDispatchInfo.Capture(ex);
+            }
+        }, null);
+        failure?.Throw();
+        return result;
+    }
+
+    internal static Task InvokeOnOwnerAsync(IApplication app, Func<Task> action)
+    {
+        var context = GetOwnerContext(app);
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        context.Post(_ =>
+        {
+            Task task;
+            try
+            {
+                task = action();
+            }
+            catch (Exception ex)
+            {
+                completion.TrySetException(ex);
+                return;
+            }
+
+            _ = task.ContinueWith(
+                static (completed, state) =>
+                {
+                    var source = (TaskCompletionSource)state!;
+                    try
+                    {
+                        completed.GetAwaiter().GetResult();
+                        source.TrySetResult();
+                    }
+                    catch (OperationCanceledException ex)
+                    {
+                        source.TrySetCanceled(ex.CancellationToken);
+                    }
+                    catch (Exception ex)
+                    {
+                        source.TrySetException(ex);
+                    }
+                },
+                completion,
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+        }, null);
+        return completion.Task;
+    }
+
+    static SynchronizationContext GetOwnerContext(IApplication app)
+    {
+        lock (ownerGate)
+        {
+            if (!ReferenceEquals(ownerApplication, app) || ownerContext is null)
+            {
+                throw new InvalidOperationException(
+                    "Terminal.Gui dialog owner dispatcher 尚未绑定。");
+            }
+            return ownerContext;
+        }
+    }
+
+    sealed class DialogProgress(
+        IApplication app,
+        Func<bool> isRunning,
+        Action<DownloadProgress> update) : IProgress<DownloadProgress>
+    {
+        public void Report(DownloadProgress value)
+        {
+            if (!isRunning())
+                return;
+
+            app.Invoke(() =>
+            {
+                if (isRunning())
+                    update(value);
+            });
+        }
     }
 }

@@ -1,5 +1,4 @@
 using Newtonsoft.Json;
-using Terminal.Gui.Text;
 using UmamusumeResponseAnalyzer.LiveDisplay;
 
 namespace UmamusumeResponseAnalyzer.Plugin
@@ -16,36 +15,39 @@ namespace UmamusumeResponseAnalyzer.Plugin
         const string PluginApiBase = "https://ura.shuise.net/api/Plugins";
         static readonly Version ZeroVersion = new(0, 0, 0);
 
-        public static async Task ShowMenuAsync()
+        public static async Task ShowMenuAsync(CancellationToken cancellationToken)
         {
-            await LiveDisplayConsole.RunAsync(async () =>
+            try
             {
-                try
-                {
-                    await ShowMenuCoreAsync();
-                }
-                catch (Exception ex)
-                {
-                    LiveDisplayConsole.WriteLine($"插件仓库操作失败: {ex.Message}");
-                    LiveDisplayConsole.WriteLine("按任意键返回");
-                    LiveDisplayConsole.ReadKey(intercept: true);
-                }
-            });
+                await ShowMenuCoreAsync(cancellationToken);
+            }
+            catch (global::UmamusumeResponseAnalyzer.UmamusumeResponseAnalyzer.PostShutdownProcessRequestedException)
+            {
+                throw;
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+            }
+            catch (Exception ex)
+            {
+                TerminalGuiDialogs.Acknowledge(
+                    LiveDisplayConsole.Application,
+                    $"插件仓库操作失败：{ex.Message}",
+                    cancellationToken);
+            }
         }
 
-        static async Task ShowMenuCoreAsync()
+        static async Task ShowMenuCoreAsync(CancellationToken cancellationToken)
         {
-            var plugins = await FetchAllPluginsAsync();
+            var plugins = await FetchAllPluginsAsync(cancellationToken: cancellationToken);
             if (plugins.Count == 0)
             {
-                // 不要在这之前 Clear():FetchAsync 失败时打印的红色原因(URL + 异常)要留在屏上,
-                // 否则只剩这句泛泛的"没有拉到",用户无从判断是网络/端点/过滤问题。
-                LiveDisplayConsole.WriteLine("没有从插件仓库拉到插件信息。");
-                LiveDisplayConsole.WriteLine("按任意键返回");
-                LiveDisplayConsole.ReadKey(intercept: true);
+                TerminalGuiDialogs.Acknowledge(
+                    LiveDisplayConsole.Application,
+                    "插件仓库没有可用插件",
+                    cancellationToken);
                 return;
             }
-            LiveDisplayConsole.Clear();
 
             var pluginChoices = plugins
                 .OrderBy(p => string.IsNullOrWhiteSpace(p.Category) || p.Category == UncategorizedLabel ? 1 : 0)
@@ -55,39 +57,40 @@ namespace UmamusumeResponseAnalyzer.Plugin
             var selectedPlugins = LiveDisplayConsole.MultiSelect(
                 "选择要安装的插件",
                 pluginChoices,
-                converter: FormatChoice).ToList();
+                converter: FormatChoice,
+                cancellationToken: cancellationToken).ToList();
             if (selectedPlugins.Count == 0)
-            {
-                LiveDisplayConsole.Clear();
                 return;
-            }
 
             // 同一 InternalName 的多个 fork(不同作者)都能勾选,但本地磁盘/加载器只认 InternalName——
             // 安装会按程序集名互相覆盖、实际只落一个。检出冲突,让用户每个 InternalName 只保留一个来源。
-            selectedPlugins = DedupeForks(selectedPlugins);
+            selectedPlugins = DedupeForks(selectedPlugins, cancellationToken);
             if (selectedPlugins.Count == 0)
-            {
-                LiveDisplayConsole.Clear();
                 return;
-            }
 
             ResolveDependencies(selectedPlugins, plugins);
-            var installed = await InstallPluginsAsync(selectedPlugins);
+            var installed = await InstallPluginsAsync(selectedPlugins, cancellationToken);
 
             if (installed.Count > 0)
             {
-                LiveDisplayConsole.WriteLine("正在应用插件（热重载，免重启）……");
-                var needRestart = PluginManager.ReloadPlugins([.. installed]);
+                var needRestart = await PluginManager.ReloadPluginsAsync([.. installed]);
+                cancellationToken.ThrowIfCancellationRequested();
                 if (needRestart.Count == 0)
                 {
-                    LiveDisplayConsole.WriteLine("插件已安装并生效。");
+                    TerminalGuiDialogs.Acknowledge(
+                        LiveDisplayConsole.Application,
+                        $"插件已安装并生效：{string.Join("、", installed)}",
+                        cancellationToken);
                 }
                 else
                 {
                     // 无法热重载的情形（如 [LoadInHostContext] 插件）通过重启完成应用。
-                    LiveDisplayConsole.WriteLine($"{string.Join("、", needRestart)} 需重启才能生效，按任意键重启。");
-                    LiveDisplayConsole.ReadKey();
-                    global::UmamusumeResponseAnalyzer.UmamusumeResponseAnalyzer.Restart();
+                    var restart = TerminalGuiDialogs.Acknowledge(
+                        LiveDisplayConsole.Application,
+                        $"需重启以应用插件：{string.Join("、", needRestart)}",
+                        cancellationToken);
+                    if (restart)
+                        global::UmamusumeResponseAnalyzer.UmamusumeResponseAnalyzer.Restart();
                 }
             }
         }
@@ -184,25 +187,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
             // @作者:区分同名不同作者的 fork；真实选择值直接绑定 PluginInformation,显示文本不参与身份判断。
             var author = string.IsNullOrWhiteSpace(info.Author) ? "" : $" @{info.Author}";
             var desc = string.IsNullOrEmpty(info.Description) ? "" : $" — {info.Description}";
-            // 选项保持单行并按终端列宽截断，避免长描述挤压列表。
-            var raw = $"{DisplayLabel(info)}{version}{author}{desc}".ReplaceLineEndings(" ");
-            return TruncateToWidth(raw, Math.Max(30, Console.WindowWidth - 12));
-        }
-
-        // 按显示列宽把字符串截成单行,超出补 “…”。
-        internal static string TruncateToWidth(string s, int maxWidth)
-        {
-            var width = 0;
-            var result = new System.Text.StringBuilder(s.Length);
-            foreach (var rune in s.EnumerateRunes())
-            {
-                var next = width + rune.GetColumns();
-                if (next > maxWidth - 1)
-                    return result.Append('…').ToString();
-                result.Append(rune);
-                width = next;
-            }
-            return result.ToString();
+            return $"{DisplayLabel(info)}{version}{author}{desc}".ReplaceLineEndings(" ");
         }
 
         internal static void ResolveDependencies(List<PluginInformation> selectedPlugins, List<PluginInformation> catalog)
@@ -234,7 +219,9 @@ namespace UmamusumeResponseAnalyzer.Plugin
         /// 同一 InternalName 被勾选了多个 fork(不同作者)时,逐个让用户二选一——本地磁盘/加载器只按
         /// 程序集名(==InternalName)落地,装多个会互相覆盖,UI 的多选无法兑现。每个 InternalName 只留一个。
         /// </summary>
-        static List<PluginInformation> DedupeForks(List<PluginInformation> selected)
+        static List<PluginInformation> DedupeForks(
+            List<PluginInformation> selected,
+            CancellationToken cancellationToken)
         {
             var result = new List<PluginInformation>();
             foreach (var group in selected.GroupBy(p => p.InternalName, StringComparer.OrdinalIgnoreCase))
@@ -249,7 +236,8 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 var pick = LiveDisplayConsole.Select(
                     $"为 {group.Key} 选择来源",
                     forks,
-                    f => $"{DisplayLabel(f)} @{f.Author}");
+                    f => $"{DisplayLabel(f)} @{f.Author}",
+                    cancellationToken);
                 result.Add(pick);
             }
             return result;
@@ -288,7 +276,8 @@ namespace UmamusumeResponseAnalyzer.Plugin
 
             var selection = LiveDisplayConsole.Select(
                 $"选择 {DisplayLabel(plugin)} 要安装的版本",
-                labelToVersion.Keys.Append(CancelLabel));
+                labelToVersion.Keys.Append(CancelLabel),
+                cancellationToken: cancellationToken);
             if (selection == CancelLabel) return null;
             return labelToVersion[selection];
         }
@@ -385,7 +374,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
         /// Plugins/{internalName}.zip。供 :4693 的 Web 端点(<see cref="WebInstallApi"/>)调用——刻意
         /// 只收三段引用、<b>绝不接受任何 URL</b>,下载源恒为 <see cref="PluginApiBase"/>。因此伪造的网页
         /// 既改不了下载源也投不了毒,顶多触发安装一个仓库里真实存在的插件。调用方负责随后调
-        /// <see cref="PluginManager.ReloadPlugins"/> 完成热重载。
+        /// <see cref="PluginManager.ReloadPluginsAsync"/> 完成热重载。
         /// </summary>
         public static async Task InstallByReferenceAsync(string author, string internalName, string version, CancellationToken cancellationToken = default)
         {

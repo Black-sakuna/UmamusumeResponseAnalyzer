@@ -4,6 +4,7 @@ using Gallop;
 using Gallop.Endpoints;
 using MessagePack;
 using Newtonsoft.Json.Linq;
+using Terminal.Gui.App;
 using Terminal.Gui.ViewBase;
 using UmamusumeResponseAnalyzer.LiveDisplay;
 using UmamusumeResponseAnalyzer.Plugin;
@@ -12,8 +13,10 @@ using Xunit;
 namespace UmamusumeResponseAnalyzer.Tests
 {
     [Collection("PluginReload")]
-    public sealed class PluginAnalyzerTests
+    public sealed class PluginAnalyzerTests : IDisposable
     {
+        readonly IApplication application;
+
         const string AccountIndexPath = "/umamusume/account/index";
         const string AccountIndexPathWithoutPrefix = "/account/index";
         const string AccountIndexAbsoluteUrl = "https://example.test/umamusume/account/index?viewer_id=1#fragment";
@@ -31,9 +34,16 @@ namespace UmamusumeResponseAnalyzer.Tests
 
         public PluginAnalyzerTests()
         {
+            application = Application.Create();
             SeedConfig();
             ResetAnalyzerState();
-            PluginManager.BindLiveDisplay(_ => new FakeLiveDisplayOutput());
+            PluginManager.BindLiveDisplay(application, _ => new FakeLiveDisplayOutput());
+        }
+
+        public void Dispose()
+        {
+            ResetAnalyzerState();
+            application.Dispose();
         }
 
         [Fact]
@@ -608,11 +618,12 @@ namespace UmamusumeResponseAnalyzer.Tests
         {
             var plugin = new ContextPlugin();
             var liveDisplay = new FakeLiveDisplayOutput();
-            PluginManager.BindLiveDisplay(_ => liveDisplay);
+            PluginManager.BindLiveDisplay(application, _ => liveDisplay);
 
             PluginManager.InitializePlugin(plugin);
 
             Assert.NotNull(plugin.Context);
+            Assert.Same(application, plugin.Context!.Application);
             Assert.Same(liveDisplay, plugin.Context!.LiveDisplay);
             Assert.NotNull(plugin.Context.Events);
 
@@ -625,11 +636,13 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
 
         [Fact]
-        public void PluginLoadContext_ResolvesSharedAbiAssemblyFromDefaultContext()
+        public async Task PluginLoadContext_ResolvesSharedAbiAssemblyFromDefaultContext()
         {
             var ctx = new PluginManager.PluginLoadContext("shared-abi-test");
-            var uiHost = new UiHost();
-            LiveDisplayConsole.Bind(uiHost);
+            using var terminal = new TerminalGuiTestApp();
+            var uiHost = new UiHost(terminal.Application);
+            terminal.RunOnOwnerThread(() => LiveDisplayConsole.Bind(uiHost, terminal.Application));
+            var run = await terminal.StartAsync(uiHost);
             try
             {
                 var host = ctx.LoadFromAssemblyName(typeof(IPlugin).Assembly.GetName());
@@ -647,7 +660,9 @@ namespace UmamusumeResponseAnalyzer.Tests
                     Version = new Version(99, 0, 0, 0),
                 };
                 Assert.Same(typeof(Server).Assembly, ctx.LoadFromAssemblyName(futureHostVersion));
-                uiHost.RenderSnapshotForTests();
+                await terminal.WaitForAsync(() =>
+                    uiHost.GetLogsForTests(null).Any(line =>
+                        line.Text.Contains("插件依赖的宿主 ABI 版本更高", StringComparison.Ordinal)));
                 Assert.Contains(
                     uiHost.GetLogsForTests(null),
                     line => line.Text.Contains("插件依赖的宿主 ABI 版本更高", StringComparison.Ordinal));
@@ -660,7 +675,8 @@ namespace UmamusumeResponseAnalyzer.Tests
             }
             finally
             {
-                LiveDisplayConsole.Unbind(uiHost);
+                await terminal.StopAsync(uiHost, run);
+                terminal.RunOnOwnerThread(() => LiveDisplayConsole.Unbind(uiHost));
                 ctx.Unload();
             }
         }

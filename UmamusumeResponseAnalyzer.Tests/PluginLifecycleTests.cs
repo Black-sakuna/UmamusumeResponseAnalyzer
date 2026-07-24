@@ -2,6 +2,7 @@ using System.IO.Compression;
 using System.Reflection;
 using Gallop;
 using Gallop.Endpoints;
+using Terminal.Gui.App;
 using UmamusumeResponseAnalyzer.LiveDisplay;
 using UmamusumeResponseAnalyzer.Plugin;
 using WatsonWebserver.Core;
@@ -13,16 +14,20 @@ namespace UmamusumeResponseAnalyzer.Tests
     [Collection("PluginReload")]
     public sealed class PluginLifecycleTests : IDisposable
     {
+        readonly IApplication application;
+
         public PluginLifecycleTests()
         {
+            application = Application.Create();
             SeedConfig();
             ResetPluginState();
-            PluginManager.BindLiveDisplay(_ => new FakeLiveDisplayOutput());
+            PluginManager.BindLiveDisplay(application, _ => new FakeLiveDisplayOutput());
         }
 
         public void Dispose()
         {
             ResetPluginState();
+            application.Dispose();
         }
 
         [Fact]
@@ -63,12 +68,13 @@ namespace UmamusumeResponseAnalyzer.Tests
         {
             var context = new ContextInitializePlugin();
             var liveDisplay = new FakeLiveDisplayOutput();
-            PluginManager.BindLiveDisplay(_ => liveDisplay);
+            PluginManager.BindLiveDisplay(application, _ => liveDisplay);
 
             PluginManager.InitializePlugin(context);
 
             Assert.True(context.Initialized);
             Assert.NotNull(context.Context);
+            Assert.Same(application, context.Context.Application);
             Assert.Same(liveDisplay, context.Context.LiveDisplay);
             Assert.Same(context.Context, context.Context.Events);
         }
@@ -124,11 +130,12 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
 
         [Fact]
-        public void ReloadPlugins_FailsFastInsidePluginCallback()
+        public async Task ReloadPlugins_FailsFastInsidePluginCallback()
         {
             using var callback = PluginManager.EnterPluginCallbackScope();
 
-            var ex = Assert.Throws<InvalidOperationException>(() => PluginManager.ReloadPlugins("AnyPlugin"));
+            var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => PluginManager.ReloadPluginsAsync("AnyPlugin"));
 
             Assert.Contains("插件回调内禁止执行热重载", ex.Message, StringComparison.Ordinal);
         }
@@ -137,39 +144,49 @@ namespace UmamusumeResponseAnalyzer.Tests
         public async Task PluginConfigPrompt_RunAsync_DelegatesToPluginOwnedPrompt()
         {
             var plugin = new ConfigPromptPlugin();
+            LoadTestPlugin(plugin);
+            using var cancellation = new CancellationTokenSource();
 
-            await PluginConfigPrompt.RunAsync(plugin);
+            await PluginConfigPrompt.RunAsync(plugin, cancellation.Token);
 
             Assert.Equal(1, plugin.ConfigPromptCalls);
+            Assert.Same(application, plugin.Application);
+            Assert.Equal(cancellation.Token, plugin.CancellationToken);
         }
 
         [Fact]
         public async Task PluginConfigPrompt_RunAsync_NoCustomPromptReturnsWithoutHostEditor()
         {
             var plugin = new NoConfigPromptPlugin();
+            LoadTestPlugin(plugin);
 
             await PluginConfigPrompt.RunAsync(plugin);
-        }
-
-        [Fact]
-        public async Task PluginConfigPrompt_RunAsync_DoesNotCallLegacyConfigPromptEntrypoint()
-        {
-            var plugin = new LegacyConfigPromptPlugin();
-
-            await PluginConfigPrompt.RunAsync(plugin);
-
-            Assert.Equal(0, plugin.LegacyConfigPromptCalls);
         }
 
         [Fact]
         public async Task PluginConfigPrompt_RunAsync_BlocksHotReloadInsidePrompt()
         {
             var plugin = new ReloadingConfigPromptPlugin();
+            LoadTestPlugin(plugin);
 
             await PluginConfigPrompt.RunAsync(plugin);
 
             Assert.NotNull(plugin.ReloadException);
             Assert.Contains("插件回调内禁止执行热重载", plugin.ReloadException!.Message, StringComparison.Ordinal);
+        }
+
+        [Fact]
+        public async Task PluginConfigPrompt_RunAsync_RejectsStalePluginInstance()
+        {
+            var loaded = new ConfigPromptPlugin();
+            var stale = new ConfigPromptPlugin();
+            LoadTestPlugin(loaded);
+
+            var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => PluginConfigPrompt.RunAsync(stale));
+
+            Assert.Contains("插件已卸载", ex.Message, StringComparison.Ordinal);
+            Assert.Equal(0, stale.ConfigPromptCalls);
         }
 
         [Fact]
@@ -297,6 +314,13 @@ namespace UmamusumeResponseAnalyzer.Tests
         static bool RouteExists(IPlugin plugin, string route)
             => Server.Instance.Routes.PreAuthentication.Static.Exists(WatsonHttpMethod.GET, $"/{plugin.Name}/{route}");
 
+        static void LoadTestPlugin(IPlugin plugin)
+        {
+            PluginManager.RegisterMethods(plugin);
+            PluginManager.LoadedPlugins.Add(plugin);
+            PluginManager.InitializeLoadedPlugins();
+        }
+
         static void ResetPluginState()
         {
             PluginManager.RequestAnalyzerMethods.Clear();
@@ -353,7 +377,9 @@ namespace UmamusumeResponseAnalyzer.Tests
             {
             }
 
-            public virtual Task ConfigPromptAsync()
+            public virtual Task ConfigPromptAsync(
+                IApplication application,
+                CancellationToken cancellationToken = default)
                 => Task.CompletedTask;
 
         }
@@ -529,10 +555,16 @@ namespace UmamusumeResponseAnalyzer.Tests
             }
 
             public int ConfigPromptCalls { get; private set; }
+            public IApplication? Application { get; private set; }
+            public CancellationToken CancellationToken { get; private set; }
 
-            public override Task ConfigPromptAsync()
+            public override Task ConfigPromptAsync(
+                IApplication application,
+                CancellationToken cancellationToken = default)
             {
                 ConfigPromptCalls++;
+                Application = application;
+                CancellationToken = cancellationToken;
                 return Task.CompletedTask;
             }
         }
@@ -545,20 +577,6 @@ namespace UmamusumeResponseAnalyzer.Tests
 
         }
 
-        sealed class LegacyConfigPromptPlugin : TestPlugin
-        {
-            public LegacyConfigPromptPlugin() : base("LegacyConfigPromptPlugin")
-            {
-            }
-
-            public int LegacyConfigPromptCalls { get; private set; }
-
-            public void ConfigPrompt()
-            {
-                LegacyConfigPromptCalls++;
-            }
-        }
-
         sealed class ReloadingConfigPromptPlugin : TestPlugin
         {
             public ReloadingConfigPromptPlugin() : base("ReloadingConfigPromptPlugin")
@@ -567,10 +585,13 @@ namespace UmamusumeResponseAnalyzer.Tests
 
             public Exception? ReloadException { get; private set; }
 
-            public override async Task ConfigPromptAsync()
+            public override async Task ConfigPromptAsync(
+                IApplication application,
+                CancellationToken cancellationToken = default)
             {
                 await Task.Yield();
-                ReloadException = Assert.Throws<InvalidOperationException>(() => PluginManager.ReloadPlugins("AnyPlugin"));
+                ReloadException = await Assert.ThrowsAsync<InvalidOperationException>(
+                    () => PluginManager.ReloadPluginsAsync("AnyPlugin"));
             }
         }
 

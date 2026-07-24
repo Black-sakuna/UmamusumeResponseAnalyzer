@@ -32,12 +32,16 @@ public sealed class LiveDisplayContent(Func<View> createView)
     public static LiveDisplayContent Text(string text)
     {
         ArgumentNullException.ThrowIfNull(text);
-        return new(() => new TextView
+        return new(() =>
         {
-            Text = text,
-            ReadOnly = true,
-            WordWrap = false,
-            CanFocus = false
+            var label = new Label
+            {
+                Text = text,
+                Width = Dim.Fill(),
+                Height = Dim.Auto()
+            };
+            label.TextFormatter.WordWrap = true;
+            return label;
         });
     }
 }

@@ -1,5 +1,6 @@
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using Terminal.Gui.App;
 using UmamusumeResponseAnalyzer;
 using UmamusumeResponseAnalyzer.LiveDisplay;
 using UmamusumeResponseAnalyzer.Plugin;
@@ -26,9 +27,11 @@ namespace UmamusumeResponseAnalyzer.Tests
         readonly string _logPath;
         readonly string _initLog;
         readonly string _originalCwd;
+        readonly IApplication _application;
 
         public HotReloadTests()
         {
+            _application = Application.Create();
             SeedConfig(); // 触碰 PluginManager/LoadIntoContext 会读 Config.Repository.Targets，先注入一个 YamlConfig
             ResetPluginState();
             KeyboardManager.UnregisterAll();
@@ -48,14 +51,15 @@ namespace UmamusumeResponseAnalyzer.Tests
             KeyboardManager.OverlaySink = null;
             Directory.SetCurrentDirectory(_originalCwd);
             try { Directory.Delete(_tempDir, recursive: true); } catch { /* 进程仍持有内存中的程序集，文件残留无妨 */ }
+            _application.Dispose();
         }
 
         [Fact]
-        public void HotReload_Works_ForStandalonePluginAndSharedContextGroup()
+        public async Task HotReload_Works_ForStandalonePluginAndSharedContextGroup()
         {
             // 加载（独立插件 v1 + 共享组 Anchor/Member）→ analyzer dispatch → 重载，全部在不内联的辅助方法里完成，
             // 它返回后持有过旧插件/MethodInfo 的栈帧消失，GC 才能如实反映卸载结果。
-            var (weakStandalone, weakGroup) = LoadDispatchThenReload();
+            var (weakStandalone, weakGroup) = await LoadDispatchThenReloadAsync();
 
             // 核心断言①：两个旧 ALC（独立插件的 + 共享组的）都被回收 —— 零引用泄漏、真卸载
             for (var i = 0; (weakStandalone.IsAlive || weakGroup.IsAlive) && i < 10; i++)
@@ -82,7 +86,7 @@ namespace UmamusumeResponseAnalyzer.Tests
             // 回归点：必须整组重载进【单个】共享 ALC；绝不能因组 key 变化把锚点 Anchor 加载进新旧两个 ALC（共享库单例会失效）。
             var pluginsDir = Path.Combine(_tempDir, "Plugins");
             PluginCompiler.Compile(PluginSource("Member2", "Member2", sharedWith: "Anchor"), "Member2", Path.Combine(pluginsDir, "Member2.dll"));
-            var needRestart = PluginManager.ReloadPlugins("Member2");
+            var needRestart = await PluginManager.ReloadPluginsAsync("Member2");
 
             Assert.Empty(needRestart); // 全部生效，无需重启
             foreach (var n in (string[])["Anchor", "Member", "Member2"])
@@ -118,7 +122,7 @@ namespace UmamusumeResponseAnalyzer.Tests
             Assert.Contains(staleMeta.FilePath, PluginManager.FailedPlugins);
 
             PluginCompiler.Compile(PluginSource("Other", "Other"), "Other", Path.Combine(pluginsDir, "Other.dll"));
-            var ex = Record.Exception(() => PluginManager.ReloadPlugins("Other"));
+            var ex = await Record.ExceptionAsync(() => PluginManager.ReloadPluginsAsync("Other"));
 
             Assert.Null(ex);
             Assert.Contains(PluginManager.LoadedPlugins, p => p.Name == "Other");
@@ -128,21 +132,21 @@ namespace UmamusumeResponseAnalyzer.Tests
             const string waitingMember = "WaitingMember";
             const string waitingAnchor = "WaitingAnchor";
             PluginCompiler.Compile(PluginSource(waitingMember, waitingMember, sharedWith: waitingAnchor), waitingMember, Path.Combine(pluginsDir, $"{waitingMember}.dll"));
-            var missingAnchorResult = PluginManager.ReloadPlugins(waitingMember);
+            var missingAnchorResult = await PluginManager.ReloadPluginsAsync(waitingMember);
             Assert.Contains(waitingMember, missingAnchorResult);
             Assert.DoesNotContain(PluginManager.LoadedPlugins, p => p.Name == waitingMember);
 
             PluginCompiler.Compile(PluginSource(waitingAnchor, waitingAnchor), waitingAnchor, Path.Combine(pluginsDir, $"{waitingAnchor}.dll"));
-            var fixedAnchorResult = PluginManager.ReloadPlugins(waitingMember);
+            var fixedAnchorResult = await PluginManager.ReloadPluginsAsync(waitingMember);
             Assert.Empty(fixedAnchorResult);
             Assert.Contains(PluginManager.LoadedPlugins, p => p.Name == waitingMember);
             Assert.Contains(PluginManager.LoadedPlugins, p => p.Name == waitingAnchor);
 
             // 回归:宿主内部身份是程序集名(InternalName),不能用 IPlugin.Name(显示名)卸载。
             PluginCompiler.Compile(PluginSource("InternalNamePlugin", "internal-v1", displayName: "显示名"), "InternalNamePlugin", Path.Combine(pluginsDir, "InternalNamePlugin.dll"));
-            Assert.Empty(PluginManager.ReloadPlugins("InternalNamePlugin"));
+            Assert.Empty(await PluginManager.ReloadPluginsAsync("InternalNamePlugin"));
             PluginCompiler.Compile(PluginSource("InternalNamePlugin", "internal-v2", displayName: "显示名"), "InternalNamePlugin", Path.Combine(pluginsDir, "InternalNamePlugin.dll"));
-            Assert.Empty(PluginManager.ReloadPlugins("InternalNamePlugin"));
+            Assert.Empty(await PluginManager.ReloadPluginsAsync("InternalNamePlugin"));
             File.Delete(_logPath);
             Dispatch();
             var internalNameLog = File.ReadAllText(_logPath);
@@ -152,21 +156,21 @@ namespace UmamusumeResponseAnalyzer.Tests
             // 回归:旧共享组拆开后,被整组卸载的其它旧成员也必须按新拓扑重载回来。
             PluginCompiler.Compile(PluginSource("TopologyAnchor", "topology-anchor"), "TopologyAnchor", Path.Combine(pluginsDir, "TopologyAnchor.dll"));
             PluginCompiler.Compile(PluginSource("TopologyMember", "topology-member-v1", sharedWith: "TopologyAnchor"), "TopologyMember", Path.Combine(pluginsDir, "TopologyMember.dll"));
-            Assert.Empty(PluginManager.ReloadPlugins("TopologyMember"));
+            Assert.Empty(await PluginManager.ReloadPluginsAsync("TopologyMember"));
             PluginCompiler.Compile(PluginSource("TopologyMember", "topology-member-v2"), "TopologyMember", Path.Combine(pluginsDir, "TopologyMember.dll"));
-            Assert.Empty(PluginManager.ReloadPlugins("TopologyMember"));
+            Assert.Empty(await PluginManager.ReloadPluginsAsync("TopologyMember"));
             Assert.Contains(PluginManager.LoadedPlugins, p => p.Name == "TopologyAnchor");
             Assert.Contains(PluginManager.LoadedPlugins, p => p.Name == "TopologyMember");
 
             // 回归:共享组中一个成员被删除时,应卸掉该成员并把仍存在的成员重建回来。
             PluginCompiler.Compile(PluginSource("DeleteAnchor", "delete-anchor"), "DeleteAnchor", Path.Combine(pluginsDir, "DeleteAnchor.dll"));
             PluginCompiler.Compile(PluginSource("DeleteMember", "delete-member", sharedWith: "DeleteAnchor"), "DeleteMember", Path.Combine(pluginsDir, "DeleteMember.dll"));
-            Assert.Empty(PluginManager.ReloadPlugins("DeleteMember"));
+            Assert.Empty(await PluginManager.ReloadPluginsAsync("DeleteMember"));
             Assert.Contains(PluginManager.LoadedPlugins, p => p.Name == "DeleteAnchor");
             Assert.Contains(PluginManager.LoadedPlugins, p => p.Name == "DeleteMember");
 
             File.Delete(Path.Combine(pluginsDir, "DeleteMember.dll"));
-            Assert.Empty(PluginManager.ReloadPlugins("DeleteMember"));
+            Assert.Empty(await PluginManager.ReloadPluginsAsync("DeleteMember"));
             Assert.Contains(PluginManager.LoadedPlugins, p => p.Name == "DeleteAnchor");
             Assert.DoesNotContain(PluginManager.LoadedPlugins, p => p.Name == "DeleteMember");
             File.Delete(_logPath);
@@ -177,9 +181,9 @@ namespace UmamusumeResponseAnalyzer.Tests
 
             // 回归:新版本切到 LoadInHost 时不能先卸载旧 collectible 插件,否则“需重启”期间旧功能直接掉线。
             PluginCompiler.Compile(PluginSource("HostSwitch", "host-switch-v1"), "HostSwitch", Path.Combine(pluginsDir, "HostSwitch.dll"));
-            Assert.Empty(PluginManager.ReloadPlugins("HostSwitch"));
+            Assert.Empty(await PluginManager.ReloadPluginsAsync("HostSwitch"));
             PluginCompiler.Compile(PluginSource("HostSwitch", "host-switch-v2", loadInHost: true), "HostSwitch", Path.Combine(pluginsDir, "HostSwitch.dll"));
-            var hostSwitchResult = PluginManager.ReloadPlugins("HostSwitch");
+            var hostSwitchResult = await PluginManager.ReloadPluginsAsync("HostSwitch");
             Assert.Contains("HostSwitch", hostSwitchResult);
             Assert.Contains(PluginManager.LoadedPlugins, p => p.Name == "HostSwitch");
             File.Delete(_logPath);
@@ -197,7 +201,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
 
         [Fact]
-        public void RuntimeLifecycle_LoadUnloadReload_UsesInternalNameAndKeepsPluginFiles()
+        public async Task RuntimeLifecycle_LoadUnloadReload_UsesInternalNameAndKeepsPluginFiles()
         {
             var pluginsDir = Path.Combine(_tempDir, "Plugins");
             var standalonePath = Path.Combine(pluginsDir, "RuntimeStandalone.dll");
@@ -223,7 +227,7 @@ namespace UmamusumeResponseAnalyzer.Tests
             Assert.Contains("runtime-anchor:", initialLog);
             Assert.Contains("runtime-member:", initialLog);
 
-            Assert.Empty(PluginManager.UnloadPlugins("runtimestandalone"));
+            Assert.Empty(await PluginManager.UnloadPluginsAsync("runtimestandalone"));
 
             Assert.True(File.Exists(standalonePath));
             Assert.DoesNotContain(PluginManager.LoadedPlugins, x => PluginManager.InternalName(x) == "RuntimeStandalone");
@@ -236,14 +240,14 @@ namespace UmamusumeResponseAnalyzer.Tests
             Assert.Contains("runtime-anchor:", unloadedLog);
             Assert.Contains("runtime-member:", unloadedLog);
 
-            Assert.Empty(PluginManager.LoadPlugins("RuntimeStandalone"));
+            Assert.Empty(await PluginManager.LoadPluginsAsync("RuntimeStandalone"));
 
             File.Delete(_logPath);
             Dispatch();
             var reloadedLog = File.ReadAllText(_logPath);
             Assert.Contains("runtime-standalone:", reloadedLog);
 
-            Assert.Empty(PluginManager.UnloadPlugins("RuntimeMember"));
+            Assert.Empty(await PluginManager.UnloadPluginsAsync("RuntimeMember"));
 
             Assert.DoesNotContain(PluginManager.LoadedPlugins, x => PluginManager.InternalName(x) == "RuntimeAnchor");
             Assert.DoesNotContain(PluginManager.LoadedPlugins, x => PluginManager.InternalName(x) == "RuntimeMember");
@@ -254,14 +258,14 @@ namespace UmamusumeResponseAnalyzer.Tests
             Assert.DoesNotContain("runtime-anchor:", groupUnloadedLog);
             Assert.DoesNotContain("runtime-member:", groupUnloadedLog);
 
-            Assert.Empty(PluginManager.LoadPlugins("RuntimeMember"));
+            Assert.Empty(await PluginManager.LoadPluginsAsync("RuntimeMember"));
 
             Assert.Contains(PluginManager.LoadedPlugins, x => PluginManager.InternalName(x) == "RuntimeAnchor");
             Assert.Contains(PluginManager.LoadedPlugins, x => PluginManager.InternalName(x) == "RuntimeMember");
         }
 
         [Fact]
-        public void RuntimeLifecycle_LoadInHostContextUnloadAndReloadNeedRestart()
+        public async Task RuntimeLifecycle_LoadInHostContextUnloadAndReloadNeedRestart()
         {
             var pluginsDir = Path.Combine(_tempDir, "Plugins");
             PluginCompiler.Compile(
@@ -272,17 +276,17 @@ namespace UmamusumeResponseAnalyzer.Tests
 
             Assert.Contains(PluginManager.LoadedPlugins, x => PluginManager.InternalName(x) == "RuntimeHostPlugin");
 
-            Assert.Contains("RuntimeHostPlugin", PluginManager.UnloadPlugins("RuntimeHostPlugin"));
+            Assert.Contains("RuntimeHostPlugin", await PluginManager.UnloadPluginsAsync("RuntimeHostPlugin"));
             Assert.Contains(PluginManager.LoadedPlugins, x => PluginManager.InternalName(x) == "RuntimeHostPlugin");
 
-            Assert.Contains("RuntimeHostPlugin", PluginManager.ReloadPlugins("RuntimeHostPlugin"));
+            Assert.Contains("RuntimeHostPlugin", await PluginManager.ReloadPluginsAsync("RuntimeHostPlugin"));
             Assert.Contains(PluginManager.LoadedPlugins, x => PluginManager.InternalName(x) == "RuntimeHostPlugin");
         }
 
         [Fact]
-        public void HotReload_TransientDelegatesReleaseReloadedContextAndUnloadRestoresPersistentHotkey()
+        public async Task HotReload_TransientDelegatesReleaseReloadedContextAndUnloadRestoresPersistentHotkey()
         {
-            var oldContext = ExerciseTransientShortcutReloadAndUnload();
+            var oldContext = await ExerciseTransientShortcutReloadAndUnloadAsync();
 
             for (var i = 0; oldContext.IsAlive && i < 10; i++)
             {
@@ -298,7 +302,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         /// NoInlining：让本帧产生的所有指向旧 ALC 的临时引用随返回而释放（测 collectible ALC 卸载的标准手法）。
         /// </summary>
         [MethodImpl(MethodImplOptions.NoInlining)]
-        (WeakReference Standalone, WeakReference Group) LoadDispatchThenReload()
+        async Task<(WeakReference Standalone, WeakReference Group)> LoadDispatchThenReloadAsync()
         {
             var pluginsDir = Path.Combine(_tempDir, "Plugins");
             // 独立插件
@@ -331,22 +335,22 @@ namespace UmamusumeResponseAnalyzer.Tests
 
             // 独立插件升级到 v2 并重载
             PluginCompiler.Compile(PluginSource("Standalone", "Standalone-v2"), "Standalone", Path.Combine(pluginsDir, "Standalone.dll"));
-            Assert.Empty(PluginManager.ReloadPlugins("Standalone"));
+            Assert.Empty(await PluginManager.ReloadPluginsAsync("Standalone"));
 
             // 重载共享组（重载任一成员都会整组卸载+重载）
-            Assert.Empty(PluginManager.ReloadPlugins("Anchor"));
+            Assert.Empty(await PluginManager.ReloadPluginsAsync("Anchor"));
 
             return (weakStandalone, weakGroup);
         }
 
         [MethodImpl(MethodImplOptions.NoInlining)]
-        WeakReference ExerciseTransientShortcutReloadAndUnload()
+        async Task<WeakReference> ExerciseTransientShortcutReloadAndUnloadAsync()
         {
             const string pluginName = "TransientShortcutPlugin";
             var pluginPath = Path.Combine(_tempDir, "Plugins", $"{pluginName}.dll");
             var shortcutLog = Path.Combine(_tempDir, "shortcut-log.txt");
-            var uiHost = new UiHost();
-            PluginManager.BindLiveDisplay(_ => uiHost.ForPlugin(pluginName));
+            var uiHost = new UiHost(_application);
+            PluginManager.BindLiveDisplay(_application, _ => uiHost.ForPlugin(pluginName));
             KeyboardManager.OverlaySink = uiHost;
             var persistentInvocations = 0;
             KeyboardManager.Register(ConsoleKey.F8, "host persistent", () =>
@@ -366,7 +370,7 @@ namespace UmamusumeResponseAnalyzer.Tests
             Assert.Equal(0, persistentInvocations);
 
             PluginCompiler.Compile(TransientShortcutPluginSource(pluginName, "v2", shortcutLog), pluginName, pluginPath);
-            Assert.Empty(PluginManager.ReloadPlugins(pluginName));
+            Assert.Empty(await PluginManager.ReloadPluginsAsync(pluginName));
             Assert.Equal(0, KeyboardManager.TransientShortcutCountForTests);
             KeyboardManager.HandleKeyAsync(new ConsoleKeyInfo('\0', ConsoleKey.F8, false, false, false)).GetAwaiter().GetResult();
             Assert.Equal(1, persistentInvocations);
@@ -380,7 +384,7 @@ namespace UmamusumeResponseAnalyzer.Tests
                 File.ReadAllLines(shortcutLog));
             Assert.Equal(1, persistentInvocations);
 
-            Assert.Empty(PluginManager.UnloadPlugins(pluginName));
+            Assert.Empty(await PluginManager.UnloadPluginsAsync(pluginName));
             Assert.Equal(0, KeyboardManager.TransientShortcutCountForTests);
             KeyboardManager.HandleKeyAsync(new ConsoleKeyInfo('\0', ConsoleKey.F8, false, false, false)).GetAwaiter().GetResult();
             Assert.Equal(2, persistentInvocations);

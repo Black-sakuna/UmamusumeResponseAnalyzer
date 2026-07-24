@@ -2,6 +2,7 @@
 using Gallop.Endpoints;
 using Newtonsoft.Json.Linq;
 using System.Reflection;
+using System.Runtime.ExceptionServices;
 using UmamusumeResponseAnalyzer.LiveDisplay;
 using UmamusumeResponseAnalyzer.Plugin;
 using WatsonWebserver.Core;
@@ -10,6 +11,83 @@ using static UmamusumeResponseAnalyzer.Localization.Server;
 
 namespace UmamusumeResponseAnalyzer
 {
+    internal sealed class ServerRequestBarrier(CancellationToken hostCancellationToken) : IDisposable
+    {
+        readonly object gate = new();
+        readonly CancellationTokenSource lifetime = CancellationTokenSource.CreateLinkedTokenSource(hostCancellationToken);
+        TaskCompletionSource? drained;
+        int inFlight;
+        bool stopping;
+
+        internal CancellationToken Token => lifetime.Token;
+
+        internal Func<HttpContextBase, Task> Wrap(Func<HttpContextBase, CancellationToken, Task> handler)
+        {
+            ArgumentNullException.ThrowIfNull(handler);
+            return ctx => InvokeAsync(ctx, handler);
+        }
+
+        async Task InvokeAsync(HttpContextBase ctx, Func<HttpContextBase, CancellationToken, Task> handler)
+        {
+            var rejected = false;
+            lock (gate)
+            {
+                if (stopping)
+                {
+                    rejected = true;
+                    ctx.Response.StatusCode = 503;
+                }
+                else
+                {
+                    inFlight++;
+                }
+            }
+
+            if (rejected)
+            {
+                await ctx.Response.Send("server_stopping");
+                return;
+            }
+
+            try
+            {
+                await handler(ctx, lifetime.Token);
+            }
+            finally
+            {
+                lock (gate)
+                {
+                    if (--inFlight == 0)
+                        drained?.TrySetResult();
+                }
+            }
+        }
+
+        internal Task StopAsync()
+        {
+            Task wait;
+            var cancel = false;
+            lock (gate)
+            {
+                if (!stopping)
+                {
+                    stopping = true;
+                    cancel = true;
+                }
+
+                wait = inFlight == 0
+                    ? Task.CompletedTask
+                    : (drained ??= new(TaskCreationOptions.RunContinuationsAsynchronously)).Task;
+            }
+
+            if (cancel)
+                lifetime.Cancel();
+            return wait;
+        }
+
+        public void Dispose() => lifetime.Dispose();
+    }
+
     internal sealed class AnalyzerDispatchContext(
         AnalyzerKind kind,
         GameEndpointDescriptor descriptor,
@@ -61,34 +139,123 @@ namespace UmamusumeResponseAnalyzer
         internal const string DeviceHeaderName = "X-Hachimi-device";
         internal const string DeviceSubtypeHeaderName = "X-Hachimi-device-subtype";
         static readonly object DebugPacketCleanupLock = new();
+        static readonly object LifecycleLock = new();
+        static ServerRequestBarrier? requests;
+        static Task? shutdownTask;
         internal static WebserverLite Instance = new(new WebserverSettings(Config.Core.ListenAddress, Config.Core.ListenPort), (ctx) => { return ctx.Response.Send(string.Empty); });
         public static bool IsRunning => Instance.IsListening;
-        internal static void Start()
+        internal static void Start(CancellationToken hostCancellationToken)
         {
-            Instance.Routes.PreAuthentication.Static.Add(WatsonWebserver.Core.HttpMethod.POST, "/notify/response", async (ctx) =>
+            lock (LifecycleLock)
             {
-                var buffer = ctx.Request.DataAsBytes;
-                var canonicalUrl = ReadCanonicalUrl(ctx);
-                var headers = ReadGameHttpHeaders(ctx);
-                await DispatchResponse(canonicalUrl, buffer, headers);
-                await ctx.Response.Send(string.Empty);
-            });
-            Instance.Routes.PreAuthentication.Static.Add(WatsonWebserver.Core.HttpMethod.POST, "/notify/request", async (ctx) =>
+                if (requests is not null || shutdownTask is not null)
+                    throw new InvalidOperationException("HTTP server lifecycle 已启动，不能重复 Start。");
+                requests = new(hostCancellationToken);
+            }
+
+            Instance.Routes.PreAuthentication.Static.Add(
+                WatsonWebserver.Core.HttpMethod.POST,
+                "/notify/response",
+                requests.Wrap(async (ctx, cancellationToken) =>
+                {
+                    var buffer = ctx.Request.DataAsBytes;
+                    var canonicalUrl = ReadCanonicalUrl(ctx);
+                    var headers = ReadGameHttpHeaders(ctx);
+                    await DispatchResponse(canonicalUrl, buffer, headers);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    await ctx.Response.Send(string.Empty);
+                }));
+            Instance.Routes.PreAuthentication.Static.Add(
+                WatsonWebserver.Core.HttpMethod.POST,
+                "/notify/request",
+                requests.Wrap(async (ctx, cancellationToken) =>
+                {
+                    var buffer = ctx.Request.DataAsBytes;
+                    var canonicalUrl = ReadCanonicalUrl(ctx);
+                    var headers = ReadGameHttpHeaders(ctx);
+                    await DispatchRequest(canonicalUrl, buffer, headers);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    await ctx.Response.Send(string.Empty);
+                }));
+            Instance.Routes.PreAuthentication.Static.Add(
+                WatsonWebserver.Core.HttpMethod.GET,
+                "/notify/ping",
+                requests.Wrap(async (ctx, cancellationToken) =>
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    LiveDisplayConsole.Log("Server", I18N_PingReceived, LiveDisplaySeverity.Trace);
+                    await ctx.Response.Send("pong");
+                }));
+            WebInstallApi.Register(Instance, requests);
+            Instance.Start(requests.Token);
+        }
+
+        internal static Task StopAsync()
+        {
+            lock (LifecycleLock)
             {
-                var buffer = ctx.Request.DataAsBytes;
-                var canonicalUrl = ReadCanonicalUrl(ctx);
-                var headers = ReadGameHttpHeaders(ctx);
-                await DispatchRequest(canonicalUrl, buffer, headers);
-                await ctx.Response.Send(string.Empty);
-            });
-            Instance.Routes.PreAuthentication.Static.Add(WatsonWebserver.Core.HttpMethod.GET, "/notify/ping", (ctx) =>
+                return shutdownTask ??= ShutdownCoreAsync(Instance, requests);
+            }
+        }
+
+        internal static async Task ShutdownCoreAsync(WebserverLite server, ServerRequestBarrier? requestBarrier)
+        {
+            List<Exception>? failures = null;
+            Task drained = Task.CompletedTask;
+
+            if (requestBarrier is not null)
             {
-                LiveDisplayConsole.Log("Server", I18N_PingReceived, LiveDisplaySeverity.Trace);
-                return ctx.Response.Send("pong");
-            });
-            // URACloud 网页集成端点(/uracloud/*):探测 + 网页触发安装并热重载。安全模型见 WebInstallApi。
-            WebInstallApi.Register(Instance);
-            Instance.Start();
+                try
+                {
+                    drained = requestBarrier.StopAsync();
+                }
+                catch (Exception ex)
+                {
+                    (failures ??= []).Add(ex);
+                }
+            }
+
+            try
+            {
+                if (server.IsListening)
+                    server.Stop();
+            }
+            catch (Exception ex)
+            {
+                (failures ??= []).Add(ex);
+            }
+
+            try
+            {
+                await drained;
+            }
+            catch (Exception ex)
+            {
+                (failures ??= []).Add(ex);
+            }
+
+            try
+            {
+                server.Dispose();
+            }
+            catch (Exception ex)
+            {
+                (failures ??= []).Add(ex);
+            }
+
+            try
+            {
+                requestBarrier?.Dispose();
+            }
+            catch (Exception ex)
+            {
+                (failures ??= []).Add(ex);
+            }
+
+            if (failures is [var failure])
+                ExceptionDispatchInfo.Capture(failure).Throw();
+            if (failures is { Count: > 1 })
+                throw new AggregateException("HTTP server shutdown 失败。", failures);
         }
         internal static string ReadCanonicalUrl(HttpContextBase ctx)
         {
@@ -157,16 +324,8 @@ namespace UmamusumeResponseAnalyzer
                 SaveDebugPacket(kind, canonicalUrl, buffer);
                 var descriptor = ResolveEndpoint(canonicalUrl);
 
-                // 持分发读锁，确保热重载（写锁）不会在分发途中拆毁插件
-                PluginManager.EnterDispatch();
-                try
-                {
-                    await DispatchPacketLocked(kind, descriptor, buffer, headers);
-                }
-                finally
-                {
-                    PluginManager.ExitDispatch();
-                }
+                using var callback = await PluginManager.EnterPluginCallbackAsync();
+                await DispatchPacketLocked(kind, descriptor, buffer, headers);
             }
             catch (Exception e)
             {

@@ -1,6 +1,7 @@
-using System.Runtime.ExceptionServices;
 using System.Threading.Channels;
 using Terminal.Gui.App;
+using Terminal.Gui.Drivers;
+using Terminal.Gui.Input;
 using Terminal.Gui.ViewBase;
 using Terminal.Gui.Views;
 using UmamusumeResponseAnalyzer.Plugin;
@@ -13,8 +14,17 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         const int RunStateRunning = 1;
         const int RunStateStopped = 2;
 
+        [Flags]
+        enum UiChange
+        {
+            None = 0,
+            WorkspaceStructure = 1,
+            LogContent = 2,
+            Overlays = 4
+        }
+
+        readonly IApplication application;
         readonly Channel<UiEvent> events = CreateUiChannel<UiEvent>();
-        readonly UiRefreshSignal refreshSignal = new();
         readonly NotificationPopupRenderer popupRenderer = new();
 
         readonly Dictionary<LiveDisplayWorkspace, WorkspaceState> workspaces = [];
@@ -22,13 +32,17 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         readonly List<PendingWorkspaceRemoval> pendingWorkspaceRemovals = [];
         readonly object workspaceIdentityGate = new();
         readonly Dictionary<string, WorkspaceRegistration> workspaceRegistrations = new(StringComparer.OrdinalIgnoreCase);
+        readonly Dictionary<LiveDisplayWorkspace, LiveDisplayWorkspace> workspaceAliases =
+            new(ReferenceEqualityComparer.Instance);
         readonly object removedWorkspaceGate = new();
         readonly HashSet<LiveDisplayWorkspace> removedWorkspaces = new(ReferenceEqualityComparer.Instance);
         readonly List<(long Sequence, LiveDisplayLogLine Line)> globalLogs = [];
         readonly Dictionary<LiveDisplayWorkspace, List<(long Sequence, LiveDisplayLogLine Line)>> workspaceLogs =
             new(ReferenceEqualityComparer.Instance);
         readonly List<LiveDisplayNotification> notifications = [];
-        readonly Channel<ConsoleInteractionRequest> consoleInteractions = CreateUiChannel<ConsoleInteractionRequest>();
+        readonly Dictionary<(LiveDisplayWorkspace Workspace, string PluginId, string Key), CachedPanelView> panelViews = [];
+        readonly object inputTasksGate = new();
+        readonly HashSet<Task> inputTasks = [];
 
         LiveDisplayWorkspace? currentWorkspace;
         LiveDisplayWorkspace? activeWorkspace;
@@ -39,13 +53,25 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         int lastViewportWidth;
         int lastViewportHeight;
         int lastViewportMaxScroll;
+        int popupVisibleLineCount = 1;
         bool shutdownRequested;
         long logSequence;
         int runState;
-        internal static bool? HasInteractiveConsoleOverrideForTests { get; set; }
-        internal static Action? ClearConsoleOverrideForTests { get; set; }
-        internal static Func<CancellationToken, Task>? RunLiveDisplayUntilConsoleInteractionOverrideForTests { get; set; }
+        int drainScheduled;
+        Window? window;
+        View? workspaceLayer;
+        Label? notificationLayer;
+        Label? keyboardLayer;
+        Label? commandLayer;
+        WorkspaceLayoutBuilder.WorkspaceSurface? workspaceSurface;
+        object? popupTimer;
         int acceptingEvents = 1;
+        bool workspaceStructurePending;
+
+        public UiHost(IApplication application)
+        {
+            this.application = application ?? throw new ArgumentNullException(nameof(application));
+        }
 
         public ILiveDisplayOutput ForPlugin(string pluginId) => new PluginLiveDisplayOutput(pluginId, this);
         public LiveDisplayWorkspace? CurrentWorkspace => Volatile.Read(ref currentWorkspace);
@@ -102,6 +128,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 }
 
                 workspaceRegistrations[workspace.Title] = new(workspace, historyCapacity);
+                workspaceAliases[workspace] = workspace;
                 SetCurrentWorkspaceIfEmpty(workspace);
                 Post(new UiEvent.RegisterWorkspace(workspace, historyCapacity));
             }
@@ -113,6 +140,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         {
             ArgumentNullException.ThrowIfNull(workspace);
             ArgumentOutOfRangeException.ThrowIfNegative(historyCapacity);
+            workspace = CanonicalizeWorkspace(workspace, historyCapacity) ?? workspace;
             if (IsRemovedWorkspace(workspace))
                 return;
 
@@ -123,12 +151,14 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         public void RemoveWorkspace(LiveDisplayWorkspace workspace)
         {
             ArgumentNullException.ThrowIfNull(workspace);
+            workspace = CanonicalizeWorkspace(workspace, createIfMissing: false) ?? workspace;
             TryTombstoneWorkspace(workspace, preferredReplacement: null, queueRemoval: true, out _);
         }
 
         public void CaptureWorkspaceSnapshot(LiveDisplayWorkspace workspace)
         {
             ArgumentNullException.ThrowIfNull(workspace);
+            workspace = CanonicalizeWorkspace(workspace) ?? workspace;
             if (!IsRemovedWorkspace(workspace))
                 Post(new UiEvent.CaptureWorkspaceSnapshot(workspace));
         }
@@ -136,15 +166,39 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         internal void RemoveWorkspaceWhenAnotherPanelActivates(LiveDisplayWorkspace workspace, Action? removed = null)
         {
             ArgumentNullException.ThrowIfNull(workspace);
+            workspace = CanonicalizeWorkspace(workspace) ?? workspace;
             Post(new UiEvent.RemoveWorkspaceWhenAnotherPanelActivates(workspace, removed));
         }
 
-        public void SetPanel(LiveDisplayPanel panel, bool switchToWorkspace = true) => Post(new UiEvent.SetPanel(panel, switchToWorkspace));
-        public void Log(LiveDisplayLogLine line) => Post(new UiEvent.Log(line));
+        public void SetPanel(LiveDisplayPanel panel, bool switchToWorkspace = true)
+        {
+            var workspace = CanonicalizeWorkspace(panel.Workspace);
+            if (workspace is not null)
+                Post(new UiEvent.SetPanel(panel with { Workspace = workspace }, switchToWorkspace));
+        }
+
+        public void Log(LiveDisplayLogLine line)
+        {
+            if (line.Workspace is null)
+            {
+                Post(new UiEvent.Log(line));
+                return;
+            }
+
+            var workspace = CanonicalizeWorkspace(line.Workspace);
+            if (workspace is not null)
+                Post(new UiEvent.Log(line with { Workspace = workspace }));
+        }
+
         public void Notify(LiveDisplayNotification notification)
         {
-            if (notification.Workspace is not null && IsRemovedWorkspace(notification.Workspace))
-                return;
+            if (notification.Workspace is not null)
+            {
+                var workspace = CanonicalizeWorkspace(notification.Workspace);
+                if (workspace is null)
+                    return;
+                notification = notification with { Workspace = workspace };
+            }
 
             var registrationId = KeyboardManager.RegisterNotificationShortcuts(
                 notification.Workspace,
@@ -168,6 +222,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         public void SwitchWorkspace(LiveDisplayWorkspace workspace)
         {
             ArgumentNullException.ThrowIfNull(workspace);
+            workspace = CanonicalizeWorkspace(workspace) ?? workspace;
             if (IsRemovedWorkspace(workspace))
                 return;
 
@@ -181,6 +236,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             string? description = null)
         {
             ArgumentNullException.ThrowIfNull(workspace);
+            workspace = CanonicalizeWorkspace(workspace) ?? workspace;
             if (IsRemovedWorkspace(workspace))
                 return;
 
@@ -199,24 +255,23 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         }
 
         public void RequestShutdown() => Post(new UiEvent.Shutdown());
-        internal Task HandleCommandAsync(string command)
+        internal async Task HandleCommandAsync(string command)
         {
             ArgumentNullException.ThrowIfNull(command);
             if (!command.StartsWith('/'))
-                return Task.CompletedTask;
+                return;
 
-            return LiveDisplayConsole.RunAsync(() =>
+            try
             {
-                try
-                {
-                    RunCommand(command);
-                }
-                catch (Exception ex)
-                {
-                    LogCommandWarning($"命令执行失败: {ex.Message}");
-                }
-                return Task.CompletedTask;
-            });
+                await RunCommandAsync(command);
+                RebuildWorkspaceLayer();
+                RefreshOverlayLayers();
+            }
+            catch (Exception ex)
+            {
+                LogCommandWarning($"命令执行失败: {ex.Message}");
+                RefreshWorkspaceSurface();
+            }
         }
 
         internal IReadOnlyList<string> CompleteCommand(string input)
@@ -244,6 +299,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         void IKeyboardOverlaySink.HidePopup(int generation) => Post(new UiEvent.HidePopup(generation));
         void IKeyboardOverlaySink.ShowCommandInput(KeyboardCommandInput input) => Post(new UiEvent.ShowCommandInput(input));
         void IKeyboardOverlaySink.HideCommandInput() => Post(new UiEvent.HideCommandInput());
+        int IKeyboardOverlaySink.PopupVisibleLineCount => Volatile.Read(ref popupVisibleLineCount);
         Task<bool> IKeyboardOverlaySink.TryHandleWorkspaceKeyAsync(ConsoleKeyInfo keyInfo)
         {
             if (keyInfo.Modifiers != 0 || keyInfo.Key is not (
@@ -263,82 +319,233 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         }
         internal bool IsRunning => Volatile.Read(ref runState) == RunStateRunning;
 
-        internal string RenderSnapshotForTests(int width = 120, int height = 35)
+        public async Task RunAsync(CancellationToken cancellationToken)
         {
-            if (IsRunning)
-                throw new InvalidOperationException("RenderSnapshotForTests 只能在 UiHost 未运行时用于测试或诊断。");
+            if (Interlocked.CompareExchange(ref runState, RunStateRunning, 0) != 0)
+                throw new InvalidOperationException("UiHost.RunAsync 已在运行中或已停止。");
 
             DrainEvents();
-            RemoveExpiredNotifications(DateTimeOffset.Now);
-            lastViewportWidth = width;
-            lastViewportHeight = height;
-            using var layout = BuildLayout(width, height);
-            return WorkspaceLayoutBuilder.BuildTextSnapshot(
-                activeWorkspace,
-                DisplayedPanels(),
-                VisibleLogs(),
-                WorkspaceLabel);
-        }
-
-        public Task RunAsync(CancellationToken cancellationToken) => RunAsync(cancellationToken, firstRenderGate: null);
-
-        internal async Task RunAsync(CancellationToken cancellationToken, Task? firstRenderGate)
-        {
-            try
+            if (shutdownRequested)
             {
-                await LiveDisplayConsole.ConsoleInputGate.WaitAsync(cancellationToken);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                if (Interlocked.CompareExchange(ref runState, RunStateStopped, 0) == 0)
-                    CompleteRun();
+                CompleteRun();
                 return;
             }
 
+            window = new MainWindow(() =>
+            {
+                RequestShutdown();
+                application.RequestStop();
+            })
+            {
+                Title = "UmamusumeResponseAnalyzer",
+                Width = Dim.Fill(),
+                Height = Dim.Fill()
+            };
+            workspaceLayer = CreateLayer(transparent: false, canFocus: true);
+            notificationLayer = CreateOverlayLabel();
+            keyboardLayer = CreateOverlayLabel();
+            commandLayer = CreateOverlayLabel();
+            window.Add(workspaceLayer, notificationLayer, keyboardLayer, commandLayer);
+            window.Initialized += WindowInitialized;
+            window.ViewportChanged += WindowViewportChanged;
+            window.KeyDownNotHandled += WindowKeyDownNotHandled;
+            window.MouseEvent += WindowMouseEvent;
+            application.Keyboard.KeyDown += ApplicationKeyDown;
+
+            popupTimer = application.AddTimeout(TimeSpan.FromMilliseconds(250), RefreshExpiringOverlays);
             try
             {
-                if (Interlocked.CompareExchange(ref runState, RunStateRunning, 0) != 0)
-                    throw new InvalidOperationException("UiHost.RunAsync 已在运行中。");
+                await application.RunAsync(window, cancellationToken);
             }
             finally
             {
-                LiveDisplayConsole.ConsoleInputGate.Release();
+                if (popupTimer is not null)
+                {
+                    application.RemoveTimeout(popupTimer);
+                    popupTimer = null;
+                }
+
+                application.Keyboard.KeyDown -= ApplicationKeyDown;
+                window.MouseEvent -= WindowMouseEvent;
+                window.KeyDownNotHandled -= WindowKeyDownNotHandled;
+                window.ViewportChanged -= WindowViewportChanged;
+                window.Initialized -= WindowInitialized;
+                Volatile.Write(ref acceptingEvents, 0);
+                Task[] pendingInputTasks;
+                lock (inputTasksGate)
+                    pendingInputTasks = inputTasks.ToArray();
+                if (pendingInputTasks.Length > 0)
+                {
+                    var completion = Task.WhenAll(pendingInputTasks);
+                    await Task.WhenAny(completion, Task.Delay(TimeSpan.FromMilliseconds(250)));
+                    if (!completion.IsCompleted)
+                    {
+                        _ = completion.ContinueWith(
+                            task => LiveDisplayConsole.WriteException(task.Exception!),
+                            CancellationToken.None,
+                            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                            TaskScheduler.Default);
+                    }
+                }
+                CompleteRun();
+                window.Dispose();
+                window = null;
+                workspaceLayer = null;
+                notificationLayer = null;
+                keyboardLayer = null;
+                commandLayer = null;
+                workspaceSurface = null;
+            }
+        }
+
+        static View CreateLayer(bool transparent, bool canFocus = false) => new()
+        {
+            Width = Dim.Fill(),
+            Height = Dim.Fill(),
+            CanFocus = canFocus,
+            TabStop = canFocus ? TabBehavior.TabGroup : TabBehavior.NoStop,
+            ViewportSettings = transparent
+                ? ViewportSettingsFlags.Transparent | ViewportSettingsFlags.TransparentMouse
+                : ViewportSettingsFlags.None
+        };
+
+        static Label CreateOverlayLabel() => new()
+        {
+            CanFocus = false,
+            Enabled = false,
+            Visible = false,
+            ViewportSettings = ViewportSettingsFlags.Transparent | ViewportSettingsFlags.TransparentMouse
+        };
+
+        void WindowInitialized(object? sender, EventArgs e)
+        {
+            RebuildWorkspaceLayer();
+            RefreshOverlayLayers();
+        }
+
+        void WindowViewportChanged(object? sender, DrawEventArgs e)
+        {
+            RebuildWorkspaceLayer();
+            RefreshOverlayLayers();
+        }
+
+        void ApplicationKeyDown(object? sender, Key key)
+        {
+            if (key.Handled)
+                return;
+            if (key.KeyCode == Key.C.WithCtrl.KeyCode)
+                return;
+
+            if (window is null ||
+                !ReferenceEquals(application.TopRunnableView, window) ||
+                !KeyboardManager.HasPriorityInput)
+            {
+                return;
             }
 
+            key.Handled = true;
+            TrackInputTask(DispatchKeyAsync(ConsoleKeyMapping.GetConsoleKeyInfoFromKeyCode(key.KeyCode)));
+        }
+
+        void WindowKeyDownNotHandled(object? sender, Key key)
+        {
+            if (key.KeyCode == Key.C.WithCtrl.KeyCode)
+                return;
+            if (key.KeyCode == Key.Tab.KeyCode ||
+                key.KeyCode == Key.Tab.WithShift.KeyCode ||
+                key.KeyCode == Key.F6.KeyCode ||
+                key.KeyCode == Key.F6.WithShift.KeyCode)
+            {
+                return;
+            }
+
+            key.Handled = true;
+            TrackInputTask(DispatchKeyAsync(ConsoleKeyMapping.GetConsoleKeyInfoFromKeyCode(key.KeyCode)));
+        }
+
+        void WindowMouseEvent(object? sender, Mouse mouse)
+        {
+            var flags = mouse.Flags;
+            var verticalDelta = flags.HasFlag(MouseFlags.WheeledUp)
+                ? 1
+                : flags.HasFlag(MouseFlags.WheeledDown) ? -1 : 0;
+            var horizontalDelta = flags.HasFlag(MouseFlags.WheeledLeft)
+                ? 1
+                : flags.HasFlag(MouseFlags.WheeledRight) ? -1 : 0;
+            if (verticalDelta == 0 && horizontalDelta == 0)
+                return;
+
+            var modifiers = (flags.HasFlag(MouseFlags.Shift) ? ConsoleModifiers.Shift : 0) |
+                (flags.HasFlag(MouseFlags.Ctrl) ? ConsoleModifiers.Control : 0) |
+                (flags.HasFlag(MouseFlags.Alt) ? ConsoleModifiers.Alt : 0);
+            mouse.Handled = true;
+            TrackInputTask(DispatchMouseWheelAsync(
+                horizontalDelta != 0 ? horizontalDelta : verticalDelta,
+                modifiers,
+                horizontalDelta != 0));
+        }
+
+        void TrackInputTask(Task task)
+        {
+            lock (inputTasksGate)
+                inputTasks.Add(task);
+            _ = task.ContinueWith(
+                completed =>
+                {
+                    lock (inputTasksGate)
+                        inputTasks.Remove(completed);
+                },
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+        }
+
+        static async Task DispatchKeyAsync(ConsoleKeyInfo keyInfo)
+        {
             try
             {
-                if (!HasInteractiveConsole())
-                {
-                    await RunHeadlessAsync(cancellationToken);
-                    return;
-                }
-
-                ClearConsole();
-
-                if (firstRenderGate is not null)
-                    await DrainConsoleInteractionsBeforeFirstRenderAsync(firstRenderGate, cancellationToken);
-
-                while (!cancellationToken.IsCancellationRequested && !shutdownRequested)
-                {
-                    var request = await RunLiveDisplayUntilConsoleInteractionAsync(cancellationToken);
-                    if (request is null)
-                        continue;
-
-                    await ExecuteConsoleInteractionAsync(request, clearConsole: true, cancellationToken);
-                }
+                await KeyboardManager.HandleKeyAsync(keyInfo);
             }
-            finally
+            catch (Exception ex)
             {
-                await LiveDisplayConsole.ConsoleInputGate.WaitAsync();
-                try
-                {
-                    CompleteRun();
-                }
-                finally
-                {
-                    LiveDisplayConsole.ConsoleInputGate.Release();
-                }
+                LiveDisplayConsole.WriteException(ex);
             }
+        }
+
+        static async Task DispatchMouseWheelAsync(
+            int delta,
+            ConsoleModifiers modifiers,
+            bool horizontal)
+        {
+            try
+            {
+                await KeyboardManager.HandleMouseWheelAsync(delta, modifiers, horizontal);
+            }
+            catch (Exception ex)
+            {
+                LiveDisplayConsole.WriteException(ex);
+            }
+        }
+
+        bool RefreshExpiringOverlays()
+        {
+            if (!IsRunning)
+                return false;
+
+            var now = DateTimeOffset.Now;
+            if (workspaceStructurePending &&
+                window is not null &&
+                ReferenceEquals(application.TopRunnableView, window))
+            {
+                workspaceStructurePending = false;
+                RebuildWorkspaceLayer();
+            }
+            if (RemoveExpiredNotifications(now) ||
+                popupRenderer.ShouldRefreshPopupCountdown(VisibleNotifications(), keyboardPopup, now))
+            {
+                RefreshOverlayLayers();
+            }
+            return IsRunning && !shutdownRequested;
         }
 
         void CompleteRun()
@@ -346,199 +553,8 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             Volatile.Write(ref runState, RunStateStopped);
             Volatile.Write(ref acceptingEvents, 0);
             events.Writer.TryComplete();
-            consoleInteractions.Writer.TryComplete();
-            FailPendingConsoleInteractions();
             ReleasePendingUiEvents();
-        }
-
-        async Task DrainConsoleInteractionsBeforeFirstRenderAsync(Task firstRenderGate, CancellationToken cancellationToken)
-        {
-            while (!cancellationToken.IsCancellationRequested && !shutdownRequested)
-            {
-                while (consoleInteractions.Reader.TryRead(out var interaction))
-                    await ExecuteConsoleInteractionAsync(interaction, clearConsole: true, cancellationToken);
-
-                if (firstRenderGate.IsCompleted && !consoleInteractions.Reader.TryPeek(out _))
-                {
-                    await firstRenderGate;
-                    return;
-                }
-
-                var waitForGate = firstRenderGate.WaitAsync(cancellationToken);
-                var waitForInteraction = consoleInteractions.Reader.WaitToReadAsync(cancellationToken).AsTask();
-                await Task.WhenAny(waitForGate, waitForInteraction);
-            }
-        }
-
-        async Task<ConsoleInteractionRequest?> RunLiveDisplayUntilConsoleInteractionAsync(CancellationToken cancellationToken)
-        {
-            if (RunLiveDisplayUntilConsoleInteractionOverrideForTests is { } runOverride)
-            {
-                await runOverride(cancellationToken);
-                return null;
-            }
-
-            await Task.Yield();
-            using IApplication app = Application.Create();
-            app.Init();
-            KeyboardManager.RefreshConsoleInputMode();
-            var driver = app.Driver ?? throw new InvalidOperationException("Terminal.Gui 未创建 output driver。");
-            using var window = new Window { Title = "UmamusumeResponseAnalyzer", CanFocus = false };
-            View? surface = null;
-            var width = GetConsoleWidth();
-            var height = GetConsoleHeight();
-
-            void Rebuild()
-            {
-                if (surface is not null)
-                {
-                    window.Remove(surface);
-                    surface.Dispose();
-                }
-                surface = BuildLayout(width, height);
-                window.Add(surface);
-                window.SetNeedsLayout();
-                window.SetNeedsDraw();
-            }
-
-            var session = app.Begin(window) ?? throw new InvalidOperationException("Terminal.Gui 未创建 runnable session。");
-            try
-            {
-                Rebuild();
-                app.LayoutAndDraw(forceRedraw: true);
-                driver.Refresh();
-                while (!cancellationToken.IsCancellationRequested &&
-                       !shutdownRequested &&
-                       !consoleInteractions.Reader.TryPeek(out _))
-                {
-                    await Task.Delay(50, cancellationToken);
-                    var changed = DrainEvents();
-                    var now = DateTimeOffset.Now;
-                    changed |= RemoveExpiredNotifications(now);
-                    changed |= popupRenderer.ShouldRefreshPopupCountdown(VisibleNotifications(), keyboardPopup, now);
-                    var currentWidth = GetConsoleWidth();
-                    var currentHeight = GetConsoleHeight();
-                    if (currentWidth != width || currentHeight != height)
-                    {
-                        width = currentWidth;
-                        height = currentHeight;
-                        changed = true;
-                    }
-                    if (changed)
-                    {
-                        Rebuild();
-                        app.LayoutAndDraw(forceRedraw: true);
-                        driver.Refresh();
-                    }
-                }
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-            }
-            finally
-            {
-                app.End(session);
-            }
-
-            if (cancellationToken.IsCancellationRequested || shutdownRequested)
-                return null;
-
-            return consoleInteractions.Reader.TryRead(out var pendingInteraction)
-                ? pendingInteraction
-                : null;
-        }
-
-        async Task RunHeadlessAsync(CancellationToken cancellationToken)
-        {
-            while (!cancellationToken.IsCancellationRequested && !shutdownRequested)
-            {
-                DrainEvents();
-                var now = DateTimeOffset.Now;
-                RemoveExpiredNotifications(now);
-                while (consoleInteractions.Reader.TryRead(out var interaction))
-                    await ExecuteConsoleInteractionAsync(interaction, clearConsole: false, cancellationToken);
-
-                try { await refreshSignal.WaitForAsync(cancellationToken); }
-                catch (OperationCanceledException) { break; }
-            }
-        }
-
-        internal bool TryQueueConsoleInteraction(Func<Task> action, out Task completion)
-        {
-            if (!IsRunning)
-            {
-                completion = Task.CompletedTask;
-                return false;
-            }
-
-            var request = new ConsoleInteractionRequest(action);
-            if (!consoleInteractions.Writer.TryWrite(request))
-            {
-                completion = Task.CompletedTask;
-                return false;
-            }
-
-            refreshSignal.Signal();
-            completion = request.Completion;
-            return true;
-        }
-
-        static async Task ExecuteConsoleInteractionAsync(
-            ConsoleInteractionRequest request,
-            bool clearConsole,
-            CancellationToken cancellationToken)
-        {
-            Exception? actionFailure = null;
-            try
-            {
-                await LiveDisplayConsole.ExecuteConsoleInputInteractionAsync(
-                    async () =>
-                    {
-                        try
-                        {
-                            if (clearConsole)
-                                ClearConsole();
-
-                            await request.Action();
-                        }
-                        catch (Exception ex)
-                        {
-                            actionFailure = ex;
-                        }
-                        finally
-                        {
-                            if (clearConsole)
-                                ClearConsole();
-                        }
-                    },
-                    cancellationToken);
-            }
-            catch (Exception lifecycleFailure)
-            {
-                if (actionFailure is not null)
-                {
-                    LiveDisplayConsole.LogSecondaryInputFailure("interaction lifecycle", lifecycleFailure);
-
-                    request.SetException(actionFailure);
-                    ExceptionDispatchInfo.Capture(actionFailure).Throw();
-                }
-
-                request.SetException(lifecycleFailure);
-                throw;
-            }
-
-            if (actionFailure is null)
-                request.SetResult();
-            else
-                request.SetException(actionFailure);
-        }
-
-        static void ClearConsole() => (ClearConsoleOverrideForTests ?? Console.Clear)();
-
-        void FailPendingConsoleInteractions()
-        {
-            while (consoleInteractions.Reader.TryRead(out var interaction))
-                interaction.SetException(new OperationCanceledException("LiveDisplay 已停止，无法执行 console interaction。"));
+            DisposePanelViews();
         }
 
         bool Post(UiEvent uiEvent)
@@ -549,8 +565,56 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             if (!events.Writer.TryWrite(uiEvent))
                 return false;
 
-            refreshSignal.Signal();
+            ScheduleDrain();
             return true;
+        }
+
+        void ScheduleDrain()
+        {
+            if (!IsRunning || Interlocked.Exchange(ref drainScheduled, 1) != 0)
+                return;
+
+            application.Invoke(DrainPostedEvents);
+        }
+
+        void DrainPostedEvents()
+        {
+            Interlocked.Exchange(ref drainScheduled, 0);
+            if (!IsRunning)
+                return;
+
+            var changes = DrainEvents();
+            if (changes.HasFlag(UiChange.WorkspaceStructure))
+            {
+                if (window is not null && ReferenceEquals(application.TopRunnableView, window))
+                {
+                    workspaceStructurePending = false;
+                    RebuildWorkspaceLayer();
+                }
+                else
+                {
+                    workspaceStructurePending = true;
+                }
+            }
+            else if (changes.HasFlag(UiChange.LogContent) && !workspaceStructurePending)
+            {
+                RefreshWorkspaceSurface();
+            }
+
+            if (changes.HasFlag(UiChange.Overlays))
+                RefreshOverlayLayers();
+
+            if (shutdownRequested)
+            {
+                if (application.TopRunnableView is not null)
+                    application.RequestStop();
+                if (window is not null)
+                    application.RequestStop(window);
+                return;
+            }
+
+            if (events.Reader.TryPeek(out _))
+                ScheduleDrain();
         }
 
         void ReleasePendingUiEvents()
@@ -571,15 +635,38 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             }
         }
 
-        bool DrainEvents()
+        UiChange DrainEvents()
         {
-            var changed = false;
+            var changes = UiChange.None;
             while (events.Reader.TryRead(out var uiEvent))
             {
-                changed = true;
+                var previousActiveWorkspace = activeWorkspace;
                 Apply(uiEvent);
+                changes |= uiEvent switch
+                {
+                    UiEvent.RegisterWorkspace or
+                    UiEvent.RemoveWorkspace or
+                    UiEvent.CaptureWorkspaceSnapshot or
+                    UiEvent.SetWorkspaceShortcut or
+                    UiEvent.RemoveWorkspaceWhenAnotherPanelActivates or
+                    UiEvent.SetPanel or
+                    UiEvent.SwitchWorkspace or
+                    UiEvent.RunCommand => UiChange.WorkspaceStructure | UiChange.LogContent | UiChange.Overlays,
+                    UiEvent.Log => UiChange.LogContent,
+                    UiEvent.Notify or
+                    UiEvent.ShowPopup or
+                    UiEvent.HidePopup or
+                    UiEvent.ShowCommandInput or
+                    UiEvent.HideCommandInput => UiChange.Overlays,
+                    UiEvent.NavigateWorkspace navigation when navigation.Key is ConsoleKey.LeftArrow or ConsoleKey.RightArrow
+                        => UiChange.WorkspaceStructure,
+                    UiEvent.NavigateWorkspace => UiChange.LogContent,
+                    _ => UiChange.None
+                };
+                if (!ReferenceEquals(previousActiveWorkspace, activeWorkspace))
+                    changes |= UiChange.WorkspaceStructure | UiChange.LogContent | UiChange.Overlays;
             }
-            return changed;
+            return changes;
         }
 
         void Apply(UiEvent uiEvent)
@@ -614,7 +701,15 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                         break;
 
                     RegisterKnownWorkspace(setPanel.Panel.Workspace, HistoryCapacityOf(setPanel.Panel.Workspace));
-                    panels[(setPanel.Panel.Workspace, setPanel.Panel.PluginId, setPanel.Panel.Key)] = setPanel.Panel;
+                    var panelKey = (setPanel.Panel.Workspace, setPanel.Panel.PluginId, setPanel.Panel.Key);
+                    if (panels.TryGetValue(panelKey, out var previousPanel) &&
+                        !ReferenceEquals(previousPanel.Content, setPanel.Panel.Content) &&
+                        panelViews.Remove(panelKey, out var previousView))
+                    {
+                        previousView.View.SuperView?.Remove(previousView.View);
+                        previousView.View.Dispose();
+                    }
+                    panels[panelKey] = setPanel.Panel;
                     if (setPanel.SwitchToWorkspace && !IsBrowsingHistory())
                     {
                         RemovePendingWorkspacesAfterPanelActivation(setPanel.Panel.Workspace);
@@ -656,14 +751,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                     navigateWorkspace.Completion.TrySetResult(TryNavigateWorkspace(navigateWorkspace.Key));
                     break;
                 case UiEvent.RunCommand runCommand:
-                    try
-                    {
-                        RunCommand(runCommand.Command);
-                    }
-                    catch (Exception ex)
-                    {
-                        LogCommandWarning($"命令执行失败: {ex.Message}");
-                    }
+                    TrackInputTask(HandleCommandAsync(runCommand.Command));
                     break;
                 case UiEvent.ShowPopup showPopup:
                     if (showPopup.Generation >= keyboardPopupGeneration)
@@ -692,31 +780,107 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             }
         }
 
-        View BuildLayout(int width, int height)
+        void RebuildWorkspaceLayer()
         {
-            if (width <= 0)
-                width = 120;
-            if (height <= 0)
-                height = 35;
+            if (window is null || workspaceLayer is null)
+                return;
+
+            var width = window.Viewport.Width;
+            var height = window.Viewport.Height;
+            if (width <= 0 || height <= 0)
+                return;
+            Volatile.Write(ref popupVisibleLineCount, Math.Max(1, height - 2));
+
+            var focused = ReferenceEquals(application.TopRunnableView, window)
+                ? window.MostFocused
+                : null;
+            DetachCachedPanelViews();
+            if (workspaceSurface is not null)
+            {
+                workspaceLayer.Remove(workspaceSurface.View);
+                workspaceSurface.View.Dispose();
+                workspaceSurface = null;
+            }
 
             var state = activeWorkspace is not null && workspaces.TryGetValue(activeWorkspace, out var activeState)
                 ? activeState
                 : null;
-            var layout = WorkspaceLayoutBuilder.BuildWorkspaceLayout(
+            var browsingHistory = state?.HistoryOffset >= 0;
+            workspaceSurface = WorkspaceLayoutBuilder.BuildWorkspaceLayout(
                 activeWorkspace,
                 DisplayedPanels(),
                 VisibleLogs(),
                 WorkspaceLabel,
                 width,
                 height,
-                state?.ScrollOffset ?? 0);
-            var content = new View { Width = Dim.Fill(), Height = Dim.Fill(), CanFocus = false };
-            content.Add(layout.View);
+                state?.ScrollOffset ?? 0,
+                panel => browsingHistory ? panel.Content.CreateView() : GetLivePanelView(panel));
+            workspaceLayer.Add(workspaceSurface.View);
             lastViewportWidth = width;
             lastViewportHeight = height;
-            lastViewportMaxScroll = layout.MaxScroll;
-            if (activeWorkspace is { } workspace && state is not null && state.ScrollOffset > layout.MaxScroll)
-                workspaces[workspace] = state with { ScrollOffset = layout.MaxScroll };
+            lastViewportMaxScroll = workspaceSurface.MaxScroll;
+            if (activeWorkspace is { } workspace && state is not null && state.ScrollOffset > workspaceSurface.MaxScroll)
+                workspaces[workspace] = state with { ScrollOffset = workspaceSurface.MaxScroll };
+            workspaceLayer.SetNeedsLayout();
+            workspaceLayer.SetNeedsDraw();
+            if (focused is not null && IsAttachedTo(focused, window))
+                focused.SetFocus();
+        }
+
+        void RefreshWorkspaceSurface()
+        {
+            if (window is null || workspaceSurface is null)
+                return;
+
+            var width = window.Viewport.Width;
+            var height = window.Viewport.Height;
+            if (width <= 0 || height <= 0)
+                return;
+
+            var state = activeWorkspace is not null && workspaces.TryGetValue(activeWorkspace, out var activeState)
+                ? activeState
+                : null;
+            var focused = ReferenceEquals(application.TopRunnableView, window)
+                ? window.MostFocused
+                : null;
+            workspaceSurface.Update(VisibleLogs(), width, height, state?.ScrollOffset ?? 0);
+            lastViewportWidth = width;
+            lastViewportHeight = height;
+            lastViewportMaxScroll = workspaceSurface.MaxScroll;
+            if (activeWorkspace is { } workspace && state is not null && state.ScrollOffset > workspaceSurface.MaxScroll)
+                workspaces[workspace] = state with { ScrollOffset = workspaceSurface.MaxScroll };
+            if (focused is not null && IsAttachedTo(focused, window))
+                focused.SetFocus();
+        }
+
+        static bool IsAttachedTo(View view, View ancestor)
+        {
+            for (View? current = view; current is not null; current = current.SuperView)
+            {
+                if (ReferenceEquals(current, ancestor))
+                    return true;
+            }
+            return false;
+        }
+
+        void RefreshOverlayLayers()
+        {
+            if (window is null ||
+                notificationLayer is null ||
+                keyboardLayer is null ||
+                commandLayer is null)
+            {
+                return;
+            }
+
+            var width = window.Viewport.Width;
+            var height = window.Viewport.Height;
+            if (width <= 0 || height <= 0)
+                return;
+
+            ResetOverlay(notificationLayer);
+            ResetOverlay(keyboardLayer);
+            ResetOverlay(commandLayer);
 
             var popupWidth = NotificationPopupRenderer.GetPopupWidth(width);
             var now = DateTimeOffset.Now;
@@ -731,17 +895,12 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                         Math.Max(0, height - 1),
                         now,
                         WorkspaceLabel);
-                    content.Add(new TextView
-                    {
-                        Text = string.Join(Environment.NewLine, lines),
-                        ReadOnly = true,
-                        WordWrap = false,
-                        CanFocus = false,
-                        X = Math.Max(0, width - popupWidth - 1),
-                        Y = 1,
-                        Width = popupWidth,
-                        Height = Math.Min(lines.Count, Math.Max(1, height - 1))
-                    });
+                    notificationLayer.Text = string.Join(Environment.NewLine, lines);
+                    notificationLayer.X = Pos.AnchorEnd(popupWidth + 1);
+                    notificationLayer.Y = 1;
+                    notificationLayer.Width = popupWidth;
+                    notificationLayer.Height = Math.Min(lines.Count, Math.Max(1, height - 1));
+                    notificationLayer.Visible = true;
                 }
             }
 
@@ -752,39 +911,73 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                     .Skip(keyboardPopup.ScrollOffset)
                     .Take(Math.Max(1, height - 2))
                     .ToArray();
-                content.Add(new TextView
-                {
-                    Text = string.Join(Environment.NewLine, lines),
-                    ReadOnly = true,
-                    WordWrap = false,
-                    CanFocus = false,
-                    X = 0,
-                    Y = Math.Max(0, height - lines.Length),
-                    Width = Dim.Fill(),
-                    Height = Math.Max(1, lines.Length)
-                });
+                keyboardLayer.Text = string.Join(Environment.NewLine, lines);
+                keyboardLayer.X = 0;
+                keyboardLayer.Y = Pos.AnchorEnd(Math.Max(1, lines.Length));
+                keyboardLayer.Width = Dim.Fill();
+                keyboardLayer.Height = Math.Max(1, lines.Length);
+                keyboardLayer.Visible = true;
             }
 
             if (commandInput is not null)
             {
                 var lines = commandInput.CompletionCandidates
                     .Take(Math.Max(0, height - 2))
+                    .Prepend("Command Mode")
                     .Append($"> {commandInput.Text}")
                     .ToArray();
-                content.Add(new TextView
-                {
-                    Text = string.Join(Environment.NewLine, lines),
-                    ReadOnly = true,
-                    WordWrap = false,
-                    CanFocus = false,
-                    X = 0,
-                    Y = Math.Max(0, height - lines.Length),
-                    Width = Dim.Fill(),
-                    Height = Math.Max(1, lines.Length)
-                });
+                commandLayer.Text = string.Join(Environment.NewLine, lines);
+                commandLayer.X = 0;
+                commandLayer.Y = Pos.AnchorEnd(Math.Max(1, lines.Length));
+                commandLayer.Width = Dim.Fill();
+                commandLayer.Height = Math.Max(1, lines.Length);
+                commandLayer.Visible = true;
             }
 
-            return content;
+            notificationLayer.SetNeedsDraw();
+            keyboardLayer.SetNeedsDraw();
+            commandLayer.SetNeedsDraw();
+        }
+
+        View GetLivePanelView(LiveDisplayPanel panel)
+        {
+            var key = (panel.Workspace, panel.PluginId, panel.Key);
+            if (panelViews.TryGetValue(key, out var cached))
+            {
+                if (ReferenceEquals(cached.Content, panel.Content))
+                    return cached.View;
+
+                cached.View.SuperView?.Remove(cached.View);
+                cached.View.Dispose();
+            }
+
+            var view = panel.Content.CreateView();
+            panelViews[key] = new(panel.Content, view);
+            return view;
+        }
+
+        void DetachCachedPanelViews()
+        {
+            foreach (var cached in panelViews.Values)
+                cached.View.SuperView?.Remove(cached.View);
+        }
+
+        static void ResetOverlay(Label overlay)
+        {
+            overlay.Visible = false;
+            overlay.Text = string.Empty;
+        }
+
+        void DisposePanelViews(LiveDisplayWorkspace? workspace = null)
+        {
+            foreach (var (key, cached) in panelViews
+                .Where(x => workspace is null || ReferenceEquals(x.Key.Workspace, workspace))
+                .ToArray())
+            {
+                cached.View.SuperView?.Remove(cached.View);
+                cached.View.Dispose();
+                panelViews.Remove(key);
+            }
         }
 
         string WorkspaceLabel(LiveDisplayWorkspace workspace)
@@ -854,7 +1047,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             return nextOffset != currentOffset;
         }
 
-        void RunCommand(string command)
+        async Task RunCommandAsync(string command)
         {
             if (!command.StartsWith('/'))
                 return;
@@ -875,7 +1068,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
 
             if (string.Equals(name, "plugin", StringComparison.OrdinalIgnoreCase))
             {
-                RunPluginCommand(rest);
+                await RunPluginCommandAsync(rest);
                 return;
             }
 
@@ -976,7 +1169,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             LogCommandWarning("用法: /workspace | /workspace switch [<title>|\"<title>\"] | /workspace list");
         }
 
-        void RunPluginCommand(string arguments)
+        async Task RunPluginCommandAsync(string arguments)
         {
             var (subcommand, rest) = SplitCommand(arguments);
             if (string.IsNullOrEmpty(subcommand))
@@ -1008,7 +1201,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 return;
             }
 
-            RunPluginLifecycleCommand(normalizedSubcommand, pluginName);
+            await RunPluginLifecycleCommandAsync(normalizedSubcommand, pluginName);
         }
 
         void ShowPluginList()
@@ -1035,7 +1228,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             KeyboardManager.ShowPopup(context);
         }
 
-        void RunPluginLifecycleCommand(string subcommand, string pluginName)
+        async Task RunPluginLifecycleCommandAsync(string subcommand, string pluginName)
         {
             var status = PluginManager.SnapshotPluginStatuses()
                 .FirstOrDefault(x => string.Equals(x.InternalName, pluginName, StringComparison.OrdinalIgnoreCase));
@@ -1047,9 +1240,9 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
 
             var needRestart = subcommand switch
             {
-                "load" => PluginManager.LoadPlugins(status.InternalName),
-                "unload" => PluginManager.UnloadPlugins(status.InternalName),
-                "reload" => PluginManager.ReloadPlugins(status.InternalName),
+                "load" => await PluginManager.LoadPluginsAsync(status.InternalName),
+                "unload" => await PluginManager.UnloadPluginsAsync(status.InternalName),
+                "reload" => await PluginManager.ReloadPluginsAsync(status.InternalName),
                 _ => throw new InvalidOperationException($"未知 plugin 子命令: {subcommand}")
             };
 
@@ -1297,6 +1490,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 UnbindWorkspaceHotkey(state);
                 foreach (var key in panels.Keys.Where(x => ReferenceEquals(x.Workspace, workspace)).ToList())
                     panels.Remove(key);
+                DisposePanelViews(workspace);
                 workspaceLogs.Remove(workspace);
                 foreach (var notification in notifications.Where(x => ReferenceEquals(x.Workspace, workspace)))
                     KeyboardManager.UnregisterNotificationShortcuts(notification.ShortcutRegistrationId);
@@ -1456,15 +1650,25 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         {
             lock (workspaceIdentityGate)
             {
+                var aliases = workspaceAliases
+                    .Where(x => ReferenceEquals(x.Value, workspace))
+                    .Select(x => x.Key)
+                    .ToList();
+                if (!aliases.Any(x => ReferenceEquals(x, workspace)))
+                    aliases.Add(workspace);
                 lock (removedWorkspaceGate)
                 {
-                    if (!removedWorkspaces.Add(workspace))
+                    if (removedWorkspaces.Contains(workspace))
                     {
                         replacement = null;
                         return false;
                     }
+                    foreach (var alias in aliases)
+                        removedWorkspaces.Add(alias);
                 }
 
+                foreach (var alias in aliases)
+                    workspaceAliases.Remove(alias);
                 if (workspaceRegistrations.TryGetValue(workspace.Title, out var existing) &&
                     ReferenceEquals(existing.Workspace, workspace))
                 {
@@ -1505,6 +1709,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 }
 
                 workspaceRegistrations.Add(workspace.Title, new(workspace, historyCapacity));
+                workspaceAliases[workspace] = workspace;
             }
         }
 
@@ -1512,42 +1717,48 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         {
             lock (workspaceIdentityGate)
             {
-                return workspaceRegistrations.TryGetValue(workspace.Title, out var registration) &&
-                    ReferenceEquals(registration.Workspace, workspace)
-                        ? registration.HistoryCapacity
-                        : 0;
+                return workspaceRegistrations.TryGetValue(workspace.Title, out var registration)
+                    ? registration.HistoryCapacity
+                    : 0;
             }
         }
 
-        static int GetConsoleWidth()
+        LiveDisplayWorkspace? CanonicalizeWorkspace(
+            LiveDisplayWorkspace workspace,
+            int? historyCapacity = null,
+            bool createIfMissing = true)
         {
-            try { return Console.WindowWidth; }
-            catch { return 120; }
-        }
-
-        static int GetConsoleHeight()
-        {
-            try { return Console.WindowHeight; }
-            catch { return 35; }
-        }
-
-        static bool HasInteractiveConsole()
-        {
-            if (HasInteractiveConsoleOverrideForTests is { } overrideValue)
-                return overrideValue;
-
-            if (Console.IsOutputRedirected)
-                return false;
-
-            try
+            lock (workspaceIdentityGate)
             {
-                _ = Console.WindowWidth;
-                _ = Console.WindowHeight;
-                return true;
-            }
-            catch
-            {
-                return false;
+                lock (removedWorkspaceGate)
+                {
+                    if (removedWorkspaces.Contains(workspace))
+                        return null;
+                }
+
+                if (workspaceAliases.TryGetValue(workspace, out var canonical))
+                    return canonical;
+
+                if (workspaceRegistrations.TryGetValue(workspace.Title, out var registration))
+                {
+                    if (historyCapacity is { } requestedCapacity &&
+                        registration.HistoryCapacity != requestedCapacity)
+                    {
+                        throw new InvalidOperationException(
+                            $"Workspace '{workspace.Title}' 已使用 historyCapacity={registration.HistoryCapacity} 注册，不能改为 {requestedCapacity}。");
+                    }
+                    workspaceAliases[workspace] = registration.Workspace;
+                    return registration.Workspace;
+                }
+
+                if (!createIfMissing)
+                    return null;
+
+                workspaceRegistrations.Add(
+                    workspace.Title,
+                    new(workspace, historyCapacity ?? 0));
+                workspaceAliases[workspace] = workspace;
+                return workspace;
             }
         }
 
@@ -1575,21 +1786,18 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
 
         sealed record WorkspacePopupList(KeyboardHandlerContext Context, List<WorkspacePopupEntry> Entries);
 
-        sealed class ConsoleInteractionRequest(Func<Task> action)
+        sealed record CachedPanelView(LiveDisplayContent Content, View View);
+
+        sealed class MainWindow : Window
         {
-            readonly TaskCompletionSource completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
-
-            public Func<Task> Action => action;
-            public Task Completion => completion.Task;
-
-            public void SetResult()
+            public MainWindow(Action shutdown)
             {
-                completion.TrySetResult();
-            }
-
-            public void SetException(Exception exception)
-            {
-                completion.TrySetException(exception);
+                KeyBindings.Remove(Key.Enter);
+                AddCommand(Command.Quit, () =>
+                {
+                    shutdown();
+                    return true;
+                });
             }
         }
     }

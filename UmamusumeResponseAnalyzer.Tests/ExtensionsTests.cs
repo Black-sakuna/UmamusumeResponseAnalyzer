@@ -86,11 +86,11 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
 
         [Fact]
-        public void AppendValue_ScalarBrackets_AreDoubled()
+        public void AppendValue_ScalarBrackets_AreLiteral()
         {
             var result = Prop(nameof(Probe.Bracketed)).AppendValue(new Probe());
 
-            Assert.Equal("Bracketed: a[[b]]c", result);
+            Assert.Equal("Bracketed: a[b]c", result);
         }
 
         [Fact]
@@ -102,11 +102,11 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
 
         [Fact]
-        public void AppendValue_StringEnumerable_EscapesBracketsPerElement()
+        public void AppendValue_StringEnumerable_PreservesBracketsPerElement()
         {
             var result = Prop(nameof(Probe.BracketTags)).AppendValue(new Probe());
 
-            Assert.Equal("BracketTags: a[[1]],b[[2]]", result);
+            Assert.Equal("BracketTags: a[1],b[2]", result);
         }
 
         [Fact]

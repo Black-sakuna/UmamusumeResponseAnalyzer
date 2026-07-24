@@ -1,4 +1,5 @@
 using Gallop.Endpoints;
+using Terminal.Gui.App;
 using UmamusumeResponseAnalyzer.LiveDisplay;
 using HttpMethod = WatsonWebserver.Core.HttpMethod;
 
@@ -6,6 +7,7 @@ namespace UmamusumeResponseAnalyzer.Plugin;
 
 public interface IPluginContext
 {
+    IApplication Application { get; }
     ILiveDisplayOutput LiveDisplay { get; }
     IPluginHostEvents Events { get; }
     IPluginAnalyzerRegistry Analyzers { get; }
@@ -30,7 +32,8 @@ public interface IPlugin
 
     void Dispose() { }
 
-    Task ConfigPromptAsync() => Task.CompletedTask;
+    Task ConfigPromptAsync(IApplication application, CancellationToken cancellationToken = default)
+        => Task.CompletedTask;
 
 }
 
