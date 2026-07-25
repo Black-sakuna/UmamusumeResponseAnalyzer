@@ -1,14 +1,17 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO.Compression;
+using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Reflection;
 using System.Runtime.ExceptionServices;
 using System.Text;
 using Terminal.Gui.App;
+using Terminal.Gui.Views;
 using UmamusumeResponseAnalyzer.LiveDisplay;
 using UmamusumeResponseAnalyzer.Plugin;
+using configI18n = UmamusumeResponseAnalyzer.Localization.Config;
 using static UmamusumeResponseAnalyzer.Localization.LaunchMenu;
 
 namespace UmamusumeResponseAnalyzer
@@ -182,20 +185,14 @@ namespace UmamusumeResponseAnalyzer
                     bootstrap.SetPhase("config", "配置", LiveDisplaySeverity.Success, "已读取 config.yaml");
 
                     _plugin_initialize_task = pluginInitialization = StartPluginInitializationAsync(bootstrap);
-                    while (true)
+                    await _plugin_initialize_task;
+                    try
                     {
-                        string selection;
-                        try
-                        {
-                            selection = await ShowMenu(application, lifetimeCts.Token);
-                        }
-                        catch (OperationCanceledException)
-                        {
-                            return;
-                        }
-
-                        if (selection == I18N_Start)
-                            break;
+                        await ShowMenu(application, lifetimeCts.Token);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        return;
                     }
 
                     bootstrap.SetPhase("database", "数据文件", LiveDisplaySeverity.Info, "正在加载事件、技能、名称等数据。");
@@ -541,132 +538,422 @@ namespace UmamusumeResponseAnalyzer
                 "首次设置完成。启动前请更新数据文件，并从「插件仓库」安装所需插件。",
                 cancellationToken);
         }
-        static async Task<string> ShowMenu(
+        enum MenuLocation
+        {
+            Root,
+            Options,
+            Core,
+            Repository,
+            Plugin,
+            Updater,
+            DatabaseLanguage,
+            Language,
+            InstallUraCore
+        }
+
+        static async Task ShowMenu(
             IApplication application,
             CancellationToken cancellationToken)
         {
-            var selections = new List<string>
+            var location = MenuLocation.Root;
+            while (true)
             {
-                    I18N_Start,
-                    I18N_Options,
-                    "插件仓库",
-                    I18N_UpdateAssets,
-                    I18N_UpdateProgram,
-                    "加入QQ群（号被封过之后在频道里说话会概率被夹"
-            };
-            #region 条件显示功能
-            // Windows限定功能，其他平台不显示
-            if (OperatingSystem.IsWindows())
-            {
-                selections.Add(I18N_InstallUraCore);
-            }
-            #endregion
-            var prompt = TerminalGuiDialogs.StartupMenu(
-                application,
-                I18N_Instruction,
-                selections,
-                cancellationToken);
-            try
-            {
-                if (prompt == I18N_Options)
-                {
-                    await Config.PromptAsync(cancellationToken);
-                }
-                else if (prompt == "插件仓库")
-                {
-                    try
-                    {
-                        await _plugin_initialize_task;
-                    }
-                    catch (Exception ex)
-                    {
-                        LiveDisplayConsole.Acknowledge(
-                            $"插件扫描失败：{ex.Message}",
-                            cancellationToken);
-                        return prompt;
-                    }
-                    await PluginRepository.ShowMenuAsync(cancellationToken);
-                }
-                else if (prompt == I18N_UpdateAssets)
-                {
-                    await ResourceUpdater.UpdateAssets(cancellationToken);
-                }
-                else if (prompt == I18N_UpdateProgram)
-                {
-                    await ResourceUpdater.UpdateProgram(cancellationToken);
-                }
-                else if (prompt == I18N_InstallUraCore)
-                {
-                    if (UraCoreHelper.GamePaths.Count == 0)
-                    {
-                        LiveDisplayConsole.Acknowledge("没有找到可安装 Mod 的游戏目录。", cancellationToken);
-                        return prompt;
-                    }
+                Func<Task>? nextAction = null;
+                var start = false;
 
-                    var target = LiveDisplayConsole.Select(
-                        "请选择想要安装的 Mod",
-                        new[] { "Hachimi", "umamusume-localify" },
-                        cancellationToken: cancellationToken);
-                    var results = new List<string>();
-                    foreach (var path in UraCoreHelper.GamePaths)
+                MenuItem Leaf(string title, MenuLocation reopenAt, Func<Task> action) => new()
+                {
+                    Title = title,
+                    Action = () =>
                     {
-                        var confirm = LiveDisplayConsole.Confirm(
-                            $"是否将 {target} 安装到 {path}，并把注册表 " +
-                            @"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\DevOverrideEnable " +
-                            "设为 1？该操作需要管理员权限并会影响系统 DLL redirection。",
-                            cancellationToken: cancellationToken);
-                        if (!confirm)
-                            continue;
+                        location = reopenAt;
+                        nextAction = action;
+                    }
+                };
 
-                        using var proc = new Process
+                MenuItem Toggle(
+                    string title,
+                    bool value,
+                    MenuLocation reopenAt,
+                    Action<bool> update)
+                {
+                    var checkBox = new CheckBox
+                    {
+                        Title = title,
+                        CanFocus = false,
+                        Value = value ? CheckState.Checked : CheckState.UnChecked
+                    };
+                    return new MenuItem
+                    {
+                        Title = title,
+                        CommandView = checkBox,
+                        Action = () =>
                         {
-                            StartInfo = new ProcessStartInfo
+                            var selected = checkBox.Value == CheckState.Checked;
+                            location = reopenAt;
+                            nextAction = () =>
                             {
-                                FileName = Environment.ProcessPath,
-                                Arguments = "--enable-dll-redirection --confirmed",
-                                CreateNoWindow = true,
-                                UseShellExecute = true,
-                                Verb = "runas"
-                            }
-                        };
-                        proc.Start();
-                        await proc.WaitForExitAsync(cancellationToken);
-                        if (proc.ExitCode != 0)
-                        {
-                            results.Add($"{path}: 注册表操作失败（exit {proc.ExitCode}）");
-                            continue;
+                                update(selected);
+                                Config.Save();
+                                return Task.CompletedTask;
+                            };
                         }
+                    };
+                }
 
-                        var url = (target == "Hachimi"
-                            ? "https://github.com/UmamusumeResponseAnalyzer/Hachimi/releases/latest/download/Hachimi.zip"
-                            : "https://github.com/UmamusumeResponseAnalyzer/Hachimi/releases/latest/download/UmamusumeLocalify.zip")
-                            .AllowMirror();
-                        using var stream = await ResourceUpdater.HttpClient.GetStreamAsync(url, cancellationToken);
-                        using var archive = new ZipArchive(stream);
-                        archive.ExtractToDirectory(path, true);
-                        results.Add(string.Format(I18N_UraCoreHelper_InstallSuccess, path));
-                    }
-                    LiveDisplayConsole.Acknowledge(
-                        results.Count == 0 ? "未安装 Mod。" : string.Join(Environment.NewLine, results),
-                        cancellationToken);
-                }
-                else if (prompt == "加入QQ群（号被封过之后在频道里说话会概率被夹")
+                static MenuItem Branch(string title, params MenuItem[] items) => new()
                 {
-                    Process.Start(new ProcessStartInfo
+                    Title = title,
+                    SubMenu = new Menu(items),
+                    Action = null
+                };
+
+                static string Label(string resourceName, string fallback) =>
+                    configI18n.ResourceManager.GetString(resourceName, configI18n.Culture) ?? fallback;
+
+                Task EditListenAddress()
+                {
+                    while (true)
                     {
-                        FileName = "https://qm.qq.com/q/4z6xHQ908w",
-                        UseShellExecute = true
-                    });
-                    LiveDisplayConsole.Acknowledge(
-                        "已打开 QQ 群链接：https://qm.qq.com/q/4z6xHQ908w",
-                        cancellationToken);
+                        var address = LiveDisplayConsole.Ask(
+                            configI18n.Tabs_Core_ListenAddressPrompt,
+                            Config.Core.ListenAddress,
+                            cancellationToken: cancellationToken);
+                        if (!IPAddress.TryParse(address, out _))
+                            continue;
+
+                        Config.Core.ListenAddress = address;
+                        Config.Save();
+                        return Task.CompletedTask;
+                    }
                 }
+
+                Task EditListenPort()
+                {
+                    while (true)
+                    {
+                        var port = LiveDisplayConsole.Ask(
+                            configI18n.Tabs_Core_ListenPortPrompt,
+                            Config.Core.ListenPort.ToString(),
+                            cancellationToken: cancellationToken);
+                        if (!int.TryParse(port, out var parsed))
+                            continue;
+
+                        Config.Core.ListenPort = parsed;
+                        Config.Save();
+                        return Task.CompletedTask;
+                    }
+                }
+
+                Task EditTargets()
+                {
+                    var input = LiveDisplayConsole.Ask(
+                        configI18n.Tabs_Repository_TargetsPrompt,
+                        string.Join(',', Config.Repository.Targets),
+                        allowEmpty: true,
+                        cancellationToken: cancellationToken);
+                    Config.Repository.Targets = string.IsNullOrEmpty(input)
+                        ? []
+                        : [.. input.Replace('，', ',').Split(',')];
+                    Config.Save();
+                    return Task.CompletedTask;
+                }
+
+                Task EditCustomDatabaseRepository()
+                {
+                    while (true)
+                    {
+                        var url = LiveDisplayConsole.Ask(
+                            configI18n.Tabs_Updater_CustomDatabaseRepositoryPrompt,
+                            Config.Updater.CustomDatabaseRepository,
+                            allowEmpty: true,
+                            cancellationToken: cancellationToken);
+                        if (!string.IsNullOrEmpty(url) &&
+                            !Uri.TryCreate(url, UriKind.Absolute, out _))
+                            continue;
+
+                        Config.Updater.CustomDatabaseRepository = url;
+                        Config.Save();
+                        return Task.CompletedTask;
+                    }
+                }
+
+                var listenAddressItem = Leaf(
+                    $"{configI18n.Tabs_Core_ListenAddress}: {Config.Core.ListenAddress}",
+                    MenuLocation.Core,
+                    EditListenAddress);
+                var listenPortItem = Leaf(
+                    $"{configI18n.Tabs_Core_ListenPort}: {Config.Core.ListenPort}",
+                    MenuLocation.Core,
+                    EditListenPort);
+                var firstRunItem = Toggle(
+                    Label("Tabs_Core_ShowFirstRunPrompt", nameof(CoreConfig.ShowFirstRunPrompt)),
+                    Config.Core.ShowFirstRunPrompt,
+                    MenuLocation.Core,
+                    value => Config.Core.ShowFirstRunPrompt = value);
+                var coreItem = Branch(
+                    configI18n.Tabs_Core_Title,
+                    listenAddressItem,
+                    listenPortItem,
+                    firstRunItem);
+
+                var targetsItem = Leaf(
+                    $"{configI18n.Tabs_Repository_Targets}: {string.Join(',', Config.Repository.Targets)}",
+                    MenuLocation.Repository,
+                    EditTargets);
+                var repositoryItem = Branch(configI18n.Tabs_Repository_Title, targetsItem);
+
+                var pluginChoices = PluginConfig.BuildPluginChoices(PluginManager.SnapshotLoadedPlugins());
+                var pluginItems = pluginChoices
+                    .Select(pair => Leaf(
+                        pair.Key,
+                        MenuLocation.Plugin,
+                        () => PluginConfigPrompt.RunAsync(pair.Value, cancellationToken)))
+                    .ToArray();
+                MenuItem? firstPluginItem = pluginItems.FirstOrDefault();
+                if (pluginItems.Length == 0)
+                {
+                    pluginItems =
+                    [
+                        new MenuItem
+                        {
+                            Title = "（没有可配置的插件）",
+                            Enabled = false
+                        }
+                    ];
+                }
+                var pluginItem = Branch(configI18n.Tabs_Plugin_Title, pluginItems);
+
+                var trainerGenderItem = Toggle(
+                    Label("Tabs_Updater_TrainerIsMale", nameof(UpdaterConfig.TrainerIsMale)),
+                    Config.Updater.TrainerIsMale,
+                    MenuLocation.Updater,
+                    value => Config.Updater.TrainerIsMale = value);
+                var databaseLanguageItems = new[] { "ja-JP", "zh-TW", "zh-CN" }
+                    .Select(language => Leaf(
+                        language,
+                        MenuLocation.DatabaseLanguage,
+                        () =>
+                        {
+                            Config.Updater.DatabaseLanguage = language;
+                            Config.Save();
+                            return Task.CompletedTask;
+                        }))
+                    .ToArray();
+                var databaseLanguageItem = Branch(
+                    $"{nameof(UpdaterConfig.DatabaseLanguage)}: {Config.Updater.DatabaseLanguage}",
+                    databaseLanguageItems);
+                var customDatabaseRepositoryItem = Leaf(
+                    $"{nameof(UpdaterConfig.CustomDatabaseRepository)}: {Config.Updater.CustomDatabaseRepository}",
+                    MenuLocation.Updater,
+                    EditCustomDatabaseRepository);
+                var forceGithubItem = Toggle(
+                    configI18n.Tabs_Updater_ForceUseGithubToUpdate,
+                    Config.Updater.ForceUseGithubToUpdate,
+                    MenuLocation.Updater,
+                    value => Config.Updater.ForceUseGithubToUpdate = value);
+                var updaterItem = Branch(
+                    configI18n.Tabs_Updater_Title,
+                    trainerGenderItem,
+                    databaseLanguageItem,
+                    customDatabaseRepositoryItem,
+                    forceGithubItem);
+
+                var languageItems = Enum.GetValues<LanguageConfig.Language>()
+                    .Select(language => Leaf(
+                        Label($"Tabs_Language_{language}", language.ToString()),
+                        MenuLocation.Language,
+                        () =>
+                        {
+                            Config.Language.Selected = language;
+                            Config.Save();
+                            Restart();
+                            return Task.CompletedTask;
+                        }))
+                    .ToArray();
+                var languageItem = Branch(configI18n.Tabs_Language_Title, languageItems);
+
+                var miscItem = Leaf(
+                    configI18n.Tabs_Misc_Title,
+                    MenuLocation.Options,
+                    () =>
+                    {
+                        Config.Misc.Prompt(cancellationToken);
+                        return Task.CompletedTask;
+                    });
+                var optionsItem = Branch(
+                    I18N_Options,
+                    coreItem,
+                    repositoryItem,
+                    pluginItem,
+                    updaterItem,
+                    languageItem,
+                    miscItem);
+
+                var startItem = Leaf(
+                    I18N_Start,
+                    MenuLocation.Root,
+                    () =>
+                    {
+                        start = true;
+                        return Task.CompletedTask;
+                    });
+                var mainItems = new List<MenuItem>
+                {
+                    startItem,
+                    optionsItem,
+                    Leaf(
+                        "插件仓库",
+                        MenuLocation.Root,
+                        () => PluginRepository.ShowMenuAsync(cancellationToken)),
+                    Leaf(
+                        I18N_UpdateAssets,
+                        MenuLocation.Root,
+                        () => ResourceUpdater.UpdateAssets(cancellationToken)),
+                    Leaf(
+                        I18N_UpdateProgram,
+                        MenuLocation.Root,
+                        () => ResourceUpdater.UpdateProgram(cancellationToken)),
+                    Leaf(
+                        "加入QQ群（号被封过之后在频道里说话会概率被夹",
+                        MenuLocation.Root,
+                        () =>
+                        {
+                            Process.Start(new ProcessStartInfo
+                            {
+                                FileName = "https://qm.qq.com/q/4z6xHQ908w",
+                                UseShellExecute = true
+                            });
+                            LiveDisplayConsole.Acknowledge(
+                                "已打开 QQ 群链接：https://qm.qq.com/q/4z6xHQ908w",
+                                cancellationToken);
+                            return Task.CompletedTask;
+                        })
+                };
+
+                MenuItem? installUraCoreItem = null;
+                MenuItem? hachimiItem = null;
+                if (OperatingSystem.IsWindows())
+                {
+                    hachimiItem = Leaf(
+                        "Hachimi",
+                        MenuLocation.InstallUraCore,
+                        () => InstallUraCoreAsync("Hachimi", cancellationToken));
+                    installUraCoreItem = Branch(
+                        I18N_InstallUraCore,
+                        hachimiItem,
+                        Leaf(
+                            "umamusume-localify",
+                            MenuLocation.InstallUraCore,
+                            () => InstallUraCoreAsync("umamusume-localify", cancellationToken)));
+                    mainItems.Add(installUraCoreItem);
+                }
+
+                var root = new Menu(mainItems);
+                IReadOnlyList<MenuItem> focusPath = location switch
+                {
+                    MenuLocation.Options => [optionsItem, miscItem],
+                    MenuLocation.Core => [optionsItem, coreItem, listenAddressItem],
+                    MenuLocation.Repository => [optionsItem, repositoryItem, targetsItem],
+                    MenuLocation.Plugin when firstPluginItem is not null =>
+                        [optionsItem, pluginItem, firstPluginItem],
+                    MenuLocation.Plugin => [optionsItem, pluginItem],
+                    MenuLocation.Updater => [optionsItem, updaterItem, trainerGenderItem],
+                    MenuLocation.DatabaseLanguage =>
+                        [
+                            optionsItem,
+                            updaterItem,
+                            databaseLanguageItem,
+                            databaseLanguageItems.First(x => x.Title == Config.Updater.DatabaseLanguage)
+                        ],
+                    MenuLocation.Language =>
+                        [
+                            optionsItem,
+                            languageItem,
+                            languageItems[(int)Config.Language.Selected]
+                        ],
+                    MenuLocation.InstallUraCore when installUraCoreItem is not null && hachimiItem is not null =>
+                        [installUraCoreItem, hachimiItem],
+                    _ => [startItem]
+                };
+
+                TerminalGuiDialogs.StartupMenu(
+                    application,
+                    I18N_Instruction,
+                    root,
+                    focusPath,
+                    cancellationToken);
+                if (nextAction is null)
+                    throw new OperationCanceledException("启动菜单已取消。");
+
+                try
+                {
+                    await nextAction();
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                }
+                cancellationToken.ThrowIfCancellationRequested();
+                if (start)
+                    return;
             }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        }
+
+        static async Task InstallUraCoreAsync(
+            string target,
+            CancellationToken cancellationToken)
+        {
+            if (UraCoreHelper.GamePaths.Count == 0)
             {
+                LiveDisplayConsole.Acknowledge(
+                    "没有找到可安装 Mod 的游戏目录。",
+                    cancellationToken);
+                return;
             }
-            cancellationToken.ThrowIfCancellationRequested();
-            return prompt;
+
+            var results = new List<string>();
+            foreach (var path in UraCoreHelper.GamePaths)
+            {
+                var confirm = LiveDisplayConsole.Confirm(
+                    $"是否将 {target} 安装到 {path}，并把注册表 " +
+                    @"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\DevOverrideEnable " +
+                    "设为 1？该操作需要管理员权限并会影响系统 DLL redirection。",
+                    cancellationToken: cancellationToken);
+                if (!confirm)
+                    continue;
+
+                using var proc = new Process
+                {
+                    StartInfo = new ProcessStartInfo
+                    {
+                        FileName = Environment.ProcessPath,
+                        Arguments = "--enable-dll-redirection --confirmed",
+                        CreateNoWindow = true,
+                        UseShellExecute = true,
+                        Verb = "runas"
+                    }
+                };
+                proc.Start();
+                await proc.WaitForExitAsync(cancellationToken);
+                if (proc.ExitCode != 0)
+                {
+                    results.Add($"{path}: 注册表操作失败（exit {proc.ExitCode}）");
+                    continue;
+                }
+
+                var url = (target == "Hachimi"
+                    ? "https://github.com/UmamusumeResponseAnalyzer/Hachimi/releases/latest/download/Hachimi.zip"
+                    : "https://github.com/UmamusumeResponseAnalyzer/Hachimi/releases/latest/download/UmamusumeLocalify.zip")
+                    .AllowMirror();
+                using var stream = await ResourceUpdater.HttpClient.GetStreamAsync(url, cancellationToken);
+                using var archive = new ZipArchive(stream);
+                archive.ExtractToDirectory(path, true);
+                results.Add(string.Format(I18N_UraCoreHelper_InstallSuccess, path));
+            }
+
+            LiveDisplayConsole.Acknowledge(
+                results.Count == 0 ? "未安装 Mod。" : string.Join(Environment.NewLine, results),
+                cancellationToken);
         }
         static async Task<bool> TryHandleCliOnlyArgumentsAsync(string[] args)
         {

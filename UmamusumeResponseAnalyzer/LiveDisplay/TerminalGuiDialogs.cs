@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Drawing;
 using System.Runtime.ExceptionServices;
 using Terminal.Gui.App;
 using Terminal.Gui.ViewBase;
@@ -220,39 +221,73 @@ static class TerminalGuiDialogs
         return values[index];
     }
 
-    internal static string StartupMenu(
+    internal static void StartupMenu(
         IApplication app,
         string title,
-        IReadOnlyList<string> choices,
+        Menu root,
+        IReadOnlyList<MenuItem>? focusPath = null,
         CancellationToken cancellationToken = default)
     {
         if (Environment.CurrentManagedThreadId != app.MainThreadId)
-            return InvokeOnOwner(app, () => StartupMenu(app, title, choices, cancellationToken));
-        if (choices.Count == 0)
-            throw new ArgumentException("启动菜单不能为空。", nameof(choices));
+        {
+            InvokeOnOwner(app, () =>
+            {
+                StartupMenu(app, title, root, focusPath, cancellationToken);
+                return true;
+            });
+            return;
+        }
+        if (!root.SubViews.OfType<MenuItem>().Any())
+            throw new ArgumentException("启动菜单不能为空。", nameof(root));
 
         using var dialog = CreateDialog(title);
-        string? result = null;
-        var items = choices.Select(choice => new MenuItem
+        using var popover = new PopoverMenu(root)
         {
-            Title = choice,
-            Action = () =>
+            App = app,
+            Owner = dialog,
+            Target = null,
+            Anchor = () =>
             {
-                result = choice;
-                app.RequestStop(dialog);
+                var frame = dialog.FrameToScreen();
+                return new Rectangle(frame.X + 1, frame.Y + PromptHeight - 1, 0, 1);
             }
-        }).ToArray();
-        var menu = new Menu(items)
-        {
-            X = 0,
-            Y = PromptHeight,
-            Width = Dim.Fill(),
-            Height = Dim.Fill()
         };
-        dialog.Add(menu);
-        items[0].SetFocus();
-        Run(app, dialog, cancellationToken);
-        return result ?? throw new OperationCanceledException("启动菜单已取消。");
+        var shown = false;
+        void ShowPopover(object? sender, Terminal.Gui.App.EventArgs<bool> args)
+        {
+            if (!args.Value || shown)
+                return;
+
+            shown = true;
+            popover.MakeVisible();
+            var path = focusPath is { Count: > 0 }
+                ? focusPath
+                : [root.SubViews.OfType<MenuItem>().First(x => x.Enabled)];
+            foreach (var item in path)
+                item.SetFocus();
+        }
+        void StopDialog(object? sender, EventArgs args)
+        {
+            if (shown && !popover.Visible)
+                app.RequestStop(dialog);
+        }
+
+        var popovers = app.Popovers
+            ?? throw new InvalidOperationException("Terminal.Gui popover service 尚未初始化。");
+        dialog.IsRunningChanged += ShowPopover;
+        popover.VisibleChanged += StopDialog;
+        popovers.Register(popover);
+        try
+        {
+            Run(app, dialog, cancellationToken);
+        }
+        finally
+        {
+            dialog.IsRunningChanged -= ShowPopover;
+            popover.VisibleChanged -= StopDialog;
+            popovers.Hide(popover);
+            popovers.DeRegister(popover);
+        }
     }
 
     public static IReadOnlyList<T> MultiSelect<T>(

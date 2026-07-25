@@ -1,10 +1,6 @@
 using Newtonsoft.Json;
-using System.Diagnostics;
 using System.Globalization;
-using System.Net;
 using System.Reflection;
-using System.Runtime.ExceptionServices;
-using UmamusumeResponseAnalyzer.Entities;
 using UmamusumeResponseAnalyzer.LiveDisplay;
 using UmamusumeResponseAnalyzer.Plugin;
 using YamlDotNet.Serialization;
@@ -60,41 +56,6 @@ namespace UmamusumeResponseAnalyzer
         public static void Save() =>
             File.WriteAllText(CONFIG_FILEPATH, _serializer.Serialize(Current));
 
-        public static async Task PromptAsync(CancellationToken cancellationToken)
-        {
-            try
-            {
-                await PromptCoreAsync(cancellationToken);
-            }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-            {
-            }
-        }
-
-        static async Task PromptCoreAsync(CancellationToken cancellationToken)
-        {
-            while (true)
-            {
-                var prompt = string.Empty;
-                var tabs = typeof(YamlConfig).GetProperties(BindingFlags.Public | BindingFlags.Instance).Select(x => x.Name);
-                var translatedTabs = tabs.ToDictionary(x => i18n.ResourceManager.GetString($"Tabs_{x}_Title", i18n.Culture)!, x => x);
-                prompt = LiveDisplayConsole.Select(
-                    i18n.Settings_Title,
-                    translatedTabs.Keys.Append(i18n.Return),
-                    cancellationToken: cancellationToken);
-                if (prompt == i18n.Return) break;
-                var config = typeof(Config).GetProperty(translatedTabs[prompt])?.GetValue(null);
-                try
-                {
-                    if (config?.GetType()?.GetMethod("Prompt")?.Invoke(config, [cancellationToken]) is Task task)
-                        await task;
-                }
-                catch (TargetInvocationException ex) when (ex.InnerException is not null)
-                {
-                    ExceptionDispatchInfo.Capture(ex.InnerException).Throw();
-                }
-            }
-        }
     }
 
     public class YamlConfig
@@ -113,102 +74,15 @@ namespace UmamusumeResponseAnalyzer
         public string ListenAddress { get; set; } = "127.0.0.1";
         public int ListenPort { get; set; } = 4693;
         public bool ShowFirstRunPrompt { get; set; } = true;
-        public void Prompt(CancellationToken cancellationToken)
-        {
-            var _properties = GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance);
-            var translated = _properties.Select(x => x.Name).ToDictionary(x => x, x => i18n.ResourceManager.GetString($"Tabs_Core_{x}", i18n.Culture)!);
-            var selected = string.Empty;
-            do
-            {
-                selected = LiveDisplayConsole.Select(
-                    i18n.Tabs_Core_Title,
-                    _properties.Select(x => x.AppendValue(this, translated)).Append(i18n.Return),
-                    cancellationToken: cancellationToken).Split(':')[0];
-                if (selected == i18n.Tabs_Core_ListenAddress)
-                {
-                    var address = string.Empty;
-                    do
-                    {
-                        address = LiveDisplayConsole.Ask(
-                            i18n.Tabs_Core_ListenAddressPrompt,
-                            cancellationToken: cancellationToken);
-                        if (IPAddress.TryParse(address, out _))
-                        {
-                            ListenAddress = address;
-                            Config.Save();
-                            break;
-                        }
-                    } while (true);
-                }
-                else if (selected == i18n.Tabs_Core_ListenPort)
-                {
-                    var port = string.Empty;
-                    do
-                    {
-                        port = LiveDisplayConsole.Ask(
-                            i18n.Tabs_Core_ListenPortPrompt,
-                            cancellationToken: cancellationToken);
-                        if (int.TryParse(port, out var portInt))
-                        {
-                            ListenPort = portInt;
-                            Config.Save();
-                            break;
-                        }
-                    } while (true);
-                }
-                else if (selected == nameof(ShowFirstRunPrompt))
-                {
-                    ShowFirstRunPrompt = !ShowFirstRunPrompt;
-
-                }
-                Config.Save();
-            } while (selected != i18n.Return);
-        }
     }
 
     public class RepositoryConfig
     {
         public List<string> Targets { get; set; } = [];
-
-        public void Prompt(CancellationToken cancellationToken)
-        {
-            var _properties = GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance);
-            var translated = _properties.Select(x => x.Name).ToDictionary(x => x, x => i18n.ResourceManager.GetString($"Tabs_Repository_{x}", i18n.Culture)!);
-            var selected = string.Empty;
-            do
-            {
-                selected = LiveDisplayConsole.Select(
-                    i18n.Tabs_Repository_Title,
-                    _properties.Select(x => x.AppendValue(this, translated)).Append(i18n.Return),
-                    cancellationToken: cancellationToken).Split(':')[0];
-
-                if (selected == i18n.Tabs_Repository_Targets)
-                {
-                    var targetsInput = LiveDisplayConsole.Ask(
-                        i18n.Tabs_Repository_TargetsPrompt,
-                        allowEmpty: true,
-                        cancellationToken: cancellationToken);
-                    Targets = string.IsNullOrEmpty(targetsInput) ? [] : [.. targetsInput.Replace('，', ',').Split(',')];
-                }
-
-                Config.Save();
-            } while (selected != i18n.Return);
-        }
     }
 
     public class PluginConfig
     {
-        public async Task Prompt(CancellationToken cancellationToken)
-        {
-            try
-            {
-                await PromptCore(cancellationToken);
-            }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-            {
-            }
-        }
-
         internal static SortedDictionary<string, IPlugin> BuildPluginChoices(IEnumerable<IPlugin> plugins)
         {
             var list = plugins.ToList();
@@ -233,25 +107,6 @@ namespace UmamusumeResponseAnalyzer
             }
             return choices;
         }
-
-        async Task PromptCore(CancellationToken cancellationToken)
-        {
-            await UmamusumeResponseAnalyzer._plugin_initialize_task.WaitAsync(cancellationToken);
-            var selected = string.Empty;
-            var plugins = BuildPluginChoices(PluginManager.SnapshotLoadedPlugins());
-            do
-            {
-                selected = LiveDisplayConsole.Select(
-                    i18n.Tabs_Plugin_Title,
-                    plugins.Keys.Append(i18n.Return),
-                    cancellationToken: cancellationToken);
-                if (selected != i18n.Return)
-                {
-                    var plugin = plugins[selected];
-                    await PluginConfigPrompt.RunAsync(plugin, cancellationToken);
-                }
-            } while (selected != i18n.Return);
-        }
     }
 
     public class UpdaterConfig
@@ -261,78 +116,11 @@ namespace UmamusumeResponseAnalyzer
         public string DatabaseLanguage { get; set; } = "ja-JP";
         public string CustomDatabaseRepository { get; set; }
         public bool ForceUseGithubToUpdate { get; set; }
-        public void Prompt(CancellationToken cancellationToken)
-        {
-            var _properties = GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance).Where(x => x.Name != "IsGithubBlocked");
-            var translated = _properties.Select(x => x.Name).ToDictionary(x => x, x => i18n.ResourceManager.GetString($"Tabs_Updater_{x}", i18n.Culture)!);
-
-            var selected = string.Empty;
-            do
-            {
-                selected = LiveDisplayConsole.Select(
-                    i18n.Tabs_Updater_Title,
-                    _properties.Select(x => x.AppendValue(this, translated)).Append(i18n.Return),
-                    cancellationToken: cancellationToken).Split(':')[0];
-                if (selected == nameof(TrainerIsMale))
-                {
-                    TrainerIsMale = !TrainerIsMale;
-                }
-                else if (selected == nameof(DatabaseLanguage))
-                {
-                    var dbLang = LiveDisplayConsole.Select(
-                        nameof(DatabaseLanguage),
-                        new[] { "ja-JP", "zh-TW", "zh-CN" },
-                        cancellationToken: cancellationToken);
-                    DatabaseLanguage = dbLang;
-                }
-                else if (selected == nameof(CustomDatabaseRepository))
-                {
-                    do
-                    {
-                        var url = LiveDisplayConsole.Ask(
-                            i18n.Tabs_Updater_CustomDatabaseRepositoryPrompt,
-                            allowEmpty: true,
-                            cancellationToken: cancellationToken);
-                        if (string.IsNullOrEmpty(url))
-                        {
-                            CustomDatabaseRepository = string.Empty;
-                            break;
-                        }
-                        if (Uri.TryCreate(url, UriKind.Absolute, out var _))
-                        {
-                            CustomDatabaseRepository = url;
-                            break;
-                        }
-                    } while (true);
-                }
-                else if (selected == i18n.Tabs_Updater_ForceUseGithubToUpdate)
-                {
-                    ForceUseGithubToUpdate = !ForceUseGithubToUpdate;
-                }
-            } while (selected != i18n.Return);
-            Config.Save();
-        }
     }
 
     public class LanguageConfig
     {
-        public Language Selected { get; private set; } = Language.AutoDetect;
-
-        public void Prompt(CancellationToken cancellationToken)
-        {
-            var languageProperties = Enum.GetNames(typeof(Language));
-            var translated = languageProperties.ToDictionary(x => i18n.ResourceManager.GetString($"Tabs_Language_{x}", i18n.Culture)!, x => x);
-            var selected = LiveDisplayConsole.Select(
-                i18n.Tabs_Language_Title,
-                translated.Keys,
-                cancellationToken: cancellationToken);
-            if (translated.TryGetValue(selected, out var languageName) && Enum.TryParse<Language>(languageName, out var langEnum))
-            {
-                Selected = langEnum;
-            }
-            Config.Save();
-            UmamusumeResponseAnalyzer.Restart();
-        }
+        public Language Selected { get; internal set; } = Language.AutoDetect;
 
         public static string GetCulture()
         {
