@@ -65,6 +65,7 @@ namespace UmamusumeResponseAnalyzer
                 Exception? failure = null;
                 try
                 {
+                    Application.MaximumIterationsPerSecond = 50;
                     application = Application.Create();
                     application.Init();
                     context = new SingleThreadSynchronizationContext();
