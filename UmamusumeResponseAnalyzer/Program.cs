@@ -560,10 +560,11 @@ namespace UmamusumeResponseAnalyzer
                 selections.Add(I18N_InstallUraCore);
             }
             #endregion
-            var prompt = LiveDisplayConsole.Select(
+            var prompt = TerminalGuiDialogs.StartupMenu(
+                application,
                 I18N_Instruction,
                 selections,
-                cancellationToken: cancellationToken);
+                cancellationToken);
             try
             {
                 if (prompt == I18N_Options)

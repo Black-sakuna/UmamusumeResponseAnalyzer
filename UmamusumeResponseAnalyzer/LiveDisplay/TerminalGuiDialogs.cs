@@ -220,6 +220,41 @@ static class TerminalGuiDialogs
         return values[index];
     }
 
+    internal static string StartupMenu(
+        IApplication app,
+        string title,
+        IReadOnlyList<string> choices,
+        CancellationToken cancellationToken = default)
+    {
+        if (Environment.CurrentManagedThreadId != app.MainThreadId)
+            return InvokeOnOwner(app, () => StartupMenu(app, title, choices, cancellationToken));
+        if (choices.Count == 0)
+            throw new ArgumentException("启动菜单不能为空。", nameof(choices));
+
+        using var dialog = CreateDialog(title);
+        string? result = null;
+        var items = choices.Select(choice => new MenuItem
+        {
+            Title = choice,
+            Action = () =>
+            {
+                result = choice;
+                app.RequestStop(dialog);
+            }
+        }).ToArray();
+        var menu = new Menu(items)
+        {
+            X = 0,
+            Y = PromptHeight,
+            Width = Dim.Fill(),
+            Height = Dim.Fill()
+        };
+        dialog.Add(menu);
+        items[0].SetFocus();
+        Run(app, dialog, cancellationToken);
+        return result ?? throw new OperationCanceledException("启动菜单已取消。");
+    }
+
     public static IReadOnlyList<T> MultiSelect<T>(
         IApplication app,
         string title,
