@@ -1,5 +1,9 @@
+using System.Drawing;
 using Terminal.Gui.App;
+using Terminal.Gui.Drawing;
 using Terminal.Gui.Input;
+using Terminal.Gui.ViewBase;
+using Terminal.Gui.Views;
 using UmamusumeResponseAnalyzer.LiveDisplay;
 using Xunit;
 
@@ -56,6 +60,41 @@ public sealed class TerminalGuiDialogsTests
             TerminalGuiDialogs.Select(terminal.Application, "取消选择", ["value"]);
             return Task.CompletedTask;
         });
+        await terminal.InjectAsync(Key.Esc);
+        await Assert.ThrowsAsync<OperationCanceledException>(() => cancelled);
+    }
+
+    [Fact]
+    public async Task Select_ListUsesWholeViewHoverWithoutChangingFocusOrSelection()
+    {
+        using var terminal = new TerminalGuiTestApp();
+        var cancelled = await terminal.StartAsync(() =>
+        {
+            TerminalGuiDialogs.Select(
+                terminal.Application,
+                "列表 hover",
+                ["first", "second"]);
+            return Task.CompletedTask;
+        });
+        await terminal.WaitForScreenAsync("second");
+        var list = await terminal.InvokeAsync(() =>
+            terminal.Application.TopRunnableView!.SubViews.OfType<ListView>().Single());
+        await terminal.InjectAsync(Key.Tab);
+        var focused = await terminal.InvokeAsync(() =>
+            terminal.Application.TopRunnableView!.SubViews.OfType<Button>().Single(x => x.HasFocus));
+        await terminal.RedrawAsync();
+        var point = await terminal.InvokeAsync(() => list.ViewportToScreen(new Point(1, 1)));
+        var normal = await terminal.CaptureAttributeAsync(point);
+        var highlight = await terminal.InvokeAsync(() => list.GetAttributeForRole(VisualRole.Highlight));
+        Assert.NotEqual(normal, highlight);
+
+        await terminal.MoveMouseAsync(point);
+        await terminal.WaitForAsync(async () =>
+            Equals(highlight, await terminal.CaptureAttributeAsync(point)));
+
+        Assert.Equal(0, await terminal.InvokeAsync(() => list.SelectedItem));
+        Assert.False(await terminal.InvokeAsync(() => list.HasFocus));
+        Assert.True(await terminal.InvokeAsync(() => focused.HasFocus));
         await terminal.InjectAsync(Key.Esc);
         await Assert.ThrowsAsync<OperationCanceledException>(() => cancelled);
     }
@@ -124,6 +163,57 @@ public sealed class TerminalGuiDialogsTests
             TerminalGuiDialogs.Ask(terminal.Application, "取消输入", value: "unchanged");
             return Task.CompletedTask;
         });
+        await terminal.InjectAsync(Key.Esc);
+        await Assert.ThrowsAsync<OperationCanceledException>(() => cancelled);
+    }
+
+    [Fact]
+    public async Task Ask_TextFieldAndButtonUseNativeHoverWithoutMovingFocus()
+    {
+        using var terminal = new TerminalGuiTestApp();
+        var cancelled = await terminal.StartAsync(() =>
+        {
+            TerminalGuiDialogs.Ask(
+                terminal.Application,
+                "输入 hover",
+                value: "hover-input");
+            return Task.CompletedTask;
+        });
+        await terminal.WaitForScreenAsync("hover-input");
+        var controls = await terminal.InvokeAsync(() =>
+        {
+            var root = terminal.Application.TopRunnableView!;
+            return (
+                Input: root.SubViews.OfType<TextField>().Single(),
+                Buttons: root.SubViews.OfType<Button>().ToArray());
+        });
+        await terminal.InjectAsync(Key.Tab);
+        var focused = controls.Buttons.Single(x => x.HasFocus);
+        var otherButton = controls.Buttons.Single(x => !x.HasFocus);
+        await terminal.RedrawAsync();
+
+        var inputPoint = await terminal.InvokeAsync(() =>
+            controls.Input.ViewportToScreen(new Point(1, 0)));
+        var inputNormal = await terminal.CaptureAttributeAsync(inputPoint);
+        var inputHighlight = await terminal.InvokeAsync(() =>
+            controls.Input.GetAttributeForRole(VisualRole.Highlight));
+        Assert.NotEqual(inputNormal, inputHighlight);
+        await terminal.MoveMouseAsync(inputPoint);
+        await terminal.WaitForAsync(async () =>
+            Equals(inputHighlight, await terminal.CaptureAttributeAsync(inputPoint)));
+        Assert.True(await terminal.InvokeAsync(() => focused.HasFocus));
+
+        var buttonPoint = await terminal.InvokeAsync(() =>
+            otherButton.ViewportToScreen(new Point(1, 0)));
+        var buttonNormal = await terminal.CaptureAttributeAsync(buttonPoint);
+        var buttonHighlight = await terminal.InvokeAsync(() =>
+            otherButton.GetAttributeForRole(VisualRole.Highlight));
+        Assert.NotEqual(buttonNormal, buttonHighlight);
+        await terminal.MoveMouseAsync(buttonPoint);
+        await terminal.WaitForAsync(async () =>
+            Equals(buttonHighlight, await terminal.CaptureAttributeAsync(buttonPoint)));
+        Assert.True(await terminal.InvokeAsync(() => focused.HasFocus));
+
         await terminal.InjectAsync(Key.Esc);
         await Assert.ThrowsAsync<OperationCanceledException>(() => cancelled);
     }

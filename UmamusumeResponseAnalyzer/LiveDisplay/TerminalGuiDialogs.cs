@@ -283,6 +283,7 @@ static class TerminalGuiDialogs
             Y = PromptHeight,
             Width = Dim.Fill(1)
         };
+        input.MouseHighlightStates |= MouseState.In;
         var accepted = false;
         var ok = CreateButton("确定", true, () =>
         {
@@ -434,6 +435,7 @@ static class TerminalGuiDialogs
         };
         list.SetSource(new ObservableCollection<string>(choices));
         list.SelectedItem = 0;
+        list.MouseHighlightStates |= MouseState.In;
         return list;
     }
 

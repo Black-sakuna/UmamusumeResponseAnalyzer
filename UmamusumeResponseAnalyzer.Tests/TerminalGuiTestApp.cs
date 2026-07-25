@@ -98,13 +98,23 @@ internal sealed class TerminalGuiTestApp : IDisposable
 
     public Task InjectAsync(Mouse mouse) => InvokeAsync(() => Application.InjectMouse(mouse));
 
+    public Task MoveMouseAsync(Point point) => InjectAsync(new Mouse
+    {
+        ScreenPosition = point,
+        Flags = MouseFlags.PositionReport,
+        Timestamp = Time.Now
+    });
+
     public Task ClickAsync(Point point)
         => InvokeAsync(() => Application.InjectSequence(InputInjectionExtensions.LeftButtonClick(point)));
 
     public Task ResizeAsync(int width, int height)
         => InvokeAsync(() =>
             (Application.Driver ?? throw new InvalidOperationException("Terminal.Gui driver was not initialized."))
-                .SetScreenSize(width, height));
+            .SetScreenSize(width, height));
+
+    public Task RedrawAsync()
+        => InvokeAsync(() => Application.LayoutAndDraw(forceRedraw: true));
 
     public async Task<string> CaptureScreenAsync()
     {
@@ -114,6 +124,16 @@ internal sealed class TerminalGuiTestApp : IDisposable
                 .ToString());
         return screen;
     }
+
+    public Task<Terminal.Gui.Drawing.Attribute?> CaptureAttributeAsync(Point point)
+        => InvokeAsync<Terminal.Gui.Drawing.Attribute?>(() =>
+        {
+            var contents = (Application.Driver
+                ?? throw new InvalidOperationException("Terminal.Gui driver was not initialized."))
+                .Contents
+                ?? throw new InvalidOperationException("Terminal.Gui framebuffer was not initialized.");
+            return contents[point.Y, point.X].Attribute;
+        });
 
     public async Task WaitForScreenAsync(string text)
         => await WaitForAsync(async () =>
