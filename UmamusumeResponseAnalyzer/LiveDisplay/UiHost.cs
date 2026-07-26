@@ -25,13 +25,14 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
 
         readonly IApplication application;
         readonly Channel<UiEvent> events = CreateUiChannel<UiEvent>();
+        readonly TaskCompletionSource ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
         readonly NotificationPopupRenderer popupRenderer = new();
 
         readonly Dictionary<LiveDisplayWorkspace, WorkspaceState> workspaces = [];
         readonly Dictionary<(LiveDisplayWorkspace Workspace, string PluginId, string Key), LiveDisplayPanel> panels = [];
         readonly List<PendingWorkspaceRemoval> pendingWorkspaceRemovals = [];
         readonly object workspaceIdentityGate = new();
-        readonly Dictionary<string, WorkspaceRegistration> workspaceRegistrations = new(StringComparer.OrdinalIgnoreCase);
+        readonly Dictionary<string, LiveDisplayWorkspace> workspaceRegistrations = new(StringComparer.OrdinalIgnoreCase);
         readonly Dictionary<LiveDisplayWorkspace, LiveDisplayWorkspace> workspaceAliases =
             new(ReferenceEqualityComparer.Instance);
         readonly object removedWorkspaceGate = new();
@@ -75,15 +76,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
 
         public ILiveDisplayOutput ForPlugin(string pluginId) => new PluginLiveDisplayOutput(pluginId, this);
         public LiveDisplayWorkspace? CurrentWorkspace => Volatile.Read(ref currentWorkspace);
-        internal IReadOnlyList<IReadOnlyList<string>> GetWorkspaceSnapshotPanelKeysForTests(LiveDisplayWorkspace workspace)
-        {
-            return workspaces.TryGetValue(workspace, out var state) && ReferenceEquals(state.Workspace, workspace)
-                ? state.History
-                    .Select(x => (IReadOnlyList<string>)x.Panels.Select(panel => panel.Key).ToArray())
-                    .ToArray()
-                : [];
-        }
-
+        internal Task Ready => ready.Task;
         internal IReadOnlyList<LiveDisplayLogLine> GetLogsForTests(LiveDisplayWorkspace? workspace)
         {
             var source = workspace is null
@@ -110,42 +103,32 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             return popupRenderer.ShouldRefreshPopupCountdown(VisibleNotifications(), keyboardPopup, now);
         }
 
-        public LiveDisplayWorkspace CreateWorkspace(string title, int historyCapacity = 0)
+        public LiveDisplayWorkspace CreateWorkspace(string title)
         {
-            ArgumentOutOfRangeException.ThrowIfNegative(historyCapacity);
             var workspace = LiveDisplayWorkspace.Create(title);
             lock (workspaceIdentityGate)
             {
                 if (workspaceRegistrations.TryGetValue(workspace.Title, out var existing))
-                {
-                    if (existing.HistoryCapacity != historyCapacity)
-                    {
-                        throw new InvalidOperationException(
-                            $"Workspace '{workspace.Title}' 已使用 historyCapacity={existing.HistoryCapacity} 注册，不能改为 {historyCapacity}。");
-                    }
+                    return existing;
 
-                    return existing.Workspace;
-                }
-
-                workspaceRegistrations[workspace.Title] = new(workspace, historyCapacity);
+                workspaceRegistrations[workspace.Title] = workspace;
                 workspaceAliases[workspace] = workspace;
                 SetCurrentWorkspaceIfEmpty(workspace);
-                Post(new UiEvent.RegisterWorkspace(workspace, historyCapacity));
+                Post(new UiEvent.RegisterWorkspace(workspace));
             }
 
             return workspace;
         }
 
-        public void RegisterWorkspace(LiveDisplayWorkspace workspace, int historyCapacity = 0)
+        public void RegisterWorkspace(LiveDisplayWorkspace workspace)
         {
             ArgumentNullException.ThrowIfNull(workspace);
-            ArgumentOutOfRangeException.ThrowIfNegative(historyCapacity);
-            workspace = CanonicalizeWorkspace(workspace, historyCapacity) ?? workspace;
+            workspace = CanonicalizeWorkspace(workspace) ?? workspace;
             if (IsRemovedWorkspace(workspace))
                 return;
 
             SetCurrentWorkspaceIfEmpty(workspace);
-            Post(new UiEvent.RegisterWorkspace(workspace, historyCapacity));
+            Post(new UiEvent.RegisterWorkspace(workspace));
         }
 
         public void RemoveWorkspace(LiveDisplayWorkspace workspace)
@@ -153,14 +136,6 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             ArgumentNullException.ThrowIfNull(workspace);
             workspace = CanonicalizeWorkspace(workspace, createIfMissing: false) ?? workspace;
             TryTombstoneWorkspace(workspace, preferredReplacement: null, queueRemoval: true, out _);
-        }
-
-        public void CaptureWorkspaceSnapshot(LiveDisplayWorkspace workspace)
-        {
-            ArgumentNullException.ThrowIfNull(workspace);
-            workspace = CanonicalizeWorkspace(workspace) ?? workspace;
-            if (!IsRemovedWorkspace(workspace))
-                Post(new UiEvent.CaptureWorkspaceSnapshot(workspace));
         }
 
         internal void RemoveWorkspaceWhenAnotherPanelActivates(LiveDisplayWorkspace workspace, Action? removed = null)
@@ -250,7 +225,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                     SwitchWorkspace(workspace);
                     return Task.CompletedTask;
             });
-            RegisterWorkspace(workspace, HistoryCapacityOf(workspace));
+            RegisterWorkspace(workspace);
             Post(new UiEvent.SetWorkspaceShortcut(workspace, key, modifiers, shortcutText, entry));
         }
 
@@ -304,7 +279,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         {
             if (keyInfo.Modifiers != 0 || keyInfo.Key is not (
                 ConsoleKey.UpArrow or ConsoleKey.DownArrow or ConsoleKey.PageUp or ConsoleKey.PageDown or
-                ConsoleKey.Home or ConsoleKey.End or ConsoleKey.LeftArrow or ConsoleKey.RightArrow))
+                ConsoleKey.Home or ConsoleKey.End))
             {
                 return Task.FromResult(false);
             }
@@ -339,7 +314,8 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             {
                 Title = "UmamusumeResponseAnalyzer",
                 Width = Dim.Fill(),
-                Height = Dim.Fill()
+                Height = Dim.Fill(),
+                BorderStyle = null
             };
             workspaceLayer = CreateLayer(transparent: false, canFocus: true);
             notificationLayer = CreateOverlayLabel();
@@ -351,6 +327,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             window.KeyDownNotHandled += WindowKeyDownNotHandled;
             window.MouseEvent += WindowMouseEvent;
             application.Keyboard.KeyDown += ApplicationKeyDown;
+            application.LayoutAndDrawComplete += ApplicationLayoutAndDrawComplete;
 
             popupTimer = application.AddTimeout(TimeSpan.FromMilliseconds(250), RefreshExpiringOverlays);
             try
@@ -365,6 +342,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                     popupTimer = null;
                 }
 
+                application.LayoutAndDrawComplete -= ApplicationLayoutAndDrawComplete;
                 application.Keyboard.KeyDown -= ApplicationKeyDown;
                 window.MouseEvent -= WindowMouseEvent;
                 window.KeyDownNotHandled -= WindowKeyDownNotHandled;
@@ -421,6 +399,15 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         {
             RebuildWorkspaceLayer();
             RefreshOverlayLayers();
+        }
+
+        void ApplicationLayoutAndDrawComplete(object? sender, EventArgs e)
+        {
+            if (window is null || !ReferenceEquals(application.TopRunnableView, window))
+                return;
+
+            application.LayoutAndDrawComplete -= ApplicationLayoutAndDrawComplete;
+            ready.TrySetResult();
         }
 
         void WindowViewportChanged(object? sender, DrawEventArgs e)
@@ -550,6 +537,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
 
         void CompleteRun()
         {
+            ready.TrySetCanceled();
             Volatile.Write(ref runState, RunStateStopped);
             Volatile.Write(ref acceptingEvents, 0);
             events.Writer.TryComplete();
@@ -646,7 +634,6 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 {
                     UiEvent.RegisterWorkspace or
                     UiEvent.RemoveWorkspace or
-                    UiEvent.CaptureWorkspaceSnapshot or
                     UiEvent.SetWorkspaceShortcut or
                     UiEvent.RemoveWorkspaceWhenAnotherPanelActivates or
                     UiEvent.SetPanel or
@@ -658,8 +645,6 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                     UiEvent.HidePopup or
                     UiEvent.ShowCommandInput or
                     UiEvent.HideCommandInput => UiChange.Overlays,
-                    UiEvent.NavigateWorkspace navigation when navigation.Key is ConsoleKey.LeftArrow or ConsoleKey.RightArrow
-                        => UiChange.WorkspaceStructure,
                     UiEvent.NavigateWorkspace => UiChange.LogContent,
                     _ => UiChange.None
                 };
@@ -674,16 +659,13 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             switch (uiEvent)
             {
                 case UiEvent.RegisterWorkspace registerWorkspace:
-                    RegisterKnownWorkspace(registerWorkspace.Workspace, registerWorkspace.HistoryCapacity);
+                    RegisterKnownWorkspace(registerWorkspace.Workspace);
                     break;
                 case UiEvent.RemoveWorkspace removeWorkspace:
                     RemoveWorkspaceState(
                         removeWorkspace.Workspace,
                         removeWorkspace.Replacement,
                         removeWorkspace.Removed);
-                    break;
-                case UiEvent.CaptureWorkspaceSnapshot captureWorkspaceSnapshot:
-                    CaptureWorkspaceSnapshotState(captureWorkspaceSnapshot.Workspace);
                     break;
                 case UiEvent.SetWorkspaceShortcut setWorkspaceShortcut:
                     SetWorkspaceShortcut(
@@ -700,7 +682,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                     if (IsRemovedWorkspace(setPanel.Panel.Workspace))
                         break;
 
-                    RegisterKnownWorkspace(setPanel.Panel.Workspace, HistoryCapacityOf(setPanel.Panel.Workspace));
+                    RegisterKnownWorkspace(setPanel.Panel.Workspace);
                     var panelKey = (setPanel.Panel.Workspace, setPanel.Panel.PluginId, setPanel.Panel.Key);
                     if (panels.TryGetValue(panelKey, out var previousPanel) &&
                         !ReferenceEquals(previousPanel.Content, setPanel.Panel.Content) &&
@@ -710,7 +692,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                         previousView.View.Dispose();
                     }
                     panels[panelKey] = setPanel.Panel;
-                    if (setPanel.SwitchToWorkspace && !IsBrowsingHistory())
+                    if (setPanel.SwitchToWorkspace)
                     {
                         RemovePendingWorkspacesAfterPanelActivation(setPanel.Panel.Workspace);
                         if (!Equals(activeWorkspace, setPanel.Panel.Workspace))
@@ -725,7 +707,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                         break;
 
                     if (log.Line.Workspace is not null)
-                        RegisterKnownWorkspace(log.Line.Workspace, HistoryCapacityOf(log.Line.Workspace));
+                        RegisterKnownWorkspace(log.Line.Workspace);
                     AddLog(log.Line);
                     break;
                 case UiEvent.Notify notify:
@@ -736,14 +718,14 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                     }
 
                     if (notify.Notification.Workspace is not null)
-                        RegisterKnownWorkspace(notify.Notification.Workspace, HistoryCapacityOf(notify.Notification.Workspace));
+                        RegisterKnownWorkspace(notify.Notification.Workspace);
                     notifications.Add(notify.Notification);
                     break;
                 case UiEvent.SwitchWorkspace switchWorkspace:
                     if (IsRemovedWorkspace(switchWorkspace.Workspace))
                         break;
 
-                    RegisterKnownWorkspace(switchWorkspace.Workspace, HistoryCapacityOf(switchWorkspace.Workspace));
+                    RegisterKnownWorkspace(switchWorkspace.Workspace);
                     activeWorkspace = switchWorkspace.Workspace;
                     Volatile.Write(ref currentWorkspace, switchWorkspace.Workspace);
                     break;
@@ -805,16 +787,15 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             var state = activeWorkspace is not null && workspaces.TryGetValue(activeWorkspace, out var activeState)
                 ? activeState
                 : null;
-            var browsingHistory = state?.HistoryOffset >= 0;
             workspaceSurface = WorkspaceLayoutBuilder.BuildWorkspaceLayout(
                 activeWorkspace,
-                DisplayedPanels(),
+                panels.Values,
                 VisibleLogs(),
                 WorkspaceLabel,
                 width,
                 height,
                 state?.ScrollOffset ?? 0,
-                panel => browsingHistory ? panel.Content.CreateView() : GetLivePanelView(panel));
+                GetLivePanelView);
             workspaceLayer.Add(workspaceSurface.View);
             lastViewportWidth = width;
             lastViewportHeight = height;
@@ -987,46 +968,10 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 : workspace.Title;
         }
 
-        IReadOnlyCollection<LiveDisplayPanel> DisplayedPanels()
-        {
-            if (activeWorkspace is null ||
-                !workspaces.TryGetValue(activeWorkspace, out var state) ||
-                state.HistoryOffset < 0)
-            {
-                return panels.Values;
-            }
-
-            return state.History[state.HistoryOffset].Panels;
-        }
-
         bool TryNavigateWorkspace(ConsoleKey key)
         {
             if (activeWorkspace is null || !workspaces.TryGetValue(activeWorkspace, out var state))
                 return false;
-
-            if (key == ConsoleKey.LeftArrow)
-            {
-                var historyOffset = state.HistoryOffset < 0
-                    ? state.History.Count - 1
-                    : state.HistoryOffset - 1;
-                if (historyOffset < 0)
-                    return false;
-
-                workspaces[activeWorkspace] = state with { HistoryOffset = historyOffset };
-                return true;
-            }
-
-            if (key == ConsoleKey.RightArrow)
-            {
-                if (state.HistoryOffset < 0)
-                    return false;
-
-                var historyOffset = state.HistoryOffset == state.History.Count - 1
-                    ? -1
-                    : state.HistoryOffset + 1;
-                workspaces[activeWorkspace] = state with { HistoryOffset = historyOffset };
-                return true;
-            }
 
             if (lastViewportWidth <= 0 || lastViewportHeight <= 0)
                 return false;
@@ -1379,19 +1324,24 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 .ToList();
         }
 
-        void RegisterKnownWorkspace(LiveDisplayWorkspace workspace, int historyCapacity)
+        void RegisterKnownWorkspace(LiveDisplayWorkspace workspace)
         {
             ArgumentNullException.ThrowIfNull(workspace);
             if (IsRemovedWorkspace(workspace))
                 return;
 
-            TrackWorkspaceRegistration(workspace, historyCapacity);
+            lock (workspaceIdentityGate)
+            {
+                if (!workspaceRegistrations.ContainsKey(workspace.Title))
+                {
+                    workspaceRegistrations.Add(workspace.Title, workspace);
+                    workspaceAliases[workspace] = workspace;
+                }
+            }
             if (workspaces.TryGetValue(workspace, out var existing))
             {
                 if (!ReferenceEquals(existing.Workspace, workspace))
                     return;
-                if (existing.HistoryCapacity != historyCapacity)
-                    throw new InvalidOperationException($"Workspace '{workspace.Title}' 的 historyCapacity 不能在注册后更改。");
                 if (activeWorkspace is null)
                 {
                     activeWorkspace = workspace;
@@ -1402,9 +1352,6 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
 
             workspaces[workspace] = new WorkspaceState(
                 workspace,
-                historyCapacity,
-                History: [],
-                HistoryOffset: -1,
                 ScrollOffset: 0,
                 ShortcutText: null,
                 Hotkey: null);
@@ -1435,7 +1382,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 return;
             }
 
-            RegisterKnownWorkspace(workspace, HistoryCapacityOf(workspace));
+            RegisterKnownWorkspace(workspace);
             var state = workspaces[workspace];
             if (state.Hotkey is { } previous)
                 KeyboardManager.Unregister(previous.Key, previous.Modifiers, previous.Entry);
@@ -1508,41 +1455,6 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             RefreshWorkspaceCompletionTitles();
             foreach (var callback in callbacks.Distinct())
                 callback();
-        }
-
-        void CaptureWorkspaceSnapshotState(LiveDisplayWorkspace workspace)
-        {
-            if (IsRemovedWorkspace(workspace))
-                return;
-
-            RegisterKnownWorkspace(workspace, HistoryCapacityOf(workspace));
-            if (!workspaces.TryGetValue(workspace, out var state) ||
-                !ReferenceEquals(state.Workspace, workspace) ||
-                state.HistoryCapacity == 0)
-            {
-                return;
-            }
-
-            state.History.Add(new WorkspaceSnapshot(
-                panels.Values.Where(x => ReferenceEquals(x.Workspace, workspace)).ToArray()));
-            var historyOffset = state.HistoryOffset;
-            if (state.History.Count > state.HistoryCapacity)
-            {
-                state.History.RemoveAt(0);
-                if (historyOffset >= 0)
-                    historyOffset = Math.Max(0, historyOffset - 1);
-            }
-            workspaces[workspace] = state with
-            {
-                HistoryOffset = historyOffset
-            };
-        }
-
-        bool IsBrowsingHistory()
-        {
-            return activeWorkspace is not null &&
-                workspaces.TryGetValue(activeWorkspace, out var state) &&
-                state.HistoryOffset >= 0;
         }
 
         void RefreshWorkspaceCompletionTitles()
@@ -1670,15 +1582,15 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 foreach (var alias in aliases)
                     workspaceAliases.Remove(alias);
                 if (workspaceRegistrations.TryGetValue(workspace.Title, out var existing) &&
-                    ReferenceEquals(existing.Workspace, workspace))
+                    ReferenceEquals(existing, workspace))
                 {
                     workspaceRegistrations.Remove(workspace.Title);
                 }
 
                 replacement = preferredReplacement is not null &&
-                    workspaceRegistrations.Values.Any(x => ReferenceEquals(x.Workspace, preferredReplacement))
+                    workspaceRegistrations.Values.Any(x => ReferenceEquals(x, preferredReplacement))
                         ? preferredReplacement
-                        : workspaceRegistrations.Values.Select(x => x.Workspace).FirstOrDefault();
+                        : workspaceRegistrations.Values.FirstOrDefault();
 
                 if (queueRemoval)
                     Post(new UiEvent.RemoveWorkspace(workspace, replacement));
@@ -1697,35 +1609,8 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             KeyboardManager.Unregister(hotkey.Key, hotkey.Modifiers, hotkey.Entry);
         }
 
-        void TrackWorkspaceRegistration(LiveDisplayWorkspace workspace, int historyCapacity)
-        {
-            lock (workspaceIdentityGate)
-            {
-                if (workspaceRegistrations.TryGetValue(workspace.Title, out var existing))
-                {
-                    if (ReferenceEquals(existing.Workspace, workspace) && existing.HistoryCapacity != historyCapacity)
-                        throw new InvalidOperationException($"Workspace '{workspace.Title}' 的 historyCapacity 不能在注册后更改。");
-                    return;
-                }
-
-                workspaceRegistrations.Add(workspace.Title, new(workspace, historyCapacity));
-                workspaceAliases[workspace] = workspace;
-            }
-        }
-
-        int HistoryCapacityOf(LiveDisplayWorkspace workspace)
-        {
-            lock (workspaceIdentityGate)
-            {
-                return workspaceRegistrations.TryGetValue(workspace.Title, out var registration)
-                    ? registration.HistoryCapacity
-                    : 0;
-            }
-        }
-
         LiveDisplayWorkspace? CanonicalizeWorkspace(
             LiveDisplayWorkspace workspace,
-            int? historyCapacity = null,
             bool createIfMissing = true)
         {
             lock (workspaceIdentityGate)
@@ -1741,32 +1626,20 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
 
                 if (workspaceRegistrations.TryGetValue(workspace.Title, out var registration))
                 {
-                    if (historyCapacity is { } requestedCapacity &&
-                        registration.HistoryCapacity != requestedCapacity)
-                    {
-                        throw new InvalidOperationException(
-                            $"Workspace '{workspace.Title}' 已使用 historyCapacity={registration.HistoryCapacity} 注册，不能改为 {requestedCapacity}。");
-                    }
-                    workspaceAliases[workspace] = registration.Workspace;
-                    return registration.Workspace;
+                    workspaceAliases[workspace] = registration;
+                    return registration;
                 }
 
                 if (!createIfMissing)
                     return null;
 
-                workspaceRegistrations.Add(
-                    workspace.Title,
-                    new(workspace, historyCapacity ?? 0));
+                workspaceRegistrations.Add(workspace.Title, workspace);
                 workspaceAliases[workspace] = workspace;
                 return workspace;
             }
         }
 
         sealed record PendingWorkspaceRemoval(LiveDisplayWorkspace Workspace, Action? Removed);
-
-        sealed record WorkspaceRegistration(LiveDisplayWorkspace Workspace, int HistoryCapacity);
-
-        sealed record WorkspaceSnapshot(IReadOnlyList<LiveDisplayPanel> Panels);
 
         sealed record WorkspaceHotkey(
             ConsoleKey Key,
@@ -1775,9 +1648,6 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
 
         sealed record WorkspaceState(
             LiveDisplayWorkspace Workspace,
-            int HistoryCapacity,
-            List<WorkspaceSnapshot> History,
-            int HistoryOffset,
             int ScrollOffset,
             string? ShortcutText,
             WorkspaceHotkey? Hotkey);

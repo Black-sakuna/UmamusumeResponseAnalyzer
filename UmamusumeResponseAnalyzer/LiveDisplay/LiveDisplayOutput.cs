@@ -37,12 +37,9 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
 
         public LiveDisplayWorkspace? CurrentWorkspace => uiHost.CurrentWorkspace;
 
-        public LiveDisplayWorkspace CreateWorkspace(string title, int historyCapacity = 0)
-            => uiHost.CreateWorkspace(title, historyCapacity);
+        public LiveDisplayWorkspace CreateWorkspace(string title) => uiHost.CreateWorkspace(title);
 
         public void RemoveWorkspace(LiveDisplayWorkspace workspace) => uiHost.RemoveWorkspace(workspace);
-
-        public void CaptureWorkspaceSnapshot(LiveDisplayWorkspace workspace) => uiHost.CaptureWorkspaceSnapshot(workspace);
 
         public void SwitchWorkspace(LiveDisplayWorkspace workspace) => uiHost.SwitchWorkspace(workspace);
 

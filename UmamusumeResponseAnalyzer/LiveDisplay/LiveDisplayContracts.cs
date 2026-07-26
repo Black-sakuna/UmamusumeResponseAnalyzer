@@ -6,9 +6,8 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay;
 public interface ILiveDisplayOutput
 {
     LiveDisplayWorkspace? CurrentWorkspace { get; }
-    LiveDisplayWorkspace CreateWorkspace(string title, int historyCapacity = 0);
+    LiveDisplayWorkspace CreateWorkspace(string title);
     void RemoveWorkspace(LiveDisplayWorkspace workspace);
-    void CaptureWorkspaceSnapshot(LiveDisplayWorkspace workspace);
     void SwitchWorkspace(LiveDisplayWorkspace workspace);
     void BindWorkspaceHotkey(LiveDisplayWorkspace workspace, ConsoleKey key, ConsoleModifiers modifiers = 0, string? description = null);
     void SetPanel(

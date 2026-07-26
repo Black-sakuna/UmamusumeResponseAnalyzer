@@ -606,9 +606,8 @@ namespace UmamusumeResponseAnalyzer.Tests
         sealed class FakeLiveDisplayOutput : ILiveDisplayOutput
         {
             public LiveDisplayWorkspace? CurrentWorkspace => null;
-            public LiveDisplayWorkspace CreateWorkspace(string title, int historyCapacity = 0) => LiveDisplayWorkspace.Create(title);
+            public LiveDisplayWorkspace CreateWorkspace(string title) => LiveDisplayWorkspace.Create(title);
             public void RemoveWorkspace(LiveDisplayWorkspace workspace) { }
-            public void CaptureWorkspaceSnapshot(LiveDisplayWorkspace workspace) { }
             public void SwitchWorkspace(LiveDisplayWorkspace workspace) { }
             public void BindWorkspaceHotkey(LiveDisplayWorkspace workspace, ConsoleKey key, ConsoleModifiers modifiers = 0, string? description = null) { }
             public void SetPanel(LiveDisplayWorkspace workspace, string key, string title, LiveDisplayContent content, bool fullBleed = false, bool switchToWorkspace = true) { }

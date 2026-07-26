@@ -1,17 +1,14 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO.Compression;
-using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Reflection;
 using System.Runtime.ExceptionServices;
 using System.Text;
 using Terminal.Gui.App;
-using Terminal.Gui.Views;
 using UmamusumeResponseAnalyzer.LiveDisplay;
 using UmamusumeResponseAnalyzer.Plugin;
-using configI18n = UmamusumeResponseAnalyzer.Localization.Config;
 using static UmamusumeResponseAnalyzer.Localization.LaunchMenu;
 
 namespace UmamusumeResponseAnalyzer
@@ -173,119 +170,169 @@ namespace UmamusumeResponseAnalyzer
                     Config.Save();
                 }
 
-                    bootstrap.SetSettings(
+                var updateSource = string.IsNullOrWhiteSpace(Config.Updater.CustomDatabaseRepository)
+                    ? "https://github.com/UmamusumeResponseAnalyzer/Assets/raw/refs/heads/main/".AllowMirror()
+                    : Config.Updater.CustomDatabaseRepository;
+                bootstrap.SetSettings(
                     [
                         ("版本", Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "unknown"),
                         ("工作目录", Directory.GetCurrentDirectory()),
-                        ("监听", $"http://{Config.Core.ListenAddress}:{Config.Core.ListenPort}"),
+                        ("配置文件", Path.GetFullPath(Config.CONFIG_FILEPATH)),
+                        ("监听地址", $"http://{Config.Core.ListenAddress}:{Config.Core.ListenPort}"),
                         ("服务器目标", Config.Repository.Targets.Count == 0 ? "未限制" : string.Join(", ", Config.Repository.Targets)),
                         ("数据语言", Config.Updater.DatabaseLanguage),
-                        ("训练员性别", Config.Updater.TrainerIsMale ? "男" : "女")
+                        ("训练员性别", Config.Updater.TrainerIsMale ? "男" : "女"),
+                        ("更新源", updateSource)
                     ]);
-                    bootstrap.SetPhase("config", "配置", LiveDisplaySeverity.Success, "已读取 config.yaml");
+                bootstrap.SetPhase(
+                    "config",
+                    "配置",
+                    LiveDisplaySeverity.Success,
+                    $"已读取 {Config.CONFIG_FILEPATH}");
 
-                    _plugin_initialize_task = pluginInitialization = StartPluginInitializationAsync(bootstrap);
-                    await _plugin_initialize_task;
+                _plugin_initialize_task = pluginInitialization = StartPluginInitializationAsync(bootstrap);
+                await _plugin_initialize_task;
+                try
+                {
+                    await ShowMenu(lifetimeCts.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
+
+                async Task CompleteStartupAsync()
+                {
+                    await uiHost.Ready.WaitAsync(lifetimeCts.Token);
                     try
                     {
-                        await ShowMenu(application, lifetimeCts.Token);
+                        var serverStarted = await Task.Run(async () =>
+                        {
+                            bootstrap.SetPhase("database", "数据文件", LiveDisplaySeverity.Info, "正在加载事件、技能、名称等数据。");
+                            _database_initialize_task = Database.Initialize();
+                            await Task.WhenAll(_database_initialize_task, _plugin_initialize_task);
+                            bootstrap.SetPhase("database", "数据文件", LiveDisplaySeverity.Success, "加载完成；缺失或损坏项见日志。");
+
+                            lifetimeCts.Token.ThrowIfCancellationRequested();
+                            bootstrap.SetPhase("plugin-init", "插件初始化", LiveDisplaySeverity.Info, "正在调用插件 Initialize。");
+                            PluginManager.InitializeLoadedPlugins();
+                            bootstrap.SetPluginSummary(BuildBootstrapPluginSummary(initialized: true));
+                            var loadedPluginCount = PluginManager.LoadedPlugins.Count;
+                            var failedPluginCount = PluginManager.FailedPlugins.Count;
+                            bootstrap.SetPhase(
+                                "plugin-init",
+                                "插件初始化",
+                                failedPluginCount == 0 ? LiveDisplaySeverity.Success : LiveDisplaySeverity.Warning,
+                                failedPluginCount == 0
+                                    ? $"已初始化 {loadedPluginCount} 个插件。"
+                                    : $"已初始化 {loadedPluginCount} 个插件，{failedPluginCount} 个插件失败。");
+
+                            lifetimeCts.Token.ThrowIfCancellationRequested();
+                            bootstrap.SetPhase("server", "HTTP server", LiveDisplaySeverity.Info, "正在启动监听。");
+                            try
+                            {
+                                Server.Start(lifetimeCts.Token); //启动HTTP服务器
+                                bootstrap.SetPhase("server", "HTTP server", LiveDisplaySeverity.Success, $"监听 http://{Config.Core.ListenAddress}:{Config.Core.ListenPort}");
+                            }
+                            catch (Exception ex)
+                            {
+                                bootstrap.SetPhase("server", "HTTP server", LiveDisplaySeverity.Error, ex.Message);
+                                throw;
+                            }
+
+                            bootstrap.Log(
+                                "Plugin",
+                                loadedPluginCount == 0
+                                    ? "没有加载任何插件。可从插件仓库安装插件。"
+                                    : $"已加载 {loadedPluginCount} 个插件。按 P 查看插件列表。",
+                                loadedPluginCount == 0 ? LiveDisplaySeverity.Warning : LiveDisplaySeverity.Success);
+                            foreach (var plugin in PluginManager.FailedPlugins)
+                            {
+                                var message = $"插件 {Path.GetFileName(plugin)} 加载失败";
+                                bootstrap.Log("Plugin", message, LiveDisplaySeverity.Warning);
+                            }
+
+                            bootstrap.Log("Server", $"监听 http://{Config.Core.ListenAddress}:{Config.Core.ListenPort}", LiveDisplaySeverity.Success);
+                            if (Config.Core.ListenAddress == "0.0.0.0")
+                            {
+                                var interfaces = NetworkInterface.GetAllNetworkInterfaces()
+                                       .Where(x => x.OperationalStatus == OperationalStatus.Up && x.NetworkInterfaceType != NetworkInterfaceType.Loopback)
+                                       .SelectMany(x => x.GetIPProperties().UnicastAddresses)
+                                       .Where(x => x.Address.AddressFamily == AddressFamily.InterNetwork)
+                                       .Select(x => x.Address.ToString());
+                                foreach (var i in interfaces)
+                                {
+                                    bootstrap.Log("Server", string.Format(Localization.Server.I18N_AvailableEndpointTip, i, Config.Core.ListenPort));
+                                }
+                            }
+
+                            for (var i = 0; i < 30; i++)
+                            {
+                                if (Server.IsRunning) break;
+                                await Task.Delay(100, lifetimeCts.Token);
+                            }
+                            if (!Server.IsRunning)
+                            {
+                                bootstrap.SetPhase("server", "HTTP server", LiveDisplaySeverity.Error, I18N_LaunchFail);
+                                Console.Error.WriteLine(I18N_LaunchFail);
+                                Environment.ExitCode = 1;
+                                return false;
+                            }
+
+                            var startedMessage = I18N_Start_Started;
+                            bootstrap.Log("URA", startedMessage, LiveDisplaySeverity.Success);
+                            bootstrap.SetPhase("host", "宿主", LiveDisplaySeverity.Success, startedMessage);
+                            return true;
+                        }, lifetimeCts.Token);
+
+                        if (!serverStarted)
+                            return;
+
+                        KeyboardManager.Register(ConsoleKey.P, "插件列表", ctx =>
+                        {
+                            var plugins = PluginManager.SnapshotLoadedPlugins();
+                            foreach (var i in plugins)
+                                ctx.WriteLine($"{i.Name} v{i.Version}  by {i.Author}");
+                            if (plugins.Count == 0)
+                                ctx.WriteLine("（没有加载任何插件）", ConsoleColor.DarkGray);
+                            return Task.CompletedTask;
+                        });
+                        KeyboardManager.SetCommandHandler(uiHost.HandleCommandAsync, uiHost.CompleteCommand);
+
+                        await PluginManager.TriggerStartedAsync(lifetimeCts.Token);
+                        pluginUpdateCheck = CheckPluginUpdatesAsync(uiHost, lifetimeCts.Token);
                     }
-                    catch (OperationCanceledException)
+                    catch (OperationCanceledException) when (lifetimeCts.IsCancellationRequested)
                     {
-                        return;
-                    }
-
-                    bootstrap.SetPhase("database", "数据文件", LiveDisplaySeverity.Info, "正在加载事件、技能、名称等数据。");
-                    _database_initialize_task = Database.Initialize();
-                    await Task.WhenAll(_database_initialize_task, _plugin_initialize_task);
-                    bootstrap.SetPhase("database", "数据文件", LiveDisplaySeverity.Success, "加载完成；缺失或损坏项见日志。");
-
-                    bootstrap.SetPhase("plugin-init", "插件初始化", LiveDisplaySeverity.Info, "正在调用插件 Initialize。");
-                    PluginManager.InitializeLoadedPlugins();
-                    var loadedPluginCount = PluginManager.LoadedPlugins.Count;
-                    var failedPluginCount = PluginManager.FailedPlugins.Count;
-                    bootstrap.SetPhase(
-                        "plugin-init",
-                        "插件初始化",
-                        failedPluginCount == 0 ? LiveDisplaySeverity.Success : LiveDisplaySeverity.Warning,
-                        failedPluginCount == 0
-                            ? $"已初始化 {loadedPluginCount} 个插件。"
-                            : $"已初始化 {loadedPluginCount} 个插件，{failedPluginCount} 个插件失败。");
-
-                    KeyboardManager.Register(ConsoleKey.P, "插件列表", ctx =>
-                    {
-                        var plugins = PluginManager.SnapshotLoadedPlugins();
-                        foreach (var i in plugins)
-                            ctx.WriteLine($"{i.Name} v{i.Version}  by {i.Author}");
-                        if (plugins.Count == 0)
-                            ctx.WriteLine("（没有加载任何插件）", ConsoleColor.DarkGray);
-                        return Task.CompletedTask;
-                    });
-                    KeyboardManager.SetCommandHandler(uiHost.HandleCommandAsync, uiHost.CompleteCommand);
-
-                    bootstrap.SetPhase("server", "HTTP server", LiveDisplaySeverity.Info, "正在启动监听。");
-                    try
-                    {
-                        Server.Start(lifetimeCts.Token); //启动HTTP服务器
-                        bootstrap.SetPhase("server", "HTTP server", LiveDisplaySeverity.Success, $"监听 http://{Config.Core.ListenAddress}:{Config.Core.ListenPort}");
+                        throw;
                     }
                     catch (Exception ex)
                     {
-                        bootstrap.SetPhase("server", "HTTP server", LiveDisplaySeverity.Error, ex.Message);
+                        bootstrap.SetPhase("host", "宿主", LiveDisplaySeverity.Error, ex.Message);
+                        LiveDisplayConsole.LogException("URA", ex);
                         throw;
                     }
+                }
 
-                    bootstrap.Log(
-                        "Plugin",
-                        loadedPluginCount == 0
-                            ? "没有加载任何插件。可从插件仓库安装插件。"
-                            : $"已加载 {loadedPluginCount} 个插件。按 P 查看插件列表。",
-                        loadedPluginCount == 0 ? LiveDisplaySeverity.Warning : LiveDisplaySeverity.Success);
-                    foreach (var plugin in PluginManager.FailedPlugins)
-                    {
-                        var message = $"插件 {Path.GetFileName(plugin)} 加载失败";
-                        bootstrap.Log("Plugin", message, LiveDisplaySeverity.Warning);
-                    }
-
-                    bootstrap.Log("Server", $"监听 http://{Config.Core.ListenAddress}:{Config.Core.ListenPort}", LiveDisplaySeverity.Success);
-                    if (Config.Core.ListenAddress == "0.0.0.0")
-                    {
-                        var interfaces = NetworkInterface.GetAllNetworkInterfaces()
-                               .Where(x => x.OperationalStatus == OperationalStatus.Up && x.NetworkInterfaceType != NetworkInterfaceType.Loopback)
-                               .SelectMany(x => x.GetIPProperties().UnicastAddresses)
-                               .Where(x => x.Address.AddressFamily == AddressFamily.InterNetwork)
-                               .Select(x => x.Address.ToString());
-                        foreach (var i in interfaces)
-                        {
-                            bootstrap.Log("Server", string.Format(Localization.Server.I18N_AvailableEndpointTip, i, Config.Core.ListenPort));
-                        }
-                    }
-
-                    for (var i = 0; i < 30; i++)
-                    {
-                        if (Server.IsRunning) break;
-                        await Task.Delay(100, lifetimeCts.Token);
-                    }
-                    if (!Server.IsRunning)
-                    {
-                        bootstrap.SetPhase("server", "HTTP server", LiveDisplaySeverity.Error, I18N_LaunchFail);
-                        Console.Error.WriteLine(I18N_LaunchFail);
-                        Environment.ExitCode = 1;
-                        return;
-                    }
-
-                    var startedMessage = I18N_Start_Started;
-                    bootstrap.Log("URA", startedMessage, LiveDisplaySeverity.Success);
-                    bootstrap.SetPhase("started", "宿主", LiveDisplaySeverity.Success, startedMessage);
-
-                    await PluginManager.TriggerStartedAsync(lifetimeCts.Token);
-                    pluginUpdateCheck = CheckPluginUpdatesAsync(uiHost, lifetimeCts.Token);
-
+                // Terminal.Gui 2.4.17 的 RunAsync 会同步进入 run loop，必须先创建 startup waiter。
+                var startupTask = CompleteStartupAsync();
+                var uiTask = uiHost.RunAsync(lifetimeCts.Token);
+                _ = uiTask.ContinueWith(
+                    static (_, state) => ((CancellationTokenSource)state!).Cancel(),
+                    lifetimeCts,
+                    CancellationToken.None,
+                    TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default);
                 try
                 {
-                    await uiHost.RunAsync(lifetimeCts.Token);
+                    await Task.WhenAll(uiTask, startupTask);
                 }
-                catch (OperationCanceledException) when (lifetimeCts.IsCancellationRequested) { }
+                catch (OperationCanceledException) when (
+                    lifetimeCts.IsCancellationRequested &&
+                    !uiTask.IsFaulted &&
+                    !startupTask.IsFaulted)
+                {
+                }
             }
             catch (Exception ex)
             {
@@ -434,7 +481,51 @@ namespace UmamusumeResponseAnalyzer
                     failedPluginCount == 0
                         ? $"发现 {loadedPluginCount} 个可用插件。"
                         : $"发现 {loadedPluginCount} 个可用插件，{failedPluginCount} 个插件失败。");
+                bootstrap.SetPluginSummary(BuildBootstrapPluginSummary(initialized: false));
             });
+        }
+
+        static IReadOnlyList<BootstrapPluginRow> BuildBootstrapPluginSummary(bool initialized)
+        {
+            var statuses = PluginManager.SnapshotPluginStatuses();
+            var failedPlugins = PluginManager.FailedPlugins.ToArray();
+            var pluginNamesByPath = PluginManager.Metadatas.Values
+                .GroupBy(x => x.FilePath, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(
+                    group => group.Key,
+                    group => group.First().PluginName,
+                    StringComparer.OrdinalIgnoreCase);
+            var failedNames = failedPlugins
+                .Select(path => pluginNamesByPath.GetValueOrDefault(path) ?? path)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var knownNames = statuses
+                .SelectMany(x => new[] { x.InternalName, x.DisplayName })
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            List<(string SortKey, BootstrapPluginRow Row)> rows =
+            [
+                .. statuses.Select(status => (
+                    status.InternalName,
+                    new BootstrapPluginRow(
+                        status,
+                        initialized,
+                        failedNames.Contains(status.InternalName) ||
+                        failedNames.Contains(status.DisplayName))))
+            ];
+
+            foreach (var failedPath in failedPlugins)
+            {
+                var name = pluginNamesByPath.GetValueOrDefault(failedPath)
+                    ?? Path.GetFileNameWithoutExtension(failedPath);
+                if (knownNames.Add(name))
+                    rows.Add((name, new(name, string.Empty, "ERR", "扫描或加载失败")));
+            }
+
+            return
+            [
+                .. rows
+                    .OrderBy(x => x.SortKey, StringComparer.OrdinalIgnoreCase)
+                    .Select(x => x.Row)
+            ];
         }
 
         static async Task CheckPluginUpdatesAsync(UiHost uiHost, CancellationToken cancellationToken)
@@ -538,364 +629,81 @@ namespace UmamusumeResponseAnalyzer
                 "首次设置完成。启动前请更新数据文件，并从「插件仓库」安装所需插件。",
                 cancellationToken);
         }
-        enum MenuLocation
+        static async Task ShowMenu(CancellationToken cancellationToken)
         {
-            Root,
-            Options,
-            Core,
-            Repository,
-            Plugin,
-            Updater,
-            DatabaseLanguage,
-            Language,
-            InstallUraCore
-        }
-
-        static async Task ShowMenu(
-            IApplication application,
-            CancellationToken cancellationToken)
-        {
-            var location = MenuLocation.Root;
+            const string pluginRepository = "插件仓库";
+            const string qqGroup = "加入QQ群（号被封过之后在频道里说话会概率被夹";
             while (true)
             {
-                Func<Task>? nextAction = null;
-                var start = false;
-
-                MenuItem Leaf(string title, MenuLocation reopenAt, Func<Task> action) => new()
+                var selections = new List<string>
                 {
-                    Title = title,
-                    Action = () =>
-                    {
-                        location = reopenAt;
-                        nextAction = action;
-                    }
-                };
-
-                MenuItem Toggle(
-                    string title,
-                    bool value,
-                    MenuLocation reopenAt,
-                    Action<bool> update)
-                {
-                    var checkBox = new CheckBox
-                    {
-                        Title = title,
-                        CanFocus = false,
-                        Value = value ? CheckState.Checked : CheckState.UnChecked
-                    };
-                    return new MenuItem
-                    {
-                        Title = title,
-                        CommandView = checkBox,
-                        Action = () =>
-                        {
-                            var selected = checkBox.Value == CheckState.Checked;
-                            location = reopenAt;
-                            nextAction = () =>
-                            {
-                                update(selected);
-                                Config.Save();
-                                return Task.CompletedTask;
-                            };
-                        }
-                    };
-                }
-
-                static MenuItem Branch(string title, params MenuItem[] items) => new()
-                {
-                    Title = title,
-                    SubMenu = new Menu(items),
-                    Action = null
-                };
-
-                static string Label(string resourceName, string fallback) =>
-                    configI18n.ResourceManager.GetString(resourceName, configI18n.Culture) ?? fallback;
-
-                Task EditListenAddress()
-                {
-                    while (true)
-                    {
-                        var address = LiveDisplayConsole.Ask(
-                            configI18n.Tabs_Core_ListenAddressPrompt,
-                            Config.Core.ListenAddress,
-                            cancellationToken: cancellationToken);
-                        if (!IPAddress.TryParse(address, out _))
-                            continue;
-
-                        Config.Core.ListenAddress = address;
-                        Config.Save();
-                        return Task.CompletedTask;
-                    }
-                }
-
-                Task EditListenPort()
-                {
-                    while (true)
-                    {
-                        var port = LiveDisplayConsole.Ask(
-                            configI18n.Tabs_Core_ListenPortPrompt,
-                            Config.Core.ListenPort.ToString(),
-                            cancellationToken: cancellationToken);
-                        if (!int.TryParse(port, out var parsed))
-                            continue;
-
-                        Config.Core.ListenPort = parsed;
-                        Config.Save();
-                        return Task.CompletedTask;
-                    }
-                }
-
-                Task EditTargets()
-                {
-                    var input = LiveDisplayConsole.Ask(
-                        configI18n.Tabs_Repository_TargetsPrompt,
-                        string.Join(',', Config.Repository.Targets),
-                        allowEmpty: true,
-                        cancellationToken: cancellationToken);
-                    Config.Repository.Targets = string.IsNullOrEmpty(input)
-                        ? []
-                        : [.. input.Replace('，', ',').Split(',')];
-                    Config.Save();
-                    return Task.CompletedTask;
-                }
-
-                Task EditCustomDatabaseRepository()
-                {
-                    while (true)
-                    {
-                        var url = LiveDisplayConsole.Ask(
-                            configI18n.Tabs_Updater_CustomDatabaseRepositoryPrompt,
-                            Config.Updater.CustomDatabaseRepository,
-                            allowEmpty: true,
-                            cancellationToken: cancellationToken);
-                        if (!string.IsNullOrEmpty(url) &&
-                            !Uri.TryCreate(url, UriKind.Absolute, out _))
-                            continue;
-
-                        Config.Updater.CustomDatabaseRepository = url;
-                        Config.Save();
-                        return Task.CompletedTask;
-                    }
-                }
-
-                var listenAddressItem = Leaf(
-                    $"{configI18n.Tabs_Core_ListenAddress}: {Config.Core.ListenAddress}",
-                    MenuLocation.Core,
-                    EditListenAddress);
-                var listenPortItem = Leaf(
-                    $"{configI18n.Tabs_Core_ListenPort}: {Config.Core.ListenPort}",
-                    MenuLocation.Core,
-                    EditListenPort);
-                var firstRunItem = Toggle(
-                    Label("Tabs_Core_ShowFirstRunPrompt", nameof(CoreConfig.ShowFirstRunPrompt)),
-                    Config.Core.ShowFirstRunPrompt,
-                    MenuLocation.Core,
-                    value => Config.Core.ShowFirstRunPrompt = value);
-                var coreItem = Branch(
-                    configI18n.Tabs_Core_Title,
-                    listenAddressItem,
-                    listenPortItem,
-                    firstRunItem);
-
-                var targetsItem = Leaf(
-                    $"{configI18n.Tabs_Repository_Targets}: {string.Join(',', Config.Repository.Targets)}",
-                    MenuLocation.Repository,
-                    EditTargets);
-                var repositoryItem = Branch(configI18n.Tabs_Repository_Title, targetsItem);
-
-                var pluginChoices = PluginConfig.BuildPluginChoices(PluginManager.SnapshotLoadedPlugins());
-                var pluginItems = pluginChoices
-                    .Select(pair => Leaf(
-                        pair.Key,
-                        MenuLocation.Plugin,
-                        () => PluginConfigPrompt.RunAsync(pair.Value, cancellationToken)))
-                    .ToArray();
-                MenuItem? firstPluginItem = pluginItems.FirstOrDefault();
-                if (pluginItems.Length == 0)
-                {
-                    pluginItems =
-                    [
-                        new MenuItem
-                        {
-                            Title = "（没有可配置的插件）",
-                            Enabled = false
-                        }
-                    ];
-                }
-                var pluginItem = Branch(configI18n.Tabs_Plugin_Title, pluginItems);
-
-                var trainerGenderItem = Toggle(
-                    Label("Tabs_Updater_TrainerIsMale", nameof(UpdaterConfig.TrainerIsMale)),
-                    Config.Updater.TrainerIsMale,
-                    MenuLocation.Updater,
-                    value => Config.Updater.TrainerIsMale = value);
-                var databaseLanguageItems = new[] { "ja-JP", "zh-TW", "zh-CN" }
-                    .Select(language => Leaf(
-                        language,
-                        MenuLocation.DatabaseLanguage,
-                        () =>
-                        {
-                            Config.Updater.DatabaseLanguage = language;
-                            Config.Save();
-                            return Task.CompletedTask;
-                        }))
-                    .ToArray();
-                var databaseLanguageItem = Branch(
-                    $"{nameof(UpdaterConfig.DatabaseLanguage)}: {Config.Updater.DatabaseLanguage}",
-                    databaseLanguageItems);
-                var customDatabaseRepositoryItem = Leaf(
-                    $"{nameof(UpdaterConfig.CustomDatabaseRepository)}: {Config.Updater.CustomDatabaseRepository}",
-                    MenuLocation.Updater,
-                    EditCustomDatabaseRepository);
-                var forceGithubItem = Toggle(
-                    configI18n.Tabs_Updater_ForceUseGithubToUpdate,
-                    Config.Updater.ForceUseGithubToUpdate,
-                    MenuLocation.Updater,
-                    value => Config.Updater.ForceUseGithubToUpdate = value);
-                var updaterItem = Branch(
-                    configI18n.Tabs_Updater_Title,
-                    trainerGenderItem,
-                    databaseLanguageItem,
-                    customDatabaseRepositoryItem,
-                    forceGithubItem);
-
-                var languageItems = Enum.GetValues<LanguageConfig.Language>()
-                    .Select(language => Leaf(
-                        Label($"Tabs_Language_{language}", language.ToString()),
-                        MenuLocation.Language,
-                        () =>
-                        {
-                            Config.Language.Selected = language;
-                            Config.Save();
-                            Restart();
-                            return Task.CompletedTask;
-                        }))
-                    .ToArray();
-                var languageItem = Branch(configI18n.Tabs_Language_Title, languageItems);
-
-                var miscItem = Leaf(
-                    configI18n.Tabs_Misc_Title,
-                    MenuLocation.Options,
-                    () =>
-                    {
-                        Config.Misc.Prompt(cancellationToken);
-                        return Task.CompletedTask;
-                    });
-                var optionsItem = Branch(
-                    I18N_Options,
-                    coreItem,
-                    repositoryItem,
-                    pluginItem,
-                    updaterItem,
-                    languageItem,
-                    miscItem);
-
-                var startItem = Leaf(
                     I18N_Start,
-                    MenuLocation.Root,
-                    () =>
-                    {
-                        start = true;
-                        return Task.CompletedTask;
-                    });
-                var mainItems = new List<MenuItem>
-                {
-                    startItem,
-                    optionsItem,
-                    Leaf(
-                        "插件仓库",
-                        MenuLocation.Root,
-                        () => PluginRepository.ShowMenuAsync(cancellationToken)),
-                    Leaf(
-                        I18N_UpdateAssets,
-                        MenuLocation.Root,
-                        () => ResourceUpdater.UpdateAssets(cancellationToken)),
-                    Leaf(
-                        I18N_UpdateProgram,
-                        MenuLocation.Root,
-                        () => ResourceUpdater.UpdateProgram(cancellationToken)),
-                    Leaf(
-                        "加入QQ群（号被封过之后在频道里说话会概率被夹",
-                        MenuLocation.Root,
-                        () =>
-                        {
-                            Process.Start(new ProcessStartInfo
-                            {
-                                FileName = "https://qm.qq.com/q/4z6xHQ908w",
-                                UseShellExecute = true
-                            });
-                            LiveDisplayConsole.Acknowledge(
-                                "已打开 QQ 群链接：https://qm.qq.com/q/4z6xHQ908w",
-                                cancellationToken);
-                            return Task.CompletedTask;
-                        })
+                    I18N_Options,
+                    pluginRepository,
+                    I18N_UpdateAssets,
+                    I18N_UpdateProgram,
+                    qqGroup
                 };
-
-                MenuItem? installUraCoreItem = null;
-                MenuItem? hachimiItem = null;
                 if (OperatingSystem.IsWindows())
-                {
-                    hachimiItem = Leaf(
-                        "Hachimi",
-                        MenuLocation.InstallUraCore,
-                        () => InstallUraCoreAsync("Hachimi", cancellationToken));
-                    installUraCoreItem = Branch(
-                        I18N_InstallUraCore,
-                        hachimiItem,
-                        Leaf(
-                            "umamusume-localify",
-                            MenuLocation.InstallUraCore,
-                            () => InstallUraCoreAsync("umamusume-localify", cancellationToken)));
-                    mainItems.Add(installUraCoreItem);
-                }
+                    selections.Add(I18N_InstallUraCore);
 
-                var root = new Menu(mainItems);
-                IReadOnlyList<MenuItem> focusPath = location switch
-                {
-                    MenuLocation.Options => [optionsItem, miscItem],
-                    MenuLocation.Core => [optionsItem, coreItem, listenAddressItem],
-                    MenuLocation.Repository => [optionsItem, repositoryItem, targetsItem],
-                    MenuLocation.Plugin when firstPluginItem is not null =>
-                        [optionsItem, pluginItem, firstPluginItem],
-                    MenuLocation.Plugin => [optionsItem, pluginItem],
-                    MenuLocation.Updater => [optionsItem, updaterItem, trainerGenderItem],
-                    MenuLocation.DatabaseLanguage =>
-                        [
-                            optionsItem,
-                            updaterItem,
-                            databaseLanguageItem,
-                            databaseLanguageItems.First(x => x.Title == Config.Updater.DatabaseLanguage)
-                        ],
-                    MenuLocation.Language =>
-                        [
-                            optionsItem,
-                            languageItem,
-                            languageItems[(int)Config.Language.Selected]
-                        ],
-                    MenuLocation.InstallUraCore when installUraCoreItem is not null && hachimiItem is not null =>
-                        [installUraCoreItem, hachimiItem],
-                    _ => [startItem]
-                };
-
-                TerminalGuiDialogs.StartupMenu(
-                    application,
+                var selected = LiveDisplayConsole.Menu(
                     I18N_Instruction,
-                    root,
-                    focusPath,
-                    cancellationToken);
-                if (nextAction is null)
-                    throw new OperationCanceledException("启动菜单已取消。");
+                    selections,
+                    cancellationToken: cancellationToken);
+                if (selected == I18N_Start)
+                    return;
 
                 try
                 {
-                    await nextAction();
+                    if (selected == I18N_Options)
+                    {
+                        await Config.PromptAsync(cancellationToken);
+                    }
+                    else if (selected == pluginRepository)
+                    {
+                        await PluginRepository.ShowMenuAsync(cancellationToken);
+                    }
+                    else if (selected == I18N_UpdateAssets)
+                    {
+                        await ResourceUpdater.UpdateAssets(cancellationToken);
+                    }
+                    else if (selected == I18N_UpdateProgram)
+                    {
+                        await ResourceUpdater.UpdateProgram(cancellationToken);
+                    }
+                    else if (selected == I18N_InstallUraCore)
+                    {
+                        if (UraCoreHelper.GamePaths.Count == 0)
+                        {
+                            LiveDisplayConsole.Acknowledge(
+                                "没有找到可安装 Mod 的游戏目录。",
+                                cancellationToken);
+                            continue;
+                        }
+
+                        var target = LiveDisplayConsole.Menu(
+                            "请选择想要安装的 Mod",
+                            new[] { "Hachimi", "umamusume-localify" },
+                            cancellationToken: cancellationToken);
+                        await InstallUraCoreAsync(target, cancellationToken);
+                    }
+                    else if (selected == qqGroup)
+                    {
+                        Process.Start(new ProcessStartInfo
+                        {
+                            FileName = "https://qm.qq.com/q/4z6xHQ908w",
+                            UseShellExecute = true
+                        });
+                        LiveDisplayConsole.Acknowledge(
+                            "已打开 QQ 群链接：https://qm.qq.com/q/4z6xHQ908w",
+                            cancellationToken);
+                    }
                 }
                 catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
                 {
                 }
                 cancellationToken.ThrowIfCancellationRequested();
-                if (start)
-                    return;
             }
         }
 

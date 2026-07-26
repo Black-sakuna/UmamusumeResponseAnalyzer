@@ -100,61 +100,104 @@ public sealed class TerminalGuiDialogsTests
     }
 
     [Fact]
-    public async Task StartupMenu_UsesPopoverMenuHierarchyAndNativeHoverNavigation()
+    public async Task Menu_UsesDirectNativeMenuAndKeyboardActivation()
     {
         using var terminal = new TerminalGuiTestApp();
         string? selected = null;
-        var cancelled = await terminal.StartAsync(() =>
+        var run = await terminal.StartAsync(() =>
         {
-            var core = new MenuItem
-            {
-                Title = "核心",
-                Action = () => selected = "核心"
-            };
-            var settings = new MenuItem
-            {
-                Title = "设置",
-                SubMenu = new Menu([core]),
-                Action = null
-            };
-            var start = new MenuItem
-            {
-                Title = "开始",
-                Action = () => selected = "开始"
-            };
-            TerminalGuiDialogs.StartupMenu(
+            selected = TerminalGuiDialogs.Menu(
                 terminal.Application,
-                "启动菜单",
-                new Menu([start, settings]),
-                [start]);
-            if (selected is null)
-                throw new OperationCanceledException("启动菜单已取消。");
+                "原生菜单",
+                ["开始", "设置", "插件"]);
             return Task.CompletedTask;
         });
-        await terminal.WaitForScreenAsync("设置");
+        await terminal.WaitForScreenAsync("插件");
 
         var controls = await terminal.InvokeAsync(() =>
         {
             var dialog = terminal.Application.TopRunnableView!;
-            var popover = terminal.Application.Popovers!.Popovers.OfType<PopoverMenu>().Single();
-            var root = popover.Root!;
-            var items = root.SubViews.OfType<MenuItem>().ToArray();
-            var child = items[1].SubMenu!.SubViews.OfType<MenuItem>().Single();
-            return (dialog, popover, root, items, child);
+            var menu = dialog.SubViews.OfType<Menu>().Single();
+            return (
+                Dialog: dialog,
+                Menu: menu,
+                Items: menu.SubViews.OfType<MenuItem>().ToArray());
         });
-        Assert.Single(controls.dialog.SubViews.OfType<Label>());
-        Assert.Empty(controls.dialog.SubViews.OfType<ListView>());
-        Assert.Empty(controls.dialog.SubViews.OfType<Button>());
-        Assert.Empty(controls.dialog.SubViews.OfType<Menu>());
-        Assert.Equal(["开始", "设置"], controls.items.Select(x => x.Title.ToString()));
-        Assert.Null(controls.items[1].Action);
-        Assert.Same(controls.root, controls.popover.Root);
-        Assert.True(await terminal.InvokeAsync(() => controls.items[0].HasFocus));
-        Assert.Same(controls.items[0], await terminal.InvokeAsync(() => controls.root.SelectedMenuItem));
+        Assert.Single(controls.Dialog.SubViews.OfType<Label>());
+        Assert.Empty(controls.Dialog.SubViews.OfType<ListView>());
+        Assert.Empty(controls.Dialog.SubViews.OfType<Button>());
+        Assert.Equal(["开始", "设置", "插件"], controls.Items.Select(x => x.Title.ToString()));
+        Assert.True(await terminal.InvokeAsync(() => controls.Items[0].HasFocus));
+        Assert.Same(
+            controls.Items[0],
+            await terminal.InvokeAsync(() => controls.Menu.SelectedMenuItem));
+        Assert.Equal(
+            new Rectangle(0, 0, 80, 24),
+            await terminal.InvokeAsync(() => controls.Dialog.Frame));
+        Assert.True(
+            await terminal.InvokeAsync(() => controls.Dialog.BorderStyle)
+                is null or LineStyle.None);
+        Assert.Equal(
+            ShadowStyles.None,
+            await terminal.InvokeAsync(() => controls.Dialog.ShadowStyle));
+        Assert.Equal(
+            Thickness.Empty,
+            await terminal.InvokeAsync(() => controls.Dialog.Margin.Thickness));
+        Assert.Equal(
+            Thickness.Empty,
+            await terminal.InvokeAsync(() => controls.Dialog.Border.Thickness));
+        Assert.Equal(
+            Thickness.Empty,
+            await terminal.InvokeAsync(() => controls.Dialog.Padding.Thickness));
+        Assert.Equal(
+            new Rectangle(0, 3, 80, 21),
+            await terminal.InvokeAsync(() => controls.Menu.Frame));
 
+        await terminal.ResizeAsync(48, 16);
+        await terminal.RedrawAsync();
+        Assert.Equal(
+            new Rectangle(0, 0, 48, 16),
+            await terminal.InvokeAsync(() => controls.Dialog.Frame));
+        Assert.Equal(
+            new Rectangle(0, 3, 48, 13),
+            await terminal.InvokeAsync(() => controls.Menu.Frame));
+
+        await terminal.InjectAsync(Key.CursorDown);
+        Assert.True(await terminal.InvokeAsync(() => controls.Items[1].HasFocus));
+        await terminal.InjectAsync(Key.CursorUp);
+        Assert.True(await terminal.InvokeAsync(() => controls.Items[0].HasFocus));
+        await terminal.InjectAsync(Key.CursorDown);
+        await terminal.InjectAsync(Key.Enter);
+        await run;
+
+        Assert.Equal("设置", selected);
+        Assert.Empty(terminal.Application.Popovers!.Popovers);
+    }
+
+    [Fact]
+    public async Task Menu_NativeHoverMovesFocusAndClickActivatesOnce()
+    {
+        using var terminal = new TerminalGuiTestApp();
+        string? selected = null;
+        var run = await terminal.StartAsync(() =>
+        {
+            selected = TerminalGuiDialogs.Menu(
+                terminal.Application,
+                "原生菜单",
+                ["开始", "设置"]);
+            return Task.CompletedTask;
+        });
+        var controls = await terminal.InvokeAsync(() =>
+        {
+            var menu = terminal.Application.TopRunnableView!
+                .SubViews.OfType<Menu>().Single();
+            return (
+                Menu: menu,
+                Items: menu.SubViews.OfType<MenuItem>().ToArray());
+        });
         var points = await terminal.InvokeAsync(() => (
-            First: controls.items[0].CommandView!.ViewportToScreen(Point.Empty),
-            Second: controls.items[1].CommandView!.ViewportToScreen(Point.Empty)));
+            First: controls.Items[0].CommandView!.ViewportToScreen(Point.Empty),
+            Second: controls.Items[1].CommandView!.ViewportToScreen(Point.Empty)));
         await terminal.RedrawAsync();
         var firstFocused = await terminal.CaptureAttributeAsync(points.First);
         var secondNormal = await terminal.CaptureAttributeAsync(points.Second);
@@ -162,229 +205,32 @@ public sealed class TerminalGuiDialogsTests
 
         await terminal.MoveMouseAsync(points.Second);
         await terminal.WaitForAsync(async () =>
-            await terminal.InvokeAsync(() => controls.items[1].HasFocus));
+            await terminal.InvokeAsync(() => controls.Items[1].HasFocus));
         await terminal.RedrawAsync();
-
-        Assert.Same(controls.items[1], await terminal.InvokeAsync(() => controls.root.SelectedMenuItem));
-        Assert.True(await terminal.InvokeAsync(() => controls.items[1].SubMenu!.Visible));
+        Assert.Same(
+            controls.Items[1],
+            await terminal.InvokeAsync(() => controls.Menu.SelectedMenuItem));
         Assert.Equal(secondNormal, await terminal.CaptureAttributeAsync(points.First));
         Assert.Equal(firstFocused, await terminal.CaptureAttributeAsync(points.Second));
 
-        await terminal.InjectAsync(Key.CursorRight);
-        Assert.True(await terminal.InvokeAsync(() => controls.child.HasFocus));
-        await terminal.InjectAsync(Key.CursorLeft);
-        Assert.True(await terminal.InvokeAsync(() => controls.items[1].HasFocus));
-        await terminal.InjectAsync(Key.Esc);
-        await Assert.ThrowsAsync<OperationCanceledException>(() => cancelled);
-        Assert.Empty(terminal.Application.Popovers!.Popovers);
-    }
-
-    [Fact]
-    public async Task StartupMenu_ClickActivatesExactlyOnce()
-    {
-        using var terminal = new TerminalGuiTestApp();
-        string? result = null;
         var activations = 0;
-        var run = await terminal.StartAsync(() =>
-        {
-            var first = new MenuItem
-            {
-                Title = "开始",
-                Action = () =>
-                {
-                    activations++;
-                    result = "开始";
-                }
-            };
-            var second = new MenuItem
-            {
-                Title = "设置",
-                Action = () =>
-                {
-                    activations++;
-                    result = "设置";
-                }
-            };
-            TerminalGuiDialogs.StartupMenu(
-                terminal.Application,
-                "启动菜单",
-                new Menu([first, second]),
-                [first]);
-            return Task.CompletedTask;
-        });
-        var second = await terminal.InvokeAsync(() =>
-            terminal.Application.Popovers!.Popovers.OfType<PopoverMenu>().Single().Root!
-                .SubViews.OfType<MenuItem>().ElementAt(1));
-        var point = await terminal.InvokeAsync(() =>
-            second.CommandView!.ViewportToScreen(Point.Empty));
-
-        await terminal.ClickAsync(point);
+        await terminal.InvokeAsync(() => controls.Items[1].Activated += (_, _) => activations++);
+        await terminal.ClickAsync(points.Second);
         await run;
 
-        Assert.Equal("设置", result);
+        Assert.Equal("设置", selected);
         Assert.Equal(1, activations);
         Assert.Empty(terminal.Application.Popovers!.Popovers);
     }
 
     [Fact]
-    public async Task StartupMenu_ArrowKeysEnterAndSubMenuActivateLeaf()
+    public async Task Menu_EscCloseAndTokenCancellationCancel()
     {
         using var terminal = new TerminalGuiTestApp();
-        string? result = null;
-        var run = await terminal.StartAsync(() =>
-        {
-            var core = new MenuItem
-            {
-                Title = "核心",
-                Action = () => result = "核心"
-            };
-            var settings = new MenuItem
-            {
-                Title = "设置",
-                SubMenu = new Menu([core]),
-                Action = null
-            };
-            var start = new MenuItem
-            {
-                Title = "开始",
-                Action = () => result = "开始"
-            };
-            TerminalGuiDialogs.StartupMenu(
-                terminal.Application,
-                "启动菜单",
-                new Menu([start, settings]),
-                [start]);
-            return Task.CompletedTask;
-        });
-        var controls = await terminal.InvokeAsync(() =>
-        {
-            var root = terminal.Application.Popovers!.Popovers.OfType<PopoverMenu>().Single().Root!;
-            var items = root.SubViews.OfType<MenuItem>().ToArray();
-            return (items, core: items[1].SubMenu!.SubViews.OfType<MenuItem>().Single());
-        });
 
-        await terminal.InjectAsync(Key.CursorDown);
-        Assert.True(await terminal.InvokeAsync(() => controls.items[1].HasFocus));
-        await terminal.InjectAsync(Key.CursorUp);
-        Assert.True(await terminal.InvokeAsync(() => controls.items[0].HasFocus));
-        await terminal.InjectAsync(Key.CursorDown);
-        await terminal.InjectAsync(Key.CursorRight);
-        Assert.True(await terminal.InvokeAsync(() => controls.core.HasFocus));
-        await terminal.InjectAsync(Key.Enter);
-        await run;
-
-        Assert.Equal("核心", result);
-    }
-
-    [Fact]
-    public async Task StartupMenu_FocusPathRestoresNestedLocation()
-    {
-        using var terminal = new TerminalGuiTestApp();
-        var run = await terminal.StartAsync(() =>
-        {
-            var forceGithub = new MenuItem { Title = "强制使用 GitHub" };
-            var updater = new MenuItem
-            {
-                Title = "更新",
-                SubMenu = new Menu([forceGithub]),
-                Action = null
-            };
-            var options = new MenuItem
-            {
-                Title = "选项",
-                SubMenu = new Menu([updater]),
-                Action = null
-            };
-            TerminalGuiDialogs.StartupMenu(
-                terminal.Application,
-                "启动菜单",
-                new Menu([new MenuItem { Title = "开始" }, options]),
-                [options, updater, forceGithub]);
-            throw new OperationCanceledException("启动菜单已取消。");
-        });
-        await terminal.WaitForScreenAsync("强制使用 GitHub");
-
-        var restored = await terminal.InvokeAsync(() =>
-        {
-            var root = terminal.Application.Popovers!.Popovers.OfType<PopoverMenu>().Single().Root!;
-            var options = root.SubViews.OfType<MenuItem>().ElementAt(1);
-            var updater = options.SubMenu!.SubViews.OfType<MenuItem>().Single();
-            var forceGithub = updater.SubMenu!.SubViews.OfType<MenuItem>().Single();
-            return (
-                OptionsVisible: options.SubMenu.Visible,
-                UpdaterVisible: updater.SubMenu.Visible,
-                LeafFocused: forceGithub.HasFocus);
-        });
-
-        Assert.True(restored.OptionsVisible);
-        Assert.True(restored.UpdaterVisible);
-        Assert.True(restored.LeafFocused);
-        await terminal.InjectAsync(Key.Esc);
-        await Assert.ThrowsAsync<OperationCanceledException>(() => run);
-        Assert.Empty(terminal.Application.Popovers!.Popovers);
-    }
-
-    [Fact]
-    public async Task StartupMenu_CheckBoxCommandViewTogglesWithoutTakingFocus()
-    {
-        using var terminal = new TerminalGuiTestApp();
-        var result = CheckState.UnChecked;
-        var activations = 0;
-        var run = await terminal.StartAsync(() =>
-        {
-            var checkBox = new CheckBox
-            {
-                Title = "启用",
-                CanFocus = false,
-                Value = CheckState.UnChecked
-            };
-            var item = new MenuItem
-            {
-                Title = "启用",
-                CommandView = checkBox,
-                Action = () =>
-                {
-                    activations++;
-                    result = checkBox.Value;
-                }
-            };
-            TerminalGuiDialogs.StartupMenu(
-                terminal.Application,
-                "设置",
-                new Menu([item]),
-                [item]);
-            return Task.CompletedTask;
-        });
-        var controls = await terminal.InvokeAsync(() =>
-        {
-            var item = terminal.Application.Popovers!.Popovers
-                .OfType<PopoverMenu>().Single().Root!
-                .SubViews.OfType<MenuItem>().Single();
-            return (item, checkBox: Assert.IsType<CheckBox>(item.CommandView));
-        });
-
-        Assert.True(await terminal.InvokeAsync(() => controls.item.HasFocus));
-        Assert.False(await terminal.InvokeAsync(() => controls.checkBox.HasFocus));
-        await terminal.InjectAsync(Key.Enter);
-        await run;
-
-        Assert.Equal(CheckState.Checked, result);
-        Assert.Equal(1, activations);
-    }
-
-    [Fact]
-    public async Task StartupMenu_EscAndCloseCancel()
-    {
-        using var terminal = new TerminalGuiTestApp();
         var escaped = await terminal.StartAsync(() =>
         {
-            var activated = false;
-            TerminalGuiDialogs.StartupMenu(
-                terminal.Application,
-                "Esc 取消",
-                new Menu([new MenuItem { Title = "开始", Action = () => activated = true }]));
-            if (!activated)
-                throw new OperationCanceledException("启动菜单已取消。");
+            TerminalGuiDialogs.Menu(terminal.Application, "Esc 取消", ["开始"]);
             return Task.CompletedTask;
         });
         await terminal.InjectAsync(Key.Esc);
@@ -392,84 +238,67 @@ public sealed class TerminalGuiDialogsTests
 
         var closed = await terminal.StartAsync(() =>
         {
-            var activated = false;
-            TerminalGuiDialogs.StartupMenu(
-                terminal.Application,
-                "关闭取消",
-                new Menu([new MenuItem { Title = "开始", Action = () => activated = true }]));
-            if (!activated)
-                throw new OperationCanceledException("启动菜单已取消。");
+            TerminalGuiDialogs.Menu(terminal.Application, "关闭取消", ["开始"]);
             return Task.CompletedTask;
         });
-        await terminal.InvokeAsync(() => terminal.Application.RequestStop());
+        await terminal.InvokeAsync(terminal.Application.RequestStop);
         await Assert.ThrowsAsync<OperationCanceledException>(() => closed);
-        Assert.Empty(terminal.Application.Popovers!.Popovers);
 
-        var outside = await terminal.StartAsync(() =>
+        using var cancellation = new CancellationTokenSource();
+        var cancelled = await terminal.StartAsync(() =>
         {
-            var activated = false;
-            TerminalGuiDialogs.StartupMenu(
+            TerminalGuiDialogs.Menu(
                 terminal.Application,
-                "Outside click 取消",
-                new Menu([new MenuItem { Title = "开始", Action = () => activated = true }]));
-            if (!activated)
-                throw new OperationCanceledException("启动菜单已取消。");
+                "Token 取消",
+                ["开始"],
+                cancellationToken: cancellation.Token);
             return Task.CompletedTask;
         });
-        await terminal.ClickAsync(Point.Empty);
-        await Assert.ThrowsAsync<OperationCanceledException>(() => outside);
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cancelled);
+
+        Assert.Empty(terminal.Application.SessionStack!);
         Assert.Empty(terminal.Application.Popovers!.Popovers);
     }
 
     [Fact]
-    public async Task StartupMenu_ResizeKeepsCascadingMenusInsideScreen()
+    public async Task Menu_ConsecutivePagesReplacePreviousSession()
     {
         using var terminal = new TerminalGuiTestApp();
-        string? result = null;
+        var selected = new List<string>();
         var run = await terminal.StartAsync(() =>
         {
-            var child = new MenuItem
-            {
-                Title = "一个很长的子菜单项目",
-                Action = () => result = "child"
-            };
-            var branch = new MenuItem
-            {
-                Title = "一个很长的设置菜单",
-                SubMenu = new Menu([child]),
-                Action = null
-            };
-            var start = new MenuItem { Title = "开始", Action = () => result = "start" };
-            TerminalGuiDialogs.StartupMenu(
+            selected.Add(TerminalGuiDialogs.Menu(
                 terminal.Application,
-                "启动菜单",
-                new Menu([start, branch]),
-                [start]);
+                "更新设置",
+                ["TrainerIsMale: False"]));
+            selected.Add(TerminalGuiDialogs.Menu(
+                terminal.Application,
+                "更新设置",
+                ["TrainerIsMale: True"]));
             return Task.CompletedTask;
         });
-        var controls = await terminal.InvokeAsync(() =>
+
+        await terminal.InjectAsync(Key.Enter);
+        await terminal.WaitForScreenAsync("TrainerIsMale: True");
+        var current = await terminal.InvokeAsync(() =>
         {
-            var root = terminal.Application.Popovers!.Popovers.OfType<PopoverMenu>().Single().Root!;
-            var branch = root.SubViews.OfType<MenuItem>().ElementAt(1);
-            return (root, branch, child: branch.SubMenu!.SubViews.OfType<MenuItem>().Single());
+            var dialog = terminal.Application.TopRunnableView!;
+            return (
+                Menus: dialog.SubViews.OfType<Menu>().ToArray(),
+                SessionCount: terminal.Application.SessionStack!.Count);
         });
+        Assert.Single(current.Menus);
+        Assert.Equal(1, current.SessionCount);
+        Assert.Empty(terminal.Application.Popovers!.Popovers);
+        Assert.DoesNotContain(
+            "TrainerIsMale: False",
+            await terminal.CaptureScreenAsync(),
+            StringComparison.Ordinal);
 
-        await terminal.ResizeAsync(32, 12);
-        await terminal.InjectAsync(Key.CursorDown);
-        await terminal.InjectAsync(Key.CursorRight);
-        await terminal.RedrawAsync();
-        var resized = await terminal.InvokeAsync(() => (
-            Screen: terminal.Application.Screen,
-            Root: controls.root.FrameToScreen(),
-            Child: controls.branch.SubMenu!.FrameToScreen()));
-
-        Assert.InRange(resized.Root.X, 0, resized.Screen.Width - 1);
-        Assert.InRange(resized.Root.Right, 1, resized.Screen.Width);
-        Assert.InRange(resized.Child.X, 0, resized.Screen.Width - 1);
-        Assert.InRange(resized.Child.Right, 1, resized.Screen.Width);
         await terminal.InjectAsync(Key.Enter);
         await run;
-        Assert.Equal("child", result);
+        Assert.Equal(["TrainerIsMale: False", "TrainerIsMale: True"], selected);
     }
 
     [Fact]

@@ -4,9 +4,8 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
     // pattern match 派发到对应状态变更。sealed record 子类是不可变载荷。
     internal abstract record UiEvent
     {
-        public sealed record RegisterWorkspace(LiveDisplayWorkspace Workspace, int HistoryCapacity) : UiEvent;
+        public sealed record RegisterWorkspace(LiveDisplayWorkspace Workspace) : UiEvent;
         public sealed record RemoveWorkspace(LiveDisplayWorkspace Workspace, LiveDisplayWorkspace? Replacement, Action? Removed = null) : UiEvent;
-        public sealed record CaptureWorkspaceSnapshot(LiveDisplayWorkspace Workspace) : UiEvent;
         public sealed record SetWorkspaceShortcut(
             LiveDisplayWorkspace Workspace,
             ConsoleKey Key,

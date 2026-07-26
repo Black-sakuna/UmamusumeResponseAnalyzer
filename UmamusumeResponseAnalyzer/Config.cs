@@ -1,5 +1,6 @@
 using Newtonsoft.Json;
 using System.Globalization;
+using System.Net;
 using System.Reflection;
 using UmamusumeResponseAnalyzer.LiveDisplay;
 using UmamusumeResponseAnalyzer.Plugin;
@@ -56,6 +57,47 @@ namespace UmamusumeResponseAnalyzer
         public static void Save() =>
             File.WriteAllText(CONFIG_FILEPATH, _serializer.Serialize(Current));
 
+        internal static async Task PromptAsync(CancellationToken cancellationToken)
+        {
+            try
+            {
+                while (true)
+                {
+                    var selected = LiveDisplayConsole.Menu(
+                        i18n.Settings_Title,
+                        new[]
+                        {
+                            i18n.Tabs_Core_Title,
+                            i18n.Tabs_Repository_Title,
+                            i18n.Tabs_Plugin_Title,
+                            i18n.Tabs_Updater_Title,
+                            i18n.Tabs_Language_Title,
+                            i18n.Tabs_Misc_Title,
+                            i18n.Return
+                        },
+                        cancellationToken: cancellationToken);
+                    if (selected == i18n.Return)
+                        return;
+
+                    if (selected == i18n.Tabs_Core_Title)
+                        Core.Prompt(cancellationToken);
+                    else if (selected == i18n.Tabs_Repository_Title)
+                        Repository.Prompt(cancellationToken);
+                    else if (selected == i18n.Tabs_Plugin_Title)
+                        await Plugin.PromptAsync(cancellationToken);
+                    else if (selected == i18n.Tabs_Updater_Title)
+                        Updater.Prompt(cancellationToken);
+                    else if (selected == i18n.Tabs_Language_Title)
+                        Language.Prompt(cancellationToken);
+                    else if (selected == i18n.Tabs_Misc_Title)
+                        Misc.Prompt(cancellationToken);
+                }
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+            }
+        }
+
     }
 
     public class YamlConfig
@@ -74,15 +116,113 @@ namespace UmamusumeResponseAnalyzer
         public string ListenAddress { get; set; } = "127.0.0.1";
         public int ListenPort { get; set; } = 4693;
         public bool ShowFirstRunPrompt { get; set; } = true;
+
+        internal void Prompt(CancellationToken cancellationToken)
+        {
+            var firstRunTitle = i18n.ResourceManager.GetString(
+                    "Tabs_Core_ShowFirstRunPrompt",
+                    i18n.Culture)
+                ?? nameof(ShowFirstRunPrompt);
+            while (true)
+            {
+                var addressItem = $"{i18n.Tabs_Core_ListenAddress}: {ListenAddress}";
+                var portItem = $"{i18n.Tabs_Core_ListenPort}: {ListenPort}";
+                var firstRunItem = $"{firstRunTitle}: {ShowFirstRunPrompt}";
+                var selected = LiveDisplayConsole.Menu(
+                    i18n.Tabs_Core_Title,
+                    new[] { addressItem, portItem, firstRunItem, i18n.Return },
+                    cancellationToken: cancellationToken);
+                if (selected == i18n.Return)
+                    return;
+
+                if (selected == addressItem)
+                {
+                    while (true)
+                    {
+                        var address = LiveDisplayConsole.Ask(
+                            i18n.Tabs_Core_ListenAddressPrompt,
+                            ListenAddress,
+                            cancellationToken: cancellationToken);
+                        if (!IPAddress.TryParse(address, out _))
+                            continue;
+                        ListenAddress = address;
+                        break;
+                    }
+                }
+                else if (selected == portItem)
+                {
+                    while (true)
+                    {
+                        var port = LiveDisplayConsole.Ask(
+                            i18n.Tabs_Core_ListenPortPrompt,
+                            ListenPort.ToString(),
+                            cancellationToken: cancellationToken);
+                        if (!int.TryParse(port, out var parsed))
+                            continue;
+                        ListenPort = parsed;
+                        break;
+                    }
+                }
+                else if (selected == firstRunItem)
+                {
+                    ShowFirstRunPrompt = !ShowFirstRunPrompt;
+                }
+                Config.Save();
+            }
+        }
     }
 
     public class RepositoryConfig
     {
         public List<string> Targets { get; set; } = [];
+
+        internal void Prompt(CancellationToken cancellationToken)
+        {
+            while (true)
+            {
+                var targetsItem = $"{i18n.Tabs_Repository_Targets}: {string.Join(',', Targets)}";
+                var selected = LiveDisplayConsole.Menu(
+                    i18n.Tabs_Repository_Title,
+                    new[] { targetsItem, i18n.Return },
+                    cancellationToken: cancellationToken);
+                if (selected == i18n.Return)
+                    return;
+
+                var input = LiveDisplayConsole.Ask(
+                    i18n.Tabs_Repository_TargetsPrompt,
+                    string.Join(',', Targets),
+                    allowEmpty: true,
+                    cancellationToken: cancellationToken);
+                Targets = string.IsNullOrEmpty(input)
+                    ? []
+                    : [.. input.Replace('，', ',').Split(',')];
+                Config.Save();
+            }
+        }
     }
 
     public class PluginConfig
     {
+        internal async Task PromptAsync(CancellationToken cancellationToken)
+        {
+            var plugins = BuildPluginChoices(PluginManager.SnapshotLoadedPlugins());
+            var choices = plugins
+                .Select(x => (Label: x.Key, Plugin: (IPlugin?)x.Value))
+                .Append((i18n.Return, null))
+                .ToArray();
+            while (true)
+            {
+                var selected = LiveDisplayConsole.Menu(
+                    i18n.Tabs_Plugin_Title,
+                    choices,
+                    x => x.Label,
+                    cancellationToken: cancellationToken);
+                if (selected.Plugin is null)
+                    return;
+                await PluginConfigPrompt.RunAsync(selected.Plugin, cancellationToken);
+            }
+        }
+
         internal static SortedDictionary<string, IPlugin> BuildPluginChoices(IEnumerable<IPlugin> plugins)
         {
             var list = plugins.ToList();
@@ -116,11 +256,91 @@ namespace UmamusumeResponseAnalyzer
         public string DatabaseLanguage { get; set; } = "ja-JP";
         public string CustomDatabaseRepository { get; set; }
         public bool ForceUseGithubToUpdate { get; set; }
+
+        internal void Prompt(CancellationToken cancellationToken)
+        {
+            string Label(string property) =>
+                i18n.ResourceManager.GetString($"Tabs_Updater_{property}", i18n.Culture)
+                ?? property;
+
+            while (true)
+            {
+                var trainerItem = $"{Label(nameof(TrainerIsMale))}: {TrainerIsMale}";
+                var languageItem = $"{Label(nameof(DatabaseLanguage))}: {DatabaseLanguage}";
+                var repositoryItem =
+                    $"{Label(nameof(CustomDatabaseRepository))}: {CustomDatabaseRepository}";
+                var forceGithubItem =
+                    $"{i18n.Tabs_Updater_ForceUseGithubToUpdate}: {ForceUseGithubToUpdate}";
+                var selected = LiveDisplayConsole.Menu(
+                    i18n.Tabs_Updater_Title,
+                    new[]
+                    {
+                        trainerItem,
+                        languageItem,
+                        repositoryItem,
+                        forceGithubItem,
+                        i18n.Return
+                    },
+                    cancellationToken: cancellationToken);
+                if (selected == i18n.Return)
+                    return;
+
+                if (selected == trainerItem)
+                {
+                    TrainerIsMale = !TrainerIsMale;
+                }
+                else if (selected == languageItem)
+                {
+                    DatabaseLanguage = LiveDisplayConsole.Menu(
+                        nameof(DatabaseLanguage),
+                        new[] { "ja-JP", "zh-TW", "zh-CN" },
+                        cancellationToken: cancellationToken);
+                }
+                else if (selected == repositoryItem)
+                {
+                    while (true)
+                    {
+                        var url = LiveDisplayConsole.Ask(
+                            i18n.Tabs_Updater_CustomDatabaseRepositoryPrompt,
+                            CustomDatabaseRepository,
+                            allowEmpty: true,
+                            cancellationToken: cancellationToken);
+                        if (!string.IsNullOrEmpty(url) &&
+                            !Uri.TryCreate(url, UriKind.Absolute, out _))
+                            continue;
+                        CustomDatabaseRepository = url;
+                        break;
+                    }
+                }
+                else if (selected == forceGithubItem)
+                {
+                    ForceUseGithubToUpdate = !ForceUseGithubToUpdate;
+                }
+                Config.Save();
+            }
+        }
     }
 
     public class LanguageConfig
     {
         public Language Selected { get; internal set; } = Language.AutoDetect;
+
+        internal void Prompt(CancellationToken cancellationToken)
+        {
+            var choices = Enum.GetValues<Language>()
+                .ToDictionary(
+                    language => i18n.ResourceManager.GetString(
+                            $"Tabs_Language_{language}",
+                            i18n.Culture)
+                        ?? language.ToString());
+            var selected = LiveDisplayConsole.Menu(
+                i18n.Tabs_Language_Title,
+                choices.Keys,
+                cancellationToken: cancellationToken);
+            Selected = choices[selected];
+            Config.Save();
+            UmamusumeResponseAnalyzer.Restart();
+        }
 
         public static string GetCulture()
         {

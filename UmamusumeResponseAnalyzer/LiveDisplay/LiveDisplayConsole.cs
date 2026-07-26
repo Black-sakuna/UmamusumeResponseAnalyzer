@@ -49,6 +49,15 @@ public static class LiveDisplayConsole
             cancellationToken,
             token => TerminalGuiDialogs.Select(Application, title, choices, converter, token));
 
+    internal static T Menu<T>(
+        string title,
+        IEnumerable<T> choices,
+        Func<T, string>? converter = null,
+        CancellationToken cancellationToken = default)
+        => WithCancellation(
+            cancellationToken,
+            token => TerminalGuiDialogs.Menu(Application, title, choices, converter, token));
+
     public static IReadOnlyList<T> MultiSelect<T>(
         string title,
         IEnumerable<T> choices,

@@ -34,17 +34,19 @@ internal static class WorkspaceLayoutBuilder
             panels = panelViews
                 .Select(x =>
                 {
-                    var declaredHeight = ViewMetadata.GetValue(
+                    var metadata = ViewMetadata.GetValue(
                         x.View,
                         static view => new(
                             view.Height is DimAbsolute absolute
                                 ? Math.Max(0, absolute.Size)
-                                : 0)).DeclaredHeight;
+                                : 0,
+                            view.Height is DimFill));
                     EnableFocusPath(x.View);
                     return new PanelView(
                         x.Panel,
                         x.View,
-                        declaredHeight,
+                        metadata.DeclaredHeight,
+                        metadata.FillsViewportHeight,
                         fullBleed
                             ? null
                             : new FrameView
@@ -107,7 +109,7 @@ internal static class WorkspaceLayoutBuilder
             var logHeight = visibleLogLines.Length;
             var bodyHeight = Math.Max(1, height - logHeight);
             var panelHeights = CalculatePanelHeights(
-                panels.Select(x => (x.Panel, x.View, x.DeclaredHeight)).ToArray(),
+                panels.Select(x => (x.Panel, x.View, x.DeclaredHeight, x.FillsViewportHeight)).ToArray(),
                 bodyHeight,
                 fullBleed,
                 width);
@@ -125,7 +127,9 @@ internal static class WorkspaceLayoutBuilder
                 panel.View.Width = Dim.Fill();
                 if (panel.Frame is null)
                 {
-                    panel.View.Height = panelHeight;
+                    panel.View.Height = panel.FillsViewportHeight
+                        ? Dim.Fill()
+                        : panelHeight;
                     continue;
                 }
 
@@ -162,10 +166,13 @@ internal static class WorkspaceLayoutBuilder
             LiveDisplayPanel Panel,
             View View,
             int DeclaredHeight,
+            bool FillsViewportHeight,
             FrameView? Frame);
     }
 
-    sealed record ViewLayoutMetadata(int DeclaredHeight);
+    sealed record ViewLayoutMetadata(
+        int DeclaredHeight,
+        bool FillsViewportHeight);
 
     public static WorkspaceSurface BuildWorkspaceLayout(
         LiveDisplayWorkspace? workspace,
@@ -223,7 +230,11 @@ internal static class WorkspaceLayoutBuilder
     }
 
     static int[] CalculatePanelHeights(
-        IReadOnlyList<(LiveDisplayPanel Panel, View View, int DeclaredHeight)> panels,
+        IReadOnlyList<(
+            LiveDisplayPanel Panel,
+            View View,
+            int DeclaredHeight,
+            bool FillsViewportHeight)> panels,
         int bodyHeight,
         bool fullBleed,
         int width)
@@ -232,6 +243,10 @@ internal static class WorkspaceLayoutBuilder
             return [];
 
         if (fullBleed)
+        {
+            if (panels[0].FillsViewportHeight)
+                return [bodyHeight];
+
             return
             [
                 Math.Max(
@@ -242,6 +257,7 @@ internal static class WorkspaceLayoutBuilder
                         bodyHeight,
                         width))
             ];
+        }
 
         var result = panels
             .Select(x => Math.Max(
