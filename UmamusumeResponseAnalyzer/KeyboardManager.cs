@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using Terminal.Gui.Drivers;
+using Terminal.Gui.Input;
 using UmamusumeResponseAnalyzer.LiveDisplay;
 using UmamusumeResponseAnalyzer.Plugin;
 
@@ -20,7 +22,6 @@ namespace UmamusumeResponseAnalyzer
         static readonly SemaphoreSlim dispatchGate = new(1, 1);
         static readonly object popupSync = new();
         static readonly object notificationShortcutSync = new();
-        static readonly object commandInputSync = new();
         static readonly Dictionary<long, NotificationShortcutRegistration> notificationShortcutRegistrations = [];
 
         static KeyboardPopup? activePopup;
@@ -29,17 +30,10 @@ namespace UmamusumeResponseAnalyzer
         static int popupGeneration;
         static long notificationShortcutRegistrationId;
         static readonly AsyncLocal<object?> registrationOwner = new();
-        static string commandBuffer = string.Empty;
-        static readonly List<string> commandHistory = [];
-        static string commandDraft = string.Empty;
-        static int commandHistoryIndex;
-        static bool inCommandInput;
-        static Func<string, Task>? commandHandler;
-        static Func<string, IReadOnlyList<string>>? commandCompletionProvider;
 
         public static TimeSpan PopupAutoCloseDelay { get; set; } = TimeSpan.FromSeconds(3);
         internal static IKeyboardOverlaySink? OverlaySink { get; set; }
-        internal static bool HasPriorityInput => IsInCommandInput() || HasActivePopup();
+        internal static bool HasPriorityPopup => HasActivePopup();
 
         public static void Register(
             ConsoleKey key,
@@ -122,30 +116,11 @@ namespace UmamusumeResponseAnalyzer
                 entry));
         }
 
-        public static void SetCommandHandler(Func<string, Task>? handler)
-        {
-            SetCommandHandler(handler, completionProvider: null);
-        }
-
-        public static void SetCommandHandler(
-            Func<string, Task>? handler,
-            Func<string, IReadOnlyList<string>>? completionProvider)
-        {
-            commandHandler = handler;
-            commandCompletionProvider = completionProvider;
-            if (handler is null)
-            {
-                CancelCommandInput();
-                ClearCommandHistory();
-            }
-        }
-
         public static void UnregisterAll()
         {
             hotkeys.Clear();
             ClearTransientShortcuts();
             HidePopup();
-            CancelCommandInput();
         }
 
         public static IDisposable RegisterScope(object owner)
@@ -226,13 +201,13 @@ namespace UmamusumeResponseAnalyzer
 
         internal static async Task HandleMouseWheelAsync(
             int steps,
-            ConsoleModifiers modifiers,
+            bool hasModifiers,
             bool isHorizontal = false)
         {
             await dispatchGate.WaitAsync();
             try
             {
-                await HandleMouseWheelCoreAsync(steps, modifiers, isHorizontal);
+                await HandleMouseWheelCoreAsync(steps, hasModifiers, isHorizontal);
             }
             finally
             {
@@ -242,31 +217,29 @@ namespace UmamusumeResponseAnalyzer
 
         static async Task HandleMouseWheelCoreAsync(
             int steps,
-            ConsoleModifiers modifiers,
+            bool hasModifiers,
             bool isHorizontal)
         {
             if (steps == 0 ||
                 isHorizontal ||
-                modifiers != 0 ||
-                IsInCommandInput() ||
+                hasModifiers ||
                 HasActivePopup() ||
                 OverlaySink is not { } overlaySink)
             {
                 return;
             }
 
-            var key = steps > 0 ? ConsoleKey.UpArrow : ConsoleKey.DownArrow;
-            var keyInfo = new ConsoleKeyInfo('\0', key, shift: false, alt: false, control: false);
+            var command = steps > 0 ? Command.Up : Command.Down;
             for (var remaining = Math.Abs(steps); remaining > 0; remaining--)
-                await overlaySink.TryHandleWorkspaceKeyAsync(keyInfo);
+                await overlaySink.TryHandleWorkspaceCommandAsync(command);
         }
 
-        internal static async Task HandleKeyAsync(ConsoleKeyInfo keyInfo)
+        internal static async Task<bool> HandleKeyAsync(Key key)
         {
             await dispatchGate.WaitAsync();
             try
             {
-                await HandleKeyCoreAsync(keyInfo);
+                return await HandleKeyCoreAsync(key);
             }
             finally
             {
@@ -274,338 +247,48 @@ namespace UmamusumeResponseAnalyzer
             }
         }
 
-        static async Task HandleKeyCoreAsync(ConsoleKeyInfo keyInfo)
+        static async Task<bool> HandleKeyCoreAsync(Key key)
         {
-            if (IsInCommandInput())
-            {
-                await HandleCommandInputKeyAsync(keyInfo);
-                return;
-            }
-
-            if (await TryHandlePopupShortcutAsync(keyInfo))
-                return;
+            if (await TryHandlePopupShortcutAsync(key))
+                return true;
 
             var hasActivePopup = HasActivePopup();
-            if (hasActivePopup && await HandlePopupKeyAsync(keyInfo))
-                return;
+            if (hasActivePopup && await HandlePopupKeyAsync(key))
+                return true;
 
-            if (await TryHandleNotificationShortcutAsync(keyInfo))
-                return;
+            if (await TryHandleNotificationShortcutAsync(key))
+                return true;
 
             if (!hasActivePopup &&
                 OverlaySink is { } overlaySink &&
-                await overlaySink.TryHandleWorkspaceKeyAsync(keyInfo))
-                return;
+                TryGetWorkspaceCommand(key, out var workspaceCommand) &&
+                await overlaySink.TryHandleWorkspaceCommandAsync(workspaceCommand))
+                return true;
 
-            if (await TryHandleHotkeyAsync(keyInfo))
-                return;
-
-            if (!hasActivePopup)
-                TryBeginCommandInput(keyInfo);
+            return await TryHandleHotkeyAsync(key);
         }
 
-        static async Task HandleCommandInputKeyAsync(ConsoleKeyInfo keyInfo)
+        static bool TryGetWorkspaceCommand(Key key, out Command command)
         {
-            switch (keyInfo.Key)
+            command = key.KeyCode switch
             {
-                case ConsoleKey.Enter:
-                    var (command, handler) = EndCommandInputForSubmit();
-                    if (handler is not null && !string.IsNullOrWhiteSpace(command))
-                        await InvokeSafely(() => handler(command));
-                    break;
-
-                case ConsoleKey.Escape:
-                    CancelCommandInput();
-                    break;
-
-                case ConsoleKey.Backspace:
-                    if (!RemoveLastCommandInputChar())
-                        CancelCommandInput();
-                    break;
-
-                case ConsoleKey.UpArrow:
-                    MoveCommandHistory(-1);
-                    break;
-
-                case ConsoleKey.DownArrow:
-                    MoveCommandHistory(1);
-                    break;
-
-                case ConsoleKey.Tab:
-                    CompleteCommandInput();
-                    break;
-
-                default:
-                    if (!char.IsControl(keyInfo.KeyChar))
-                        AppendCommandInput(keyInfo.KeyChar);
-                    break;
-            }
+                KeyCode.CursorUp => Command.Up,
+                KeyCode.CursorDown => Command.Down,
+                KeyCode.PageUp => Command.PageUp,
+                KeyCode.PageDown => Command.PageDown,
+                KeyCode.Home => Command.Start,
+                KeyCode.End => Command.End,
+                _ => Command.NotBound
+            };
+            return command != Command.NotBound;
         }
 
-        static bool TryBeginCommandInput(ConsoleKeyInfo keyInfo)
+        static async Task<bool> TryHandleHotkeyAsync(Key key)
         {
-            if (keyInfo.Modifiers != 0)
+            if (hotkeys.IsEmpty)
                 return false;
 
-            if (keyInfo.Key == ConsoleKey.Enter)
-            {
-                BeginCommandInput(string.Empty);
-                return true;
-            }
-
-            if (keyInfo.Key is ConsoleKey.Oem2 or ConsoleKey.Divide && keyInfo.KeyChar == '/')
-            {
-                BeginCommandInput("/");
-                return true;
-            }
-
-            return false;
-        }
-
-        static bool IsInCommandInput()
-        {
-            lock (commandInputSync)
-                return inCommandInput;
-        }
-
-        static void BeginCommandInput(string initialText)
-        {
-            HidePopup();
-            lock (commandInputSync)
-            {
-                inCommandInput = true;
-                commandBuffer = initialText;
-                commandHistoryIndex = commandHistory.Count;
-                commandDraft = initialText;
-            }
-
-            OverlaySink?.ShowCommandInput(new KeyboardCommandInput(initialText));
-        }
-
-        static void AppendCommandInput(char keyChar)
-        {
-            string text;
-            lock (commandInputSync)
-            {
-                if (!inCommandInput)
-                    return;
-
-                commandBuffer += keyChar;
-                text = commandBuffer;
-                ResetCommandHistoryNavigationLocked(text);
-            }
-
-            OverlaySink?.ShowCommandInput(new KeyboardCommandInput(text));
-        }
-
-        static bool RemoveLastCommandInputChar()
-        {
-            string text;
-            lock (commandInputSync)
-            {
-                if (!inCommandInput || commandBuffer.Length == 0)
-                    return false;
-
-                commandBuffer = commandBuffer[..^1];
-                text = commandBuffer;
-                ResetCommandHistoryNavigationLocked(text);
-            }
-
-            OverlaySink?.ShowCommandInput(new KeyboardCommandInput(text));
-            return true;
-        }
-
-        static void MoveCommandHistory(int delta)
-        {
-            string text;
-            lock (commandInputSync)
-            {
-                if (!inCommandInput || commandHistory.Count == 0)
-                    return;
-
-                if (delta < 0)
-                {
-                    if (commandHistoryIndex == commandHistory.Count)
-                        commandDraft = commandBuffer;
-
-                    commandHistoryIndex = Math.Max(0, commandHistoryIndex - 1);
-                    commandBuffer = commandHistory[commandHistoryIndex];
-                }
-                else
-                {
-                    if (commandHistoryIndex >= commandHistory.Count)
-                        return;
-
-                    commandHistoryIndex++;
-                    commandBuffer = commandHistoryIndex == commandHistory.Count
-                        ? commandDraft
-                        : commandHistory[commandHistoryIndex];
-                }
-
-                text = commandBuffer;
-            }
-
-            OverlaySink?.ShowCommandInput(new KeyboardCommandInput(text));
-        }
-
-        static void CompleteCommandInput()
-        {
-            string text;
-            Func<string, IReadOnlyList<string>>? provider;
-            lock (commandInputSync)
-            {
-                if (!inCommandInput)
-                    return;
-
-                text = commandBuffer;
-                provider = commandCompletionProvider;
-            }
-
-            if (provider is null)
-            {
-                ClearCommandCompletionCandidates();
-                return;
-            }
-
-            IReadOnlyList<string> candidates;
-            try
-            {
-                candidates = provider(text);
-            }
-            catch (Exception ex)
-            {
-                LiveDisplayConsole.Notify("Keyboard", $"命令补全失败: {ex.Message}", LiveDisplaySeverity.Error);
-                LiveDisplayConsole.LogException("Keyboard", ex);
-                ClearCommandCompletionCandidates();
-                return;
-            }
-
-            ApplyCommandCompletion(text, candidates);
-        }
-
-        static void ApplyCommandCompletion(string originalText, IReadOnlyList<string> candidates)
-        {
-            string text;
-            IReadOnlyList<string> shownCandidates = [];
-            lock (commandInputSync)
-            {
-                if (!inCommandInput || commandBuffer != originalText)
-                    return;
-
-                if (candidates.Count == 0)
-                {
-                    text = commandBuffer;
-                }
-                else if (candidates.Count == 1)
-                {
-                    commandBuffer = candidates[0];
-                    text = commandBuffer;
-                    ResetCommandHistoryNavigationLocked(text);
-                }
-                else
-                {
-                    var commonPrefix = LongestCommonPrefix(candidates);
-                    if (commonPrefix.Length > commandBuffer.Length)
-                        commandBuffer = commonPrefix;
-
-                    text = commandBuffer;
-                    shownCandidates = candidates.ToArray();
-                    ResetCommandHistoryNavigationLocked(text);
-                }
-            }
-
-            OverlaySink?.ShowCommandInput(new KeyboardCommandInput(text, shownCandidates));
-        }
-
-        static (string Command, Func<string, Task>? Handler) EndCommandInputForSubmit()
-        {
-            string command;
-            Func<string, Task>? handler;
-            lock (commandInputSync)
-            {
-                command = commandBuffer;
-                if (!string.IsNullOrWhiteSpace(command))
-                    commandHistory.Add(command);
-                commandBuffer = string.Empty;
-                inCommandInput = false;
-                handler = commandHandler;
-                commandHistoryIndex = commandHistory.Count;
-                commandDraft = string.Empty;
-            }
-
-            OverlaySink?.HideCommandInput();
-            return (command, handler);
-        }
-
-        static void CancelCommandInput()
-        {
-            var shouldHide = false;
-            lock (commandInputSync)
-            {
-                if (inCommandInput || commandBuffer.Length > 0)
-                    shouldHide = true;
-
-                inCommandInput = false;
-                commandBuffer = string.Empty;
-                commandHistoryIndex = commandHistory.Count;
-                commandDraft = string.Empty;
-            }
-
-            if (shouldHide)
-                OverlaySink?.HideCommandInput();
-        }
-
-        static void ClearCommandHistory()
-        {
-            lock (commandInputSync)
-            {
-                commandHistory.Clear();
-                commandHistoryIndex = 0;
-                commandDraft = string.Empty;
-            }
-        }
-
-        static void ClearCommandCompletionCandidates()
-        {
-            string text;
-            lock (commandInputSync)
-            {
-                if (!inCommandInput)
-                    return;
-
-                text = commandBuffer;
-            }
-
-            OverlaySink?.ShowCommandInput(new KeyboardCommandInput(text));
-        }
-
-        static void ResetCommandHistoryNavigationLocked(string text)
-        {
-            commandHistoryIndex = commandHistory.Count;
-            commandDraft = text;
-        }
-
-        static string LongestCommonPrefix(IReadOnlyList<string> values)
-        {
-            if (values.Count == 0)
-                return string.Empty;
-
-            var prefix = values[0];
-            for (var i = 1; i < values.Count && prefix.Length > 0; i++)
-            {
-                var value = values[i];
-                var length = Math.Min(prefix.Length, value.Length);
-                var j = 0;
-                while (j < length && prefix[j] == value[j])
-                    j++;
-                prefix = prefix[..j];
-            }
-
-            return prefix;
-        }
-
-        static async Task<bool> TryHandleHotkeyAsync(ConsoleKeyInfo keyInfo)
-        {
+            var keyInfo = ConsoleKeyMapping.GetConsoleKeyInfoFromKeyCode(key.KeyCode);
             var combo = (keyInfo.Key, keyInfo.Modifiers);
             if (!hotkeys.TryGetValue(combo, out var entry))
                 return false;
@@ -615,15 +298,17 @@ namespace UmamusumeResponseAnalyzer
             return true;
         }
 
-        static async Task<bool> TryHandlePopupShortcutAsync(ConsoleKeyInfo keyInfo)
+        static async Task<bool> TryHandlePopupShortcutAsync(Key key)
         {
             HotkeyEntry? entry;
             lock (popupSync)
             {
-                entry = activePopup is null
-                    ? null
-                    : popupShortcuts.LastOrDefault(x =>
-                        x.Key == keyInfo.Key && x.Modifiers == keyInfo.Modifiers)?.Entry;
+                if (activePopup is null || popupShortcuts.Count == 0)
+                    return false;
+
+                var keyInfo = ConsoleKeyMapping.GetConsoleKeyInfoFromKeyCode(key.KeyCode);
+                entry = popupShortcuts.LastOrDefault(x =>
+                    x.Key == keyInfo.Key && x.Modifiers == keyInfo.Modifiers)?.Entry;
             }
 
             if (entry is null)
@@ -633,13 +318,17 @@ namespace UmamusumeResponseAnalyzer
             return true;
         }
 
-        static async Task<bool> TryHandleNotificationShortcutAsync(ConsoleKeyInfo keyInfo)
+        static async Task<bool> TryHandleNotificationShortcutAsync(Key key)
         {
             HotkeyEntry? entry = null;
             var latestRegistrationId = 0L;
             lock (notificationShortcutSync)
             {
                 RemoveExpiredNotificationShortcutsLocked(DateTimeOffset.Now);
+                if (notificationShortcutRegistrations.Count == 0)
+                    return false;
+
+                var keyInfo = ConsoleKeyMapping.GetConsoleKeyInfoFromKeyCode(key.KeyCode);
                 foreach (var registration in notificationShortcutRegistrations.Values)
                 {
                     if (registration.Id <= latestRegistrationId)
@@ -662,43 +351,43 @@ namespace UmamusumeResponseAnalyzer
             return true;
         }
 
-        static async Task<bool> HandlePopupKeyAsync(ConsoleKeyInfo keyInfo)
+        static async Task<bool> HandlePopupKeyAsync(Key key)
         {
-            if (keyInfo.Modifiers != 0)
+            if (key.IsCtrl || key.IsAlt || key.IsShift)
                 return false;
 
             if (HasSelectablePopup())
-                return await HandleSelectablePopupKeyAsync(keyInfo);
+                return await HandleSelectablePopupKeyAsync(key);
 
-            switch (keyInfo.Key)
+            switch (key.KeyCode)
             {
-                case ConsoleKey.Spacebar:
-                case ConsoleKey.Enter:
-                case ConsoleKey.Escape:
+                case KeyCode.Space:
+                case KeyCode.Enter:
+                case KeyCode.Esc:
                     HidePopup();
                     return true;
 
-                case ConsoleKey.UpArrow:
+                case KeyCode.CursorUp:
                     ScrollPopup(-1);
                     return true;
 
-                case ConsoleKey.DownArrow:
+                case KeyCode.CursorDown:
                     ScrollPopup(1);
                     return true;
 
-                case ConsoleKey.PageUp:
+                case KeyCode.PageUp:
                     ScrollPopup(-5);
                     return true;
 
-                case ConsoleKey.PageDown:
+                case KeyCode.PageDown:
                     ScrollPopup(5);
                     return true;
 
-                case ConsoleKey.Home:
+                case KeyCode.Home:
                     SetPopupScroll(0);
                     return true;
 
-                case ConsoleKey.End:
+                case KeyCode.End:
                     SetPopupScroll(int.MaxValue);
                     return true;
 
@@ -707,40 +396,40 @@ namespace UmamusumeResponseAnalyzer
             }
         }
 
-        static async Task<bool> HandleSelectablePopupKeyAsync(ConsoleKeyInfo keyInfo)
+        static async Task<bool> HandleSelectablePopupKeyAsync(Key key)
         {
-            switch (keyInfo.Key)
+            switch (key.KeyCode)
             {
-                case ConsoleKey.Enter:
+                case KeyCode.Enter:
                     await ConfirmPopupSelectionAsync();
                     return true;
 
-                case ConsoleKey.Spacebar:
-                case ConsoleKey.Escape:
+                case KeyCode.Space:
+                case KeyCode.Esc:
                     HidePopup();
                     return true;
 
-                case ConsoleKey.UpArrow:
+                case KeyCode.CursorUp:
                     MovePopupSelection(-1);
                     return true;
 
-                case ConsoleKey.DownArrow:
+                case KeyCode.CursorDown:
                     MovePopupSelection(1);
                     return true;
 
-                case ConsoleKey.PageUp:
+                case KeyCode.PageUp:
                     MovePopupSelection(-5);
                     return true;
 
-                case ConsoleKey.PageDown:
+                case KeyCode.PageDown:
                     MovePopupSelection(5);
                     return true;
 
-                case ConsoleKey.Home:
+                case KeyCode.Home:
                     SetPopupSelection(0);
                     return true;
 
-                case ConsoleKey.End:
+                case KeyCode.End:
                     SetPopupSelection(int.MaxValue);
                     return true;
 

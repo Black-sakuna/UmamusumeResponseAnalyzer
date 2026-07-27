@@ -32,9 +32,11 @@ internal sealed class BootstrapWorkspace
         this.uiHost = uiHost;
         Workspace = uiHost.CreateWorkspace("启动");
         uiHost.BindWorkspaceHotkey(Workspace, ConsoleKey.B, ConsoleModifiers.Control, "启动信息");
+        uiHost.LogAdded += OnLogAdded;
         RefreshLocked();
         uiHost.RemoveWorkspaceWhenAnotherPanelActivates(Workspace, () =>
         {
+            uiHost.LogAdded -= OnLogAdded;
             if (LiveDisplayConsole.DefaultLogWorkspace == Workspace)
                 LiveDisplayConsole.DefaultLogWorkspace = null;
         });
@@ -72,16 +74,20 @@ internal sealed class BootstrapWorkspace
     }
 
     public void Log(string source, string text, LiveDisplaySeverity severity = LiveDisplaySeverity.Info)
+        => uiHost.Log(new LiveDisplayLogLine(Workspace, source, text, severity));
+
+    void OnLogAdded(LiveDisplayLogLine line)
     {
+        if (!ReferenceEquals(line.Workspace, Workspace))
+            return;
+
         lock (gate)
         {
-            logs.Add(new(SeverityLabel(severity), source, text));
+            logs.Add(new(SeverityLabel(line.Severity), line.PluginId, line.Text));
             if (logs.Count > MaxLogRows)
                 logs.RemoveRange(0, logs.Count - MaxLogRows);
             RefreshLocked();
         }
-
-        uiHost.Log(new LiveDisplayLogLine(Workspace, source, text, severity));
     }
 
     void RefreshLocked()
@@ -199,6 +205,7 @@ internal sealed class BootstrapDashboardView : View
             Height = Dim.Fill(),
             ShowMarks = false,
             MarkMultiple = false,
+            KeystrokeNavigator = null,
             ViewportSettings = ViewportSettingsFlags.HasScrollBars
         };
         logList.SetSource(new ObservableCollection<string>(
@@ -295,6 +302,7 @@ internal sealed class BootstrapDashboardView : View
             MultiSelect = false,
             UseAllRowsForContentCalculation = true,
             MaxCellWidth = int.MaxValue,
+            CollectionNavigator = null,
             ViewportSettings = ViewportSettingsFlags.HasScrollBars
         };
         table.Style.AlwaysShowHeaders = true;

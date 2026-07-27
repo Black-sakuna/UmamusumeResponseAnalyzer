@@ -1,4 +1,6 @@
 using Terminal.Gui.App;
+using Terminal.Gui.Drivers;
+using Terminal.Gui.Input;
 using UmamusumeResponseAnalyzer.LiveDisplay;
 using Xunit;
 
@@ -25,7 +27,6 @@ public sealed class KeyboardManagerTests : IDisposable
     static void ResetKeyboardManager()
     {
         KeyboardManager.UnregisterAll();
-        KeyboardManager.SetCommandHandler(null);
         KeyboardManager.OverlaySink = null;
         KeyboardManager.PopupAutoCloseDelay = TimeSpan.FromSeconds(3);
         LiveDisplayConsole.UnbindForTests();
@@ -99,70 +100,24 @@ public sealed class KeyboardManagerTests : IDisposable
                 return Task.CompletedTask;
             })));
 
-        await PressAsync(ConsoleKey.DownArrow);
-        await PressAsync(ConsoleKey.DownArrow);
+        await PressAsync(KeyCode.CursorDown);
+        await PressAsync(KeyCode.CursorDown);
 
         Assert.Equal(1, sink.Popup?.Selection?.SelectedIndex);
         Assert.Equal(1, sink.Popup?.ScrollOffset);
 
-        await PressAsync(ConsoleKey.Enter);
+        await PressAsync(KeyCode.Enter);
 
         Assert.Equal(2, confirmedLine);
         Assert.Null(sink.Popup);
     }
 
     [Fact]
-    public async Task CommandInput_SubmitsHistoryAndCompletesWithoutLeakingToHotkeys()
-    {
-        var sink = new RecordingOverlaySink();
-        KeyboardManager.OverlaySink = sink;
-        var submitted = new List<string>();
-        var hotkeyInvocations = 0;
-        KeyboardManager.SetCommandHandler(
-            command =>
-            {
-                submitted.Add(command);
-                return Task.CompletedTask;
-            },
-            input => input == "/wor" ? ["/workspace", "/worktree"] : []);
-        KeyboardManager.Register(
-            ConsoleKey.K,
-            ConsoleModifiers.Control,
-            "must not run in command mode",
-            () =>
-            {
-                hotkeyInvocations++;
-                return Task.CompletedTask;
-            });
-
-        await TypeAsync('/', ConsoleKey.Oem2);
-        await TypeAsync('w', ConsoleKey.W);
-        await TypeAsync('o', ConsoleKey.O);
-        await TypeAsync('r', ConsoleKey.R);
-        await PressAsync(ConsoleKey.Tab);
-
-        Assert.Equal("/work", sink.CommandInput?.Text);
-        Assert.Equal(["/workspace", "/worktree"], sink.CommandInput?.CompletionCandidates);
-
-        await PressAsync(ConsoleKey.K, ConsoleModifiers.Control);
-        await PressAsync(ConsoleKey.Enter);
-        await PressAsync(ConsoleKey.Enter);
-        await PressAsync(ConsoleKey.UpArrow);
-
-        Assert.Equal(0, hotkeyInvocations);
-        Assert.Equal(["/work"], submitted);
-        Assert.Equal("/work", sink.CommandInput?.Text);
-
-        await PressAsync(ConsoleKey.Escape);
-        Assert.Null(sink.CommandInput);
-    }
-
-    [Fact]
-    public async Task InputPriority_IsCommandPopupNotificationWorkspaceThenPersistent()
+    public async Task InputPriority_IsPopupNotificationWorkspaceThenPersistent()
     {
         var sink = new RecordingOverlaySink
         {
-            HandleWorkspaceKey = key => key.Key == ConsoleKey.UpArrow
+            HandleWorkspaceCommand = command => command == Command.Up
         };
         KeyboardManager.OverlaySink = sink;
         KeyboardManager.PopupAutoCloseDelay = TimeSpan.Zero;
@@ -187,7 +142,6 @@ public sealed class KeyboardManagerTests : IDisposable
                 return Task.CompletedTask;
             })]);
 
-        await PressAsync(ConsoleKey.Enter);
         KeyboardManager.ShowPopup(new KeyboardHandlerContext()
             .WriteLine("popup")
             .BindShortcut(new LiveDisplayShortcut(ConsoleKey.F8, () =>
@@ -196,23 +150,19 @@ public sealed class KeyboardManagerTests : IDisposable
                 return Task.CompletedTask;
             })));
 
-        await PressAsync(ConsoleKey.F8);
-        await PressAsync(ConsoleKey.Escape);
-        Assert.Empty(calls);
-
-        await PressAsync(ConsoleKey.F8);
+        await PressAsync(KeyCode.F8);
         Assert.Equal(["popup"], calls);
 
-        await PressAsync(ConsoleKey.Escape);
-        await PressAsync(ConsoleKey.F8);
+        await PressAsync(KeyCode.Esc);
+        await PressAsync(KeyCode.F8);
         Assert.Equal(["popup", "notification"], calls);
 
         KeyboardManager.UnregisterNotificationShortcuts(notification);
-        await PressAsync(ConsoleKey.UpArrow);
-        await PressAsync(ConsoleKey.F8);
+        await PressAsync(KeyCode.CursorUp);
+        await PressAsync(KeyCode.F8);
 
         Assert.Equal(["popup", "notification", "persistent"], calls);
-        Assert.Equal(ConsoleKey.UpArrow, Assert.Single(sink.WorkspaceKeys).Key);
+        Assert.Equal(Command.Up, Assert.Single(sink.WorkspaceCommands));
     }
 
     [Fact]
@@ -238,7 +188,7 @@ public sealed class KeyboardManagerTests : IDisposable
             })]);
         KeyboardManager.ShowPopup(new KeyboardHandlerContext().WriteLine("popup"));
 
-        await PressAsync(ConsoleKey.Enter);
+        await PressAsync(KeyCode.Enter);
 
         Assert.Null(sink.Popup);
         Assert.Equal((0, 0), (notification, persistent));
@@ -268,13 +218,13 @@ public sealed class KeyboardManagerTests : IDisposable
                 },
                 ConsoleModifiers.Control)));
 
-        await PressAsync(ConsoleKey.K, ConsoleModifiers.Control);
-        await PressAsync(ConsoleKey.K, ConsoleModifiers.Alt);
+        await PressAsync(KeyCode.K | KeyCode.CtrlMask);
+        await PressAsync(KeyCode.K | KeyCode.AltMask);
 
         Assert.Equal((1, 0), (transient, persistent));
         Assert.NotNull(sink.Popup);
 
-        await PressAsync(ConsoleKey.K);
+        await PressAsync(KeyCode.K);
         Assert.Equal((1, 1), (transient, persistent));
         Assert.Null(sink.Popup);
     }
@@ -300,9 +250,9 @@ public sealed class KeyboardManagerTests : IDisposable
                 return Task.CompletedTask;
             })]);
 
-        await PressAsync(ConsoleKey.F9);
+        await PressAsync(KeyCode.F9);
         await Task.Delay(120, TestContext.Current.CancellationToken);
-        await PressAsync(ConsoleKey.F9);
+        await PressAsync(KeyCode.F9);
 
         Assert.Equal(["new", "old"], calls);
     }
@@ -310,21 +260,21 @@ public sealed class KeyboardManagerTests : IDisposable
     [Fact]
     public async Task MouseWheel_UsesTerminalGuiStepsAndSuppressesNonVerticalOrModifiedInput()
     {
-        var sink = new RecordingOverlaySink { HandleWorkspaceKey = _ => true };
+        var sink = new RecordingOverlaySink { HandleWorkspaceCommand = _ => true };
         KeyboardManager.OverlaySink = sink;
 
-        await KeyboardManager.HandleMouseWheelAsync(2, 0);
-        await KeyboardManager.HandleMouseWheelAsync(-2, 0);
-        await KeyboardManager.HandleMouseWheelAsync(1, ConsoleModifiers.Shift);
-        await KeyboardManager.HandleMouseWheelAsync(1, 0, isHorizontal: true);
+        await KeyboardManager.HandleMouseWheelAsync(2, hasModifiers: false);
+        await KeyboardManager.HandleMouseWheelAsync(-2, hasModifiers: false);
+        await KeyboardManager.HandleMouseWheelAsync(1, hasModifiers: true);
+        await KeyboardManager.HandleMouseWheelAsync(1, hasModifiers: false, isHorizontal: true);
 
         Assert.Equal(
-            [ConsoleKey.UpArrow, ConsoleKey.UpArrow, ConsoleKey.DownArrow, ConsoleKey.DownArrow],
-            sink.WorkspaceKeys.Select(key => key.Key));
+            [Command.Up, Command.Up, Command.Down, Command.Down],
+            sink.WorkspaceCommands);
 
         KeyboardManager.ShowPopup(new KeyboardHandlerContext().WriteLine("popup"));
-        await KeyboardManager.HandleMouseWheelAsync(1, 0);
-        Assert.Equal(4, sink.WorkspaceKeys.Count);
+        await KeyboardManager.HandleMouseWheelAsync(1, hasModifiers: false);
+        Assert.Equal(4, sink.WorkspaceCommands.Count);
     }
 
     [Fact]
@@ -337,8 +287,8 @@ public sealed class KeyboardManagerTests : IDisposable
             throw new InvalidOperationException("boom");
         });
 
-        Assert.Null(await Record.ExceptionAsync(() => PressAsync(ConsoleKey.F10)));
-        Assert.Null(await Record.ExceptionAsync(() => PressAsync(ConsoleKey.F10)));
+        Assert.Null(await Record.ExceptionAsync(() => PressAsync(KeyCode.F10)));
+        Assert.Null(await Record.ExceptionAsync(() => PressAsync(KeyCode.F10)));
         Assert.Equal(2, attempts);
     }
 
@@ -369,50 +319,33 @@ public sealed class KeyboardManagerTests : IDisposable
             }));
 
         output.RemoveWorkspace(removed);
-        await PressAsync(ConsoleKey.F7);
-        await PressAsync(ConsoleKey.F8);
+        await PressAsync(KeyCode.F7);
+        await PressAsync(KeyCode.F8);
 
         Assert.Equal(["kept"], calls);
     }
 
-    static Task PressAsync(ConsoleKey key, ConsoleModifiers modifiers = 0)
-        => KeyboardManager.HandleKeyAsync(new ConsoleKeyInfo(
-            '\0',
-            key,
-            modifiers.HasFlag(ConsoleModifiers.Shift),
-            modifiers.HasFlag(ConsoleModifiers.Alt),
-            modifiers.HasFlag(ConsoleModifiers.Control)));
-
-    static Task TypeAsync(char keyChar, ConsoleKey key, ConsoleModifiers modifiers = 0)
-        => KeyboardManager.HandleKeyAsync(new ConsoleKeyInfo(
-            keyChar,
-            key,
-            modifiers.HasFlag(ConsoleModifiers.Shift),
-            modifiers.HasFlag(ConsoleModifiers.Alt),
-            modifiers.HasFlag(ConsoleModifiers.Control)));
+    static Task PressAsync(KeyCode keyCode) => KeyboardManager.HandleKeyAsync(new Key(keyCode));
 
     sealed class RecordingOverlaySink : IKeyboardOverlaySink
     {
-        readonly List<ConsoleKeyInfo> workspaceKeys = [];
+        readonly List<Command> workspaceCommands = [];
 
         public int PopupVisibleLineCount { get; init; } = 10;
-        public Func<ConsoleKeyInfo, bool>? HandleWorkspaceKey { get; init; }
-        public IReadOnlyList<ConsoleKeyInfo> WorkspaceKeys => workspaceKeys;
+        public Func<Command, bool>? HandleWorkspaceCommand { get; init; }
+        public IReadOnlyList<Command> WorkspaceCommands => workspaceCommands;
         public KeyboardPopup? Popup { get; private set; }
-        public KeyboardCommandInput? CommandInput { get; private set; }
 
-        public Task<bool> TryHandleWorkspaceKeyAsync(ConsoleKeyInfo keyInfo)
+        public Task<bool> TryHandleWorkspaceCommandAsync(Command command)
         {
-            if (HandleWorkspaceKey?.Invoke(keyInfo) != true)
+            if (HandleWorkspaceCommand?.Invoke(command) != true)
                 return Task.FromResult(false);
 
-            workspaceKeys.Add(keyInfo);
+            workspaceCommands.Add(command);
             return Task.FromResult(true);
         }
 
         public void ShowPopup(KeyboardPopup popup, int generation) => Popup = popup;
         public void HidePopup(int generation) => Popup = null;
-        public void ShowCommandInput(KeyboardCommandInput input) => CommandInput = input;
-        public void HideCommandInput() => CommandInput = null;
     }
 }

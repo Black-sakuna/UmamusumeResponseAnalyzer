@@ -50,7 +50,6 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         string[] workspaceCompletionTitles = [];
         KeyboardPopup? keyboardPopup;
         int keyboardPopupGeneration;
-        KeyboardCommandInput? commandInput;
         int lastViewportWidth;
         int lastViewportHeight;
         int lastViewportMaxScroll;
@@ -63,7 +62,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         View? workspaceLayer;
         Label? notificationLayer;
         Label? keyboardLayer;
-        Label? commandLayer;
+        CommandModeView? commandMode;
         WorkspaceLayoutBuilder.WorkspaceSurface? workspaceSurface;
         object? popupTimer;
         int acceptingEvents = 1;
@@ -73,6 +72,8 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         {
             this.application = application ?? throw new ArgumentNullException(nameof(application));
         }
+
+        internal event Action<LiveDisplayLogLine>? LogAdded;
 
         public ILiveDisplayOutput ForPlugin(string pluginId) => new PluginLiveDisplayOutput(pluginId, this);
         public LiveDisplayWorkspace? CurrentWorkspace => Volatile.Read(ref currentWorkspace);
@@ -272,20 +273,18 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
 
         void IKeyboardOverlaySink.ShowPopup(KeyboardPopup popup, int generation) => Post(new UiEvent.ShowPopup(popup, generation));
         void IKeyboardOverlaySink.HidePopup(int generation) => Post(new UiEvent.HidePopup(generation));
-        void IKeyboardOverlaySink.ShowCommandInput(KeyboardCommandInput input) => Post(new UiEvent.ShowCommandInput(input));
-        void IKeyboardOverlaySink.HideCommandInput() => Post(new UiEvent.HideCommandInput());
         int IKeyboardOverlaySink.PopupVisibleLineCount => Volatile.Read(ref popupVisibleLineCount);
-        Task<bool> IKeyboardOverlaySink.TryHandleWorkspaceKeyAsync(ConsoleKeyInfo keyInfo)
+        Task<bool> IKeyboardOverlaySink.TryHandleWorkspaceCommandAsync(Command command)
         {
-            if (keyInfo.Modifiers != 0 || keyInfo.Key is not (
-                ConsoleKey.UpArrow or ConsoleKey.DownArrow or ConsoleKey.PageUp or ConsoleKey.PageDown or
-                ConsoleKey.Home or ConsoleKey.End))
+            if (command is not (
+                Command.Up or Command.Down or Command.PageUp or Command.PageDown or
+                Command.Start or Command.End))
             {
                 return Task.FromResult(false);
             }
 
             var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            if (!Post(new UiEvent.NavigateWorkspace(keyInfo.Key, completion)))
+            if (!Post(new UiEvent.NavigateWorkspace(command, completion)))
                 completion.TrySetResult(false);
             else if (!IsRunning)
                 DrainEvents();
@@ -320,8 +319,10 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             workspaceLayer = CreateLayer(transparent: false, canFocus: true);
             notificationLayer = CreateOverlayLabel();
             keyboardLayer = CreateOverlayLabel();
-            commandLayer = CreateOverlayLabel();
-            window.Add(workspaceLayer, notificationLayer, keyboardLayer, commandLayer);
+            commandMode = new(
+                command => TrackInputTask(HandleCommandAsync(command)),
+                CompleteCommand);
+            window.Add(workspaceLayer, notificationLayer, keyboardLayer, commandMode);
             window.Initialized += WindowInitialized;
             window.ViewportChanged += WindowViewportChanged;
             window.KeyDownNotHandled += WindowKeyDownNotHandled;
@@ -371,7 +372,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 workspaceLayer = null;
                 notificationLayer = null;
                 keyboardLayer = null;
-                commandLayer = null;
+                commandMode = null;
                 workspaceSurface = null;
             }
         }
@@ -425,13 +426,13 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
 
             if (window is null ||
                 !ReferenceEquals(application.TopRunnableView, window) ||
-                !KeyboardManager.HasPriorityInput)
+                !KeyboardManager.HasPriorityPopup)
             {
                 return;
             }
 
             key.Handled = true;
-            TrackInputTask(DispatchKeyAsync(ConsoleKeyMapping.GetConsoleKeyInfoFromKeyCode(key.KeyCode)));
+            TrackInputTask(DispatchKeyAsync(key));
         }
 
         void WindowKeyDownNotHandled(object? sender, Key key)
@@ -446,8 +447,22 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 return;
             }
 
+            if (commandMode is { IsOpen: true })
+            {
+                key.Handled = true;
+                return;
+            }
+
+            var opensCommandMode = commandMode is not null &&
+                ((!key.IsCtrl && !key.IsAlt && key.TryGetPrintableRune(out var rune) && rune.Value == '/') ||
+                 key.KeyCode == Key.Enter.KeyCode);
+            var inputKey = new Key(key);
             key.Handled = true;
-            TrackInputTask(DispatchKeyAsync(ConsoleKeyMapping.GetConsoleKeyInfoFromKeyCode(key.KeyCode)));
+            TrackInputTask(opensCommandMode
+                ? DispatchKeyOrOpenCommandAsync(
+                    inputKey,
+                    inputKey.KeyCode == Key.Enter.KeyCode ? string.Empty : "/")
+                : DispatchKeyAsync(inputKey));
         }
 
         void WindowMouseEvent(object? sender, Mouse mouse)
@@ -461,14 +476,20 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 : flags.HasFlag(MouseFlags.WheeledRight) ? -1 : 0;
             if (verticalDelta == 0 && horizontalDelta == 0)
                 return;
+            if (commandMode is { IsOpen: true })
+            {
+                mouse.Handled = true;
+                return;
+            }
 
-            var modifiers = (flags.HasFlag(MouseFlags.Shift) ? ConsoleModifiers.Shift : 0) |
-                (flags.HasFlag(MouseFlags.Ctrl) ? ConsoleModifiers.Control : 0) |
-                (flags.HasFlag(MouseFlags.Alt) ? ConsoleModifiers.Alt : 0);
+            var hasModifiers =
+                flags.HasFlag(MouseFlags.Shift) ||
+                flags.HasFlag(MouseFlags.Ctrl) ||
+                flags.HasFlag(MouseFlags.Alt);
             mouse.Handled = true;
             TrackInputTask(DispatchMouseWheelAsync(
                 horizontalDelta != 0 ? horizontalDelta : verticalDelta,
-                modifiers,
+                hasModifiers,
                 horizontalDelta != 0));
         }
 
@@ -487,26 +508,43 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 TaskScheduler.Default);
         }
 
-        static async Task DispatchKeyAsync(ConsoleKeyInfo keyInfo)
+        async Task DispatchKeyOrOpenCommandAsync(Key key, string initialText)
+        {
+            if (await DispatchKeyAsync(key))
+                return;
+
+            application.Invoke(() =>
+            {
+                if (window is not null &&
+                    commandMode is not null &&
+                    ReferenceEquals(application.TopRunnableView, window))
+                {
+                    commandMode.Open(initialText, window.MostFocused);
+                }
+            });
+        }
+
+        static async Task<bool> DispatchKeyAsync(Key key)
         {
             try
             {
-                await KeyboardManager.HandleKeyAsync(keyInfo);
+                return await KeyboardManager.HandleKeyAsync(key);
             }
             catch (Exception ex)
             {
                 LiveDisplayConsole.WriteException(ex);
+                return true;
             }
         }
 
         static async Task DispatchMouseWheelAsync(
             int delta,
-            ConsoleModifiers modifiers,
+            bool hasModifiers,
             bool horizontal)
         {
             try
             {
-                await KeyboardManager.HandleMouseWheelAsync(delta, modifiers, horizontal);
+                await KeyboardManager.HandleMouseWheelAsync(delta, hasModifiers, horizontal);
             }
             catch (Exception ex)
             {
@@ -642,9 +680,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                     UiEvent.Log => UiChange.LogContent,
                     UiEvent.Notify or
                     UiEvent.ShowPopup or
-                    UiEvent.HidePopup or
-                    UiEvent.ShowCommandInput or
-                    UiEvent.HideCommandInput => UiChange.Overlays,
+                    UiEvent.HidePopup => UiChange.Overlays,
                     UiEvent.NavigateWorkspace => UiChange.LogContent,
                     _ => UiChange.None
                 };
@@ -709,6 +745,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                     if (log.Line.Workspace is not null)
                         RegisterKnownWorkspace(log.Line.Workspace);
                     AddLog(log.Line);
+                    LogAdded?.Invoke(log.Line);
                     break;
                 case UiEvent.Notify notify:
                     if (notify.Notification.Workspace is not null && IsRemovedWorkspace(notify.Notification.Workspace))
@@ -730,7 +767,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                     Volatile.Write(ref currentWorkspace, switchWorkspace.Workspace);
                     break;
                 case UiEvent.NavigateWorkspace navigateWorkspace:
-                    navigateWorkspace.Completion.TrySetResult(TryNavigateWorkspace(navigateWorkspace.Key));
+                    navigateWorkspace.Completion.TrySetResult(TryNavigateWorkspace(navigateWorkspace.Command));
                     break;
                 case UiEvent.RunCommand runCommand:
                     TrackInputTask(HandleCommandAsync(runCommand.Command));
@@ -748,13 +785,6 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                         keyboardPopup = null;
                         keyboardPopupGeneration = hidePopup.Generation;
                     }
-                    break;
-                case UiEvent.ShowCommandInput showCommandInput:
-                    keyboardPopup = null;
-                    commandInput = showCommandInput.Input;
-                    break;
-                case UiEvent.HideCommandInput:
-                    commandInput = null;
                     break;
                 case UiEvent.Shutdown:
                     shutdownRequested = true;
@@ -848,8 +878,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         {
             if (window is null ||
                 notificationLayer is null ||
-                keyboardLayer is null ||
-                commandLayer is null)
+                keyboardLayer is null)
             {
                 return;
             }
@@ -861,7 +890,6 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
 
             ResetOverlay(notificationLayer);
             ResetOverlay(keyboardLayer);
-            ResetOverlay(commandLayer);
 
             var popupWidth = NotificationPopupRenderer.GetPopupWidth(width);
             var now = DateTimeOffset.Now;
@@ -900,24 +928,8 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 keyboardLayer.Visible = true;
             }
 
-            if (commandInput is not null)
-            {
-                var lines = commandInput.CompletionCandidates
-                    .Take(Math.Max(0, height - 2))
-                    .Prepend("Command Mode")
-                    .Append($"> {commandInput.Text}")
-                    .ToArray();
-                commandLayer.Text = string.Join(Environment.NewLine, lines);
-                commandLayer.X = 0;
-                commandLayer.Y = Pos.AnchorEnd(Math.Max(1, lines.Length));
-                commandLayer.Width = Dim.Fill();
-                commandLayer.Height = Math.Max(1, lines.Length);
-                commandLayer.Visible = true;
-            }
-
             notificationLayer.SetNeedsDraw();
             keyboardLayer.SetNeedsDraw();
-            commandLayer.SetNeedsDraw();
         }
 
         View GetLivePanelView(LiveDisplayPanel panel)
@@ -968,7 +980,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 : workspace.Title;
         }
 
-        bool TryNavigateWorkspace(ConsoleKey key)
+        bool TryNavigateWorkspace(Command command)
         {
             if (activeWorkspace is null || !workspaces.TryGetValue(activeWorkspace, out var state))
                 return false;
@@ -978,14 +990,14 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
 
             var maxScroll = lastViewportMaxScroll;
             var currentOffset = Math.Clamp(state.ScrollOffset, 0, maxScroll);
-            var nextOffset = key switch
+            var nextOffset = command switch
             {
-                ConsoleKey.UpArrow => Math.Min(maxScroll, currentOffset + 1),
-                ConsoleKey.DownArrow => Math.Max(0, currentOffset - 1),
-                ConsoleKey.PageUp => Math.Min(maxScroll, currentOffset + lastViewportHeight),
-                ConsoleKey.PageDown => Math.Max(0, currentOffset - lastViewportHeight),
-                ConsoleKey.Home => maxScroll,
-                ConsoleKey.End => 0,
+                Command.Up => Math.Min(maxScroll, currentOffset + 1),
+                Command.Down => Math.Max(0, currentOffset - 1),
+                Command.PageUp => Math.Min(maxScroll, currentOffset + lastViewportHeight),
+                Command.PageDown => Math.Max(0, currentOffset - lastViewportHeight),
+                Command.Start => maxScroll,
+                Command.End => 0,
                 _ => currentOffset
             };
             workspaces[activeWorkspace] = state with { ScrollOffset = nextOffset };

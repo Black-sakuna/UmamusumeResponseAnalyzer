@@ -29,7 +29,6 @@ public sealed class PluginCommandLifecycleTests : IDisposable
         host = new(terminal.Application);
         terminal.RunOnOwnerThread(() => LiveDisplayConsole.Bind(host, terminal.Application));
         KeyboardManager.OverlaySink = host;
-        KeyboardManager.SetCommandHandler(host.HandleCommandAsync, host.CompleteCommand);
         PluginManager.BindLiveDisplay(terminal.Application, plugin => host.ForPlugin(plugin.Name));
     }
 
@@ -140,7 +139,6 @@ public sealed class PluginCommandLifecycleTests : IDisposable
     static void ResetKeyboardManager()
     {
         KeyboardManager.UnregisterAll();
-        KeyboardManager.SetCommandHandler(null);
         KeyboardManager.OverlaySink = null;
         KeyboardManager.PopupAutoCloseDelay = TimeSpan.FromSeconds(3);
         LiveDisplayConsole.UnbindForTests();

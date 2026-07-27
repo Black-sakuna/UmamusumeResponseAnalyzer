@@ -1,6 +1,7 @@
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using Terminal.Gui.App;
+using Terminal.Gui.Input;
 using UmamusumeResponseAnalyzer;
 using UmamusumeResponseAnalyzer.LiveDisplay;
 using UmamusumeResponseAnalyzer.Plugin;
@@ -363,22 +364,22 @@ namespace UmamusumeResponseAnalyzer.Tests
             PluginManager.Init();
             PluginManager.InitializeLoadedPlugins();
             var oldContext = new WeakReference(PluginManager.Contexts[pluginName]);
-            KeyboardManager.HandleKeyAsync(new ConsoleKeyInfo('\0', ConsoleKey.F8, false, false, false)).GetAwaiter().GetResult();
-            KeyboardManager.HandleKeyAsync(new ConsoleKeyInfo('\0', ConsoleKey.F7, false, false, false)).GetAwaiter().GetResult();
-            KeyboardManager.HandleKeyAsync(new ConsoleKeyInfo('\0', ConsoleKey.F8, false, false, false)).GetAwaiter().GetResult();
+            KeyboardManager.HandleKeyAsync(Key.F8).GetAwaiter().GetResult();
+            KeyboardManager.HandleKeyAsync(Key.F7).GetAwaiter().GetResult();
+            KeyboardManager.HandleKeyAsync(Key.F8).GetAwaiter().GetResult();
             Assert.Equal(["v1-notification", "v1-popup"], File.ReadAllLines(shortcutLog));
             Assert.Equal(0, persistentInvocations);
 
             PluginCompiler.Compile(TransientShortcutPluginSource(pluginName, "v2", shortcutLog), pluginName, pluginPath);
             Assert.Empty(await PluginManager.ReloadPluginsAsync(pluginName));
             Assert.Equal(0, KeyboardManager.TransientShortcutCountForTests);
-            KeyboardManager.HandleKeyAsync(new ConsoleKeyInfo('\0', ConsoleKey.F8, false, false, false)).GetAwaiter().GetResult();
+            KeyboardManager.HandleKeyAsync(Key.F8).GetAwaiter().GetResult();
             Assert.Equal(1, persistentInvocations);
 
             PluginManager.InitializeLoadedPlugins();
-            KeyboardManager.HandleKeyAsync(new ConsoleKeyInfo('\0', ConsoleKey.F8, false, false, false)).GetAwaiter().GetResult();
-            KeyboardManager.HandleKeyAsync(new ConsoleKeyInfo('\0', ConsoleKey.F7, false, false, false)).GetAwaiter().GetResult();
-            KeyboardManager.HandleKeyAsync(new ConsoleKeyInfo('\0', ConsoleKey.F8, false, false, false)).GetAwaiter().GetResult();
+            KeyboardManager.HandleKeyAsync(Key.F8).GetAwaiter().GetResult();
+            KeyboardManager.HandleKeyAsync(Key.F7).GetAwaiter().GetResult();
+            KeyboardManager.HandleKeyAsync(Key.F8).GetAwaiter().GetResult();
             Assert.Equal(
                 ["v1-notification", "v1-popup", "v2-notification", "v2-popup"],
                 File.ReadAllLines(shortcutLog));
@@ -386,7 +387,7 @@ namespace UmamusumeResponseAnalyzer.Tests
 
             Assert.Empty(await PluginManager.UnloadPluginsAsync(pluginName));
             Assert.Equal(0, KeyboardManager.TransientShortcutCountForTests);
-            KeyboardManager.HandleKeyAsync(new ConsoleKeyInfo('\0', ConsoleKey.F8, false, false, false)).GetAwaiter().GetResult();
+            KeyboardManager.HandleKeyAsync(Key.F8).GetAwaiter().GetResult();
             Assert.Equal(2, persistentInvocations);
             KeyboardManager.UnregisterAll();
             KeyboardManager.OverlaySink = null;

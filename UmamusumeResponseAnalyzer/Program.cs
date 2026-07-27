@@ -297,8 +297,6 @@ namespace UmamusumeResponseAnalyzer
                                 ctx.WriteLine("（没有加载任何插件）", ConsoleColor.DarkGray);
                             return Task.CompletedTask;
                         });
-                        KeyboardManager.SetCommandHandler(uiHost.HandleCommandAsync, uiHost.CompleteCommand);
-
                         await PluginManager.TriggerStartedAsync(lifetimeCts.Token);
                         pluginUpdateCheck = CheckPluginUpdatesAsync(uiHost, lifetimeCts.Token);
                     }
@@ -387,11 +385,6 @@ namespace UmamusumeResponseAnalyzer
                         () =>
                         {
                             KeyboardManager.OverlaySink = null;
-                            return ValueTask.CompletedTask;
-                        },
-                        () =>
-                        {
-                            KeyboardManager.SetCommandHandler(null);
                             return ValueTask.CompletedTask;
                         },
                         () =>

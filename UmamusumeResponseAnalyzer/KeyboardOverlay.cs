@@ -1,3 +1,4 @@
+using Terminal.Gui.Input;
 using UmamusumeResponseAnalyzer.LiveDisplay;
 
 namespace UmamusumeResponseAnalyzer
@@ -5,11 +6,9 @@ namespace UmamusumeResponseAnalyzer
     internal interface IKeyboardOverlaySink
     {
         int PopupVisibleLineCount => 1;
-        Task<bool> TryHandleWorkspaceKeyAsync(ConsoleKeyInfo keyInfo);
+        Task<bool> TryHandleWorkspaceCommandAsync(Command command);
         void ShowPopup(KeyboardPopup popup, int generation);
         void HidePopup(int generation);
-        void ShowCommandInput(KeyboardCommandInput input);
-        void HideCommandInput();
     }
 
     internal sealed record KeyboardPopup(
@@ -38,12 +37,6 @@ namespace UmamusumeResponseAnalyzer
     }
 
     internal sealed record KeyboardPopupLine(string Text, ConsoleColor Color);
-    internal sealed record KeyboardCommandInput(string Text, IReadOnlyList<string> CompletionCandidates)
-    {
-        public KeyboardCommandInput(string text) : this(text, [])
-        {
-        }
-    }
 
     public sealed class KeyboardHandlerContext
     {

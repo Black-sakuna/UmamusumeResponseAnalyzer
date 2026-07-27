@@ -636,25 +636,345 @@ public sealed class LiveDisplayRenderTests : IDisposable
     }
 
     [Fact]
-    public async Task CommandInput_IsARealOverlayAndDoesNotReplaceWorkspaceLayout()
+    public async Task CommandInput_UsesUnhandledTerminalGuiKeysAndRestoresFocus()
     {
         var output = host.ForPlugin("Command");
         var workspace = output.CreateWorkspace("Command");
-        output.SetPanel(workspace, "main", "main", LiveDisplayContent.Text("UnderlyingBody"), fullBleed: true);
+        View? control = null;
+        output.SetPanel(
+            workspace,
+            "main",
+            "main",
+            new LiveDisplayContent(() =>
+            {
+                control = new View
+                {
+                    Text = "CommandFocusTarget",
+                    Width = Dim.Fill(),
+                    Height = Dim.Fill(),
+                    CanFocus = true
+                };
+                return control;
+            }),
+            fullBleed: true);
 
         await StartAsync();
-        await terminal.InjectAsync(Key.Enter);
-        await terminal.InjectAsync(Key.A);
-        await terminal.WaitForScreenAsync("Command Mode");
-        var screen = await terminal.CaptureScreenAsync();
+        await terminal.WaitForScreenAsync("CommandFocusTarget");
+        await terminal.InvokeAsync(() => control!.SetFocus());
 
-        Assert.Contains("UnderlyingBody", screen);
-        Assert.Contains("Command Mode", screen);
-        Assert.Contains("a", screen, StringComparison.OrdinalIgnoreCase);
+        await terminal.InjectAsync(new Key('/'));
+        var commandMode = await GetCommandModeAsync();
+        var commandInput = await GetCommandInputAsync(commandMode);
+        await terminal.WaitForAsync(() => commandMode.IsOpen);
+
+        Assert.Equal("/", commandInput.Text);
+        Assert.IsType<TextField>(commandInput);
+        Assert.True(await terminal.InvokeAsync(() => commandInput.HasFocus));
+        await terminal.WaitForScreenAsync("Command Mode");
+        var normalFrame = await terminal.InvokeAsync(commandMode.FrameToScreen);
+        var normalScreen = await terminal.CaptureScreenAsync();
+        Assert.Equal(0, normalFrame.X);
+        Assert.Equal(80, normalFrame.Width);
+        Assert.Equal(18, normalFrame.Bottom);
+        Assert.Contains("CommandFocusTarget", normalScreen);
 
         await terminal.InjectAsync(Key.Esc);
-        await terminal.WaitForAsync(async () =>
-            !(await terminal.CaptureScreenAsync()).Contains("Command Mode", StringComparison.Ordinal));
+        await terminal.WaitForAsync(() => !commandMode.IsOpen);
+        Assert.True(await terminal.InvokeAsync(() => control!.HasFocus));
+
+        await terminal.InjectAsync(new Key('/').WithShift);
+        await terminal.WaitForAsync(() => commandMode.IsOpen);
+        Assert.Equal("/", commandInput.Text);
+        await terminal.InjectAsync(Key.Esc);
+        await terminal.WaitForAsync(() => !commandMode.IsOpen);
+
+        var enterHotkeyInvocations = 0;
+        KeyboardManager.Register(ConsoleKey.Enter, "Enter hotkey", () =>
+        {
+            enterHotkeyInvocations++;
+            return Task.CompletedTask;
+        });
+        await terminal.InjectAsync(Key.Enter);
+        await terminal.WaitForAsync(() => enterHotkeyInvocations == 1);
+        Assert.False(commandMode.IsOpen);
+        Assert.True(KeyboardManager.Unregister(ConsoleKey.Enter));
+
+        await terminal.InjectAsync(Key.Enter);
+        await terminal.WaitForAsync(() => commandMode.IsOpen);
+        Assert.Equal(string.Empty, commandInput.Text);
+    }
+
+    [Fact]
+    public async Task BootstrapControls_UnhandledSlashOpensCommandMode()
+    {
+        var bootstrap = new BootstrapWorkspace(host);
+        bootstrap.SetSettings([("Test", "Value")]);
+        bootstrap.Log("Test", "bootstrap-slash-log");
+
+        await StartAsync();
+        await terminal.WaitForScreenAsync("bootstrap-slash-log");
+        var controls = await terminal.InvokeAsync(() =>
+        {
+            var dashboard = Descendants(terminal.Application.TopRunnableView!)
+                .OfType<BootstrapDashboardView>()
+                .Single();
+            var table = Descendants(dashboard).OfType<TableView>().First();
+            var logList = Descendants(dashboard).OfType<ListView>().Single();
+            return new (View Control, Func<(int Primary, int Secondary)> Selection)[]
+            {
+                (table, () => (table.Value!.SelectedCell.Y, table.Value!.SelectedCell.X)),
+                (logList, () => (logList.SelectedItem ?? -1, -1))
+            };
+        });
+        var commandMode = await GetCommandModeAsync();
+        var commandInput = await GetCommandInputAsync(commandMode);
+
+        foreach (var (control, selection) in controls)
+        {
+            await terminal.InvokeAsync(() => control.SetFocus());
+            var before = await terminal.InvokeAsync(() => (
+                Focused: terminal.Application.TopRunnableView!.MostFocused,
+                Selection: selection()));
+            Assert.Same(control, before.Focused);
+            Assert.True(before.Selection.Primary >= 0);
+
+            await terminal.InjectAsync(new Key('/'));
+            await terminal.WaitForAsync(() => commandMode.IsOpen);
+
+            Assert.Equal("/", commandInput.Text);
+            await terminal.InjectAsync(Key.Esc);
+            await terminal.WaitForAsync(() => !commandMode.IsOpen);
+
+            var after = await terminal.InvokeAsync(() => (
+                Focused: terminal.Application.TopRunnableView!.MostFocused,
+                Selection: selection()));
+            Assert.Same(before.Focused, after.Focused);
+            Assert.Equal(before.Selection, after.Selection);
+        }
+    }
+
+    [Fact]
+    public async Task FocusedControl_HandledSlashWinsOverCommandInput()
+    {
+        var output = host.ForPlugin("CommandPriority");
+        var workspace = output.CreateWorkspace("Command priority");
+        View? control = null;
+        var handledSlash = 0;
+        var handledEnter = 0;
+        output.SetPanel(
+            workspace,
+            "main",
+            "main",
+            new LiveDisplayContent(() =>
+            {
+                control = new View
+                {
+                    Text = "SlashConsumer",
+                    Width = Dim.Fill(),
+                    Height = Dim.Fill(),
+                    CanFocus = true
+                };
+                control.KeyDown += (_, key) =>
+                {
+                    if (key.AsGrapheme == "/")
+                    {
+                        handledSlash++;
+                        key.Handled = true;
+                    }
+                    else if (key.KeyCode == Key.Enter.KeyCode)
+                    {
+                        handledEnter++;
+                        key.Handled = true;
+                    }
+                };
+                return control;
+            }),
+            fullBleed: true);
+
+        await StartAsync();
+        await terminal.WaitForScreenAsync("SlashConsumer");
+        await terminal.InvokeAsync(() => control!.SetFocus());
+        await terminal.InjectAsync(new Key('/'));
+        await terminal.InjectAsync(Key.Enter);
+        await terminal.WaitForAsync(() => handledSlash == 1 && handledEnter == 1);
+
+        var commandMode = await GetCommandModeAsync();
+        Assert.False(commandMode.IsOpen);
+        Assert.Equal(1, handledSlash);
+        Assert.Equal(1, handledEnter);
+        Assert.DoesNotContain("Command Mode", await terminal.CaptureScreenAsync());
+    }
+
+    [Fact]
+    public async Task CommandInput_UsesNativeEditingCompletionHistoryAndExactlyOnceExecution()
+    {
+        var output = host.ForPlugin("CommandEditing");
+        var workspace = output.CreateWorkspace("Command editing");
+        output.SetPanel(workspace, "main", "main", LiveDisplayContent.Text("CommandEditingBody"), fullBleed: true);
+
+        await StartAsync();
+        var commandMode = await GetCommandModeAsync();
+        var commandInput = await GetCommandInputAsync(commandMode);
+
+        await terminal.InjectAsync(Key.Enter);
+        await terminal.WaitForAsync(() => commandMode.IsOpen);
+        await InjectTextAsync("/ab");
+        await terminal.InjectAsync(Key.CursorLeft);
+        await terminal.InjectAsync(new Key('你'));
+        Assert.Equal("/a你b", commandInput.Text);
+        await terminal.InjectAsync(Key.Backspace);
+        Assert.Equal("/ab", commandInput.Text);
+        output.SetPanel(
+            workspace,
+            "main",
+            "main",
+            LiveDisplayContent.Text("BackgroundUpdatedBody"),
+            fullBleed: true,
+            switchToWorkspace: false);
+        await terminal.WaitForScreenAsync("BackgroundUpdatedBody");
+        Assert.Same(commandInput, await GetCommandInputAsync(commandMode));
+        Assert.Equal("/ab", commandInput.Text);
+        Assert.True(await terminal.InvokeAsync(() => commandInput.HasFocus));
+        await terminal.InjectAsync(Key.Esc);
+        await terminal.WaitForAsync(() => !commandMode.IsOpen);
+        Assert.DoesNotContain(
+            host.GetLogsForTests(null),
+            line => line.Text.Contains("未知命令", StringComparison.Ordinal));
+
+        await terminal.InjectAsync(Key.Enter);
+        await terminal.WaitForAsync(() => commandMode.IsOpen);
+        await terminal.InjectAsync(Key.Z.WithCtrl);
+        Assert.Equal(string.Empty, commandInput.Text);
+        await terminal.InjectAsync(Key.Esc);
+        await terminal.WaitForAsync(() => !commandMode.IsOpen);
+
+        await terminal.InjectAsync(new Key('/'));
+        await terminal.WaitForAsync(() => commandMode.IsOpen);
+        Assert.Equal("/", commandInput.Text);
+        await InjectTextAsync("workspace s");
+        await terminal.InjectAsync(Key.Tab);
+        Assert.Equal("/workspace switch", commandInput.Text);
+        await terminal.InjectAsync(Key.Esc);
+        await terminal.WaitForAsync(() => !commandMode.IsOpen);
+
+        await terminal.InjectAsync(new Key('/'));
+        await terminal.WaitForAsync(() => commandMode.IsOpen);
+        Assert.Equal("/", commandInput.Text);
+        await InjectTextAsync("alpha");
+        await terminal.InjectAsync(Key.Enter);
+        await terminal.WaitForAsync(() => !commandMode.IsOpen);
+        await terminal.WaitForAsync(() =>
+            host.GetLogsForTests(null).Count(line => line.Text == "未知命令: /alpha") == 1);
+
+        await terminal.InjectAsync(new Key('/'));
+        await terminal.WaitForAsync(() => commandMode.IsOpen);
+        Assert.Equal("/", commandInput.Text);
+        await InjectTextAsync("beta");
+        await terminal.InjectAsync(Key.Enter);
+        await terminal.WaitForAsync(() => !commandMode.IsOpen);
+        await terminal.WaitForAsync(() =>
+            host.GetLogsForTests(null).Count(line => line.Text == "未知命令: /beta") == 1);
+
+        await terminal.InjectAsync(Key.Enter);
+        await terminal.WaitForAsync(() => commandMode.IsOpen);
+        await terminal.InjectAsync(Key.CursorUp);
+        Assert.Equal("/beta", commandInput.Text);
+        await terminal.InjectAsync(Key.CursorUp);
+        Assert.Equal("/alpha", commandInput.Text);
+        await terminal.InjectAsync(Key.CursorDown);
+        Assert.Equal("/beta", commandInput.Text);
+        await terminal.InjectAsync(Key.CursorDown);
+        Assert.Equal(string.Empty, commandInput.Text);
+        await terminal.InjectAsync(Key.Esc);
+
+        Assert.Equal(1, host.GetLogsForTests(null).Count(line => line.Text == "未知命令: /alpha"));
+        Assert.Equal(1, host.GetLogsForTests(null).Count(line => line.Text == "未知命令: /beta"));
+    }
+
+    [Fact]
+    public async Task CommandInput_RendersBottomFrameCandidatesAttributesAndCompactLayout()
+    {
+        for (var i = 0; i < 20; i++)
+            host.CreateWorkspace($"Workspace-{i:00}");
+
+        await StartAsync();
+        await terminal.InjectAsync(new Key('/'));
+        var commandMode = await GetCommandModeAsync();
+        var commandInput = await GetCommandInputAsync(commandMode);
+        await terminal.WaitForAsync(() => commandMode.IsOpen);
+        Assert.Equal("/", commandInput.Text);
+        await InjectTextAsync("workspace switch ");
+        await terminal.InjectAsync(Key.Tab);
+        await terminal.RedrawAsync();
+
+        var matches = host.CompleteCommand("/workspace switch ");
+        var layout = await terminal.InvokeAsync(() =>
+        {
+            var labels = Descendants(commandMode).OfType<Label>().ToArray();
+            var title = labels.Single(x => x.Text?.ToString() == " Command Mode ");
+            var candidates = labels.Single(x =>
+                x.Text?.ToString()?.Contains("/workspace switch ", StringComparison.Ordinal) == true);
+            var prompt = labels.Single(x => x.Text?.ToString() == "❯ ");
+            var footer = labels.Single(x =>
+                x.Text?.ToString() == "Tab 补全 · ↑↓ 历史 · Esc 取消");
+            return (
+                TitleView: title,
+                CandidatesView: candidates,
+                FooterView: footer,
+                Frame: commandMode.FrameToScreen(),
+                Title: title.FrameToScreen(),
+                Candidates: candidates.FrameToScreen(),
+                CandidateText: candidates.Text?.ToString() ?? string.Empty,
+                Prompt: prompt.FrameToScreen(),
+                Input: commandInput.FrameToScreen(),
+                Footer: footer.FrameToScreen());
+        });
+        var screen = await terminal.CaptureScreenAsync();
+        var rows = screen.Split(Environment.NewLine);
+        var titleText = " Command Mode ";
+        var titleColumn = rows[layout.Title.Y].IndexOf(titleText, StringComparison.Ordinal);
+        var footerColumn = rows[layout.Footer.Y].IndexOf("Tab", StringComparison.Ordinal);
+        var visibleCandidateSlots = layout.Candidates.Height;
+        var expectedOverflow = matches.Count - Math.Max(0, visibleCandidateSlots - 1);
+
+        Assert.Equal(new Rectangle(0, 0, 80, 18), layout.Frame);
+        Assert.Equal('┌', rows[layout.Frame.Y][layout.Frame.X]);
+        Assert.Equal('┐', rows[layout.Frame.Y][layout.Frame.Right - 1]);
+        Assert.Equal('└', rows[layout.Frame.Bottom - 1][layout.Frame.X]);
+        Assert.Equal('┘', rows[layout.Frame.Bottom - 1][layout.Frame.Right - 1]);
+        Assert.InRange(titleColumn, (80 - titleText.Length) / 2 - 1, (80 - titleText.Length) / 2 + 1);
+        Assert.True(layout.Candidates.Y < layout.Input.Y);
+        Assert.Equal(layout.Input.Y + 1, layout.Footer.Y);
+        Assert.All(
+            layout.CandidateText.Split(Environment.NewLine),
+            line => Assert.StartsWith("  ", line));
+        Assert.Contains($"  +{expectedOverflow} more", layout.CandidateText);
+
+        var candidateAttribute = await terminal.CaptureAttributeAsync(
+            new Point(layout.Candidates.X + 2, layout.Candidates.Y));
+        var promptAttribute = await terminal.CaptureAttributeAsync(layout.Prompt.Location);
+        var inputAttribute = await terminal.CaptureAttributeAsync(layout.Input.Location);
+        var footerAttribute = await terminal.CaptureAttributeAsync(
+            new Point(footerColumn, layout.Footer.Y));
+        Assert.Equal(candidateAttribute, footerAttribute);
+        Assert.NotEqual(candidateAttribute, promptAttribute);
+        Assert.NotEqual(promptAttribute, inputAttribute);
+
+        await terminal.ResizeAsync(20, 4);
+        await terminal.RedrawAsync();
+        var compact = await terminal.InvokeAsync(() => (
+            Frame: commandMode.FrameToScreen(),
+            TitleVisible: layout.TitleView.Visible,
+            CandidatesVisible: layout.CandidatesView.Visible,
+            FooterVisible: layout.FooterView.Visible));
+        var compactScreen = await terminal.CaptureScreenAsync();
+
+        Assert.Equal(new Rectangle(0, 1, 20, 3), compact.Frame);
+        Assert.False(compact.TitleVisible);
+        Assert.False(compact.CandidatesVisible);
+        Assert.False(compact.FooterVisible);
+        Assert.Contains("❯", compactScreen);
+        Assert.DoesNotContain("Command Mode", compactScreen);
     }
 
     [Fact]
@@ -731,12 +1051,6 @@ public sealed class LiveDisplayRenderTests : IDisposable
         await terminal.WaitForScreenAsync("Visible notification");
         await terminal.ClickAsync(click);
         Assert.Equal(3, accepted);
-
-        await KeyboardManager.HandleKeyAsync(
-            new ConsoleKeyInfo('\r', ConsoleKey.Enter, shift: false, alt: false, control: false));
-        await terminal.WaitForScreenAsync("Command Mode");
-        await terminal.ClickAsync(click);
-        Assert.Equal(4, accepted);
     }
 
     [Fact]
@@ -829,11 +1143,6 @@ public sealed class LiveDisplayRenderTests : IDisposable
         await terminal.WaitForAsync(async () =>
             !(await terminal.CaptureScreenAsync()).Contains("KeyboardOverlay", StringComparison.Ordinal));
         Assert.False(run!.IsCompleted);
-        await KeyboardManager.HandleKeyAsync(
-            new ConsoleKeyInfo('\r', ConsoleKey.Enter, shift: false, alt: false, control: false));
-        await terminal.WaitForScreenAsync("Command Mode");
-        await terminal.ClickAsync(bottomPoint);
-        Assert.Equal(2, bottomHits);
     }
 
     [Fact]
@@ -1061,6 +1370,46 @@ public sealed class LiveDisplayRenderTests : IDisposable
         Assert.DoesNotContain("URA - 启动状态", screen);
         Assert.DoesNotContain("启动信息", screen);
         Assert.DoesNotContain("Ctrl+B", screen);
+    }
+
+    [Fact]
+    public async Task BootstrapDashboard_ShowsPluginLogsScopedToBootstrapWorkspace()
+    {
+        var bootstrap = new BootstrapWorkspace(host);
+        var dmm = host.ForPlugin("DMM插件");
+        var otherOutput = host.ForPlugin("Other");
+        var otherWorkspace = otherOutput.CreateWorkspace("Other");
+
+        dmm.Log(bootstrap.Workspace, "DMM bootstrap status", LiveDisplaySeverity.Success);
+        otherOutput.Log(otherWorkspace, "Other workspace status", LiveDisplaySeverity.Error);
+
+        await StartAsync();
+        await terminal.WaitForScreenAsync("DMM bootstrap status");
+
+        var layout = await terminal.InvokeAsync(() =>
+        {
+            var dashboard = Descendants(terminal.Application.TopRunnableView!)
+                .OfType<BootstrapDashboardView>()
+                .Single();
+            return (
+                DashboardFrame: dashboard.Frame,
+                FrameCount: dashboard.SubViews.OfType<FrameView>().Count(),
+                ListCount: dashboard.SubViews
+                    .OfType<FrameView>()
+                    .SelectMany(x => x.SubViews)
+                    .OfType<ListView>()
+                    .Count());
+        });
+        var screen = await terminal.CaptureScreenAsync();
+
+        Assert.Equal(new Rectangle(0, 0, 80, 18), layout.DashboardFrame);
+        Assert.Equal(4, layout.FrameCount);
+        Assert.Equal(1, layout.ListCount);
+        Assert.Contains("OK [DMM插件] DMM bootstrap status", screen);
+        Assert.DoesNotContain("Other workspace status", screen);
+        Assert.Contains(
+            host.GetLogsForTests(bootstrap.Workspace),
+            x => x.PluginId == "DMM插件" && x.Text == "DMM bootstrap status");
     }
 
     [Fact]
@@ -1569,10 +1918,21 @@ public sealed class LiveDisplayRenderTests : IDisposable
         _ = new BootstrapWorkspace(host);
         run = await terminal.StartAsync(host, cancellation.Token);
         await terminal.WaitForScreenAsync("运行环境");
+        await terminal.InvokeAsync(() =>
+            Descendants(terminal.Application.TopRunnableView!)
+                .OfType<ListView>()
+                .Single()
+                .SetFocus());
+        await terminal.InjectAsync(new Key('/'));
+        var firstCommandMode = await GetCommandModeAsync();
+        await terminal.WaitForAsync(() => firstCommandMode.IsOpen);
+        var disposedCommandModes = 0;
+        firstCommandMode.Disposing += (_, _) => disposedCommandModes++;
 
         cancellation.Cancel();
         await run.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Empty(terminal.Application.SessionStack!);
+        Assert.Equal(1, disposedCommandModes);
 
         var second = new UiHost(terminal.Application);
         host = second;
@@ -1580,6 +1940,32 @@ public sealed class LiveDisplayRenderTests : IDisposable
         _ = new BootstrapWorkspace(second);
         run = await terminal.StartAsync(second);
         await terminal.WaitForScreenAsync("初始化结果");
+        await terminal.InvokeAsync(() =>
+            Descendants(terminal.Application.TopRunnableView!)
+                .OfType<ListView>()
+                .Single()
+                .SetFocus());
+        await terminal.InjectAsync(new Key('/'));
+        await terminal.WaitForAsync(() =>
+            Descendants(terminal.Application.TopRunnableView!)
+                .OfType<CommandModeView>()
+                .Single()
+                .IsOpen);
+
+        var secondSession = await terminal.InvokeAsync(() => (
+            CommandModes: Descendants(terminal.Application.TopRunnableView!)
+                .OfType<CommandModeView>()
+                .Count(),
+            TextFields: Descendants(terminal.Application.TopRunnableView!)
+                .OfType<CommandModeView>()
+                .SelectMany(Descendants)
+                .OfType<TextField>()
+                .Count()));
+        Assert.Equal(1, secondSession.CommandModes);
+        Assert.Equal(1, secondSession.TextFields);
+
+        await terminal.InjectAsync(Key.Esc);
+        Assert.False((await GetCommandModeAsync()).IsOpen);
     }
 
     [Fact]
@@ -1666,7 +2052,6 @@ public sealed class LiveDisplayRenderTests : IDisposable
                 LiveDisplayConsole.Unbind(value);
             LiveDisplayConsole.Bind(value, terminal.Application, cancellationToken);
             KeyboardManager.OverlaySink = value;
-            KeyboardManager.SetCommandHandler(value.HandleCommandAsync, value.CompleteCommand);
             RemoveShutdownBinding();
             shutdownTarget = new ShutdownCommandTarget(() =>
             {
@@ -1689,6 +2074,20 @@ public sealed class LiveDisplayRenderTests : IDisposable
 
     static string Lines(int first, int last)
         => string.Join(Environment.NewLine, Enumerable.Range(first, last - first + 1).Select(i => $"line-{i:00}"));
+
+    async Task InjectTextAsync(string text)
+    {
+        foreach (var character in text)
+            await terminal.InjectAsync(new Key(character));
+    }
+
+    Task<CommandModeView> GetCommandModeAsync()
+        => terminal.InvokeAsync(() => Descendants(terminal.Application.TopRunnableView!)
+            .OfType<CommandModeView>()
+            .Single());
+
+    Task<TextField> GetCommandInputAsync(CommandModeView commandMode)
+        => terminal.InvokeAsync(() => Descendants(commandMode).OfType<TextField>().Single());
 
     static void AssertValidBootstrapFrame(BootstrapDrawFrame frame)
     {
@@ -1760,7 +2159,6 @@ public sealed class LiveDisplayRenderTests : IDisposable
     static void ResetUi()
     {
         KeyboardManager.UnregisterAll();
-        KeyboardManager.SetCommandHandler(null);
         KeyboardManager.OverlaySink = null;
         KeyboardManager.PopupAutoCloseDelay = TimeSpan.FromSeconds(3);
         LiveDisplayConsole.UnbindForTests();
