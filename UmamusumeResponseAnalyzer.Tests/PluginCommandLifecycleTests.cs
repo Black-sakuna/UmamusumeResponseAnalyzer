@@ -26,7 +26,7 @@ public sealed class PluginCommandLifecycleTests : IDisposable
         Directory.SetCurrentDirectory(tempDir);
 
         terminal = new(width: 120, height: 35);
-        host = new(terminal.Application);
+        host = new(terminal.Application, static () => [], static _ => { });
         terminal.RunOnOwnerThread(() => LiveDisplayConsole.Bind(host, terminal.Application));
         KeyboardManager.OverlaySink = host;
         PluginManager.BindLiveDisplay(terminal.Application, plugin => host.ForPlugin(plugin.Name));

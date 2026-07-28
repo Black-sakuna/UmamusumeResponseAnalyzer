@@ -640,7 +640,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         {
             var ctx = new PluginManager.PluginLoadContext("shared-abi-test");
             using var terminal = new TerminalGuiTestApp();
-            var uiHost = new UiHost(terminal.Application);
+            var uiHost = new UiHost(terminal.Application, static () => [], static _ => { });
             terminal.RunOnOwnerThread(() => LiveDisplayConsole.Bind(uiHost, terminal.Application));
             var run = await terminal.StartAsync(uiHost);
             try

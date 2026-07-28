@@ -24,6 +24,8 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         }
 
         readonly IApplication application;
+        readonly Func<IReadOnlyList<string>> loadWorkspaceTaskbarOrder;
+        readonly Action<IReadOnlyList<string>> saveWorkspaceTaskbarOrder;
         readonly Channel<UiEvent> events = CreateUiChannel<UiEvent>();
         readonly TaskCompletionSource ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
         readonly NotificationPopupRenderer popupRenderer = new();
@@ -60,6 +62,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         int drainScheduled;
         Window? window;
         View? workspaceLayer;
+        WorkspaceTaskbarView? workspaceTaskbarLayer;
         Label? notificationLayer;
         Label? keyboardLayer;
         CommandModeView? commandMode;
@@ -68,9 +71,14 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         int acceptingEvents = 1;
         bool workspaceStructurePending;
 
-        public UiHost(IApplication application)
+        public UiHost(
+            IApplication application,
+            Func<IReadOnlyList<string>> loadWorkspaceTaskbarOrder,
+            Action<IReadOnlyList<string>> saveWorkspaceTaskbarOrder)
         {
             this.application = application ?? throw new ArgumentNullException(nameof(application));
+            this.loadWorkspaceTaskbarOrder = loadWorkspaceTaskbarOrder;
+            this.saveWorkspaceTaskbarOrder = saveWorkspaceTaskbarOrder;
         }
 
         internal event Action<LiveDisplayLogLine>? LogAdded;
@@ -115,9 +123,9 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 workspaceRegistrations[workspace.Title] = workspace;
                 workspaceAliases[workspace] = workspace;
                 SetCurrentWorkspaceIfEmpty(workspace);
-                Post(new UiEvent.RegisterWorkspace(workspace));
             }
 
+            Post(new UiEvent.RegisterWorkspace(workspace));
             return workspace;
         }
 
@@ -322,11 +330,18 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             commandMode = new(
                 command => TrackInputTask(HandleCommandAsync(command)),
                 CompleteCommand);
-            window.Add(workspaceLayer, notificationLayer, keyboardLayer, commandMode);
+            workspaceTaskbarLayer = new(
+                () => commandMode is { IsOpen: true },
+                SwitchWorkspace,
+                loadWorkspaceTaskbarOrder(),
+                SaveWorkspaceTaskbarOrder);
+            workspaceLayer.Add(workspaceTaskbarLayer.BottomEdgeTrigger);
+            window.Add(workspaceLayer, workspaceTaskbarLayer, notificationLayer, keyboardLayer, commandMode);
             window.Initialized += WindowInitialized;
             window.ViewportChanged += WindowViewportChanged;
             window.KeyDownNotHandled += WindowKeyDownNotHandled;
             window.MouseEvent += WindowMouseEvent;
+            commandMode.VisibleChanged += CommandModeVisibleChanged;
             application.Keyboard.KeyDown += ApplicationKeyDown;
             application.LayoutAndDrawComplete += ApplicationLayoutAndDrawComplete;
 
@@ -345,6 +360,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
 
                 application.LayoutAndDrawComplete -= ApplicationLayoutAndDrawComplete;
                 application.Keyboard.KeyDown -= ApplicationKeyDown;
+                commandMode.VisibleChanged -= CommandModeVisibleChanged;
                 window.MouseEvent -= WindowMouseEvent;
                 window.KeyDownNotHandled -= WindowKeyDownNotHandled;
                 window.ViewportChanged -= WindowViewportChanged;
@@ -370,6 +386,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 window.Dispose();
                 window = null;
                 workspaceLayer = null;
+                workspaceTaskbarLayer = null;
                 notificationLayer = null;
                 keyboardLayer = null;
                 commandMode = null;
@@ -415,6 +432,21 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         {
             RebuildWorkspaceLayer();
             RefreshOverlayLayers();
+        }
+
+        void CommandModeVisibleChanged(object? sender, EventArgs e)
+            => workspaceTaskbarLayer?.CommandModeVisibilityChanged();
+
+        void SaveWorkspaceTaskbarOrder(IReadOnlyList<string> titles)
+        {
+            try
+            {
+                saveWorkspaceTaskbarOrder(titles);
+            }
+            catch (Exception ex)
+            {
+                LiveDisplayConsole.WriteException(ex);
+            }
         }
 
         void ApplicationKeyDown(object? sender, Key key)
@@ -467,6 +499,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
 
         void WindowMouseEvent(object? sender, Mouse mouse)
         {
+            workspaceTaskbarLayer?.HandleMousePosition(mouse);
             var flags = mouse.Flags;
             var verticalDelta = flags.HasFlag(MouseFlags.WheeledUp)
                 ? 1
@@ -834,6 +867,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 workspaces[workspace] = state with { ScrollOffset = workspaceSurface.MaxScroll };
             workspaceLayer.SetNeedsLayout();
             workspaceLayer.SetNeedsDraw();
+            workspaceTaskbarLayer?.Refresh(workspaces.Keys, activeWorkspace);
             if (focused is not null && IsAttachedTo(focused, window))
                 focused.SetFocus();
         }
@@ -1339,11 +1373,15 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         void RegisterKnownWorkspace(LiveDisplayWorkspace workspace)
         {
             ArgumentNullException.ThrowIfNull(workspace);
-            if (IsRemovedWorkspace(workspace))
-                return;
 
             lock (workspaceIdentityGate)
             {
+                lock (removedWorkspaceGate)
+                {
+                    if (removedWorkspaces.Contains(workspace))
+                        return;
+                }
+
                 if (!workspaceRegistrations.ContainsKey(workspace.Title))
                 {
                     workspaceRegistrations.Add(workspace.Title, workspace);
@@ -1367,7 +1405,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 ScrollOffset: 0,
                 ShortcutText: null,
                 Hotkey: null);
-            if (activeWorkspace is null)
+            if (activeWorkspace is null || ReferenceEquals(CurrentWorkspace, workspace))
             {
                 activeWorkspace = workspace;
                 SetCurrentWorkspaceIfEmpty(workspace);
@@ -1604,11 +1642,11 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                         ? preferredReplacement
                         : workspaceRegistrations.Values.FirstOrDefault();
 
-                if (queueRemoval)
-                    Post(new UiEvent.RemoveWorkspace(workspace, replacement));
                 if (ReferenceEquals(CurrentWorkspace, workspace))
                     Volatile.Write(ref currentWorkspace, replacement);
             }
+            if (queueRemoval)
+                Post(new UiEvent.RemoveWorkspace(workspace, replacement));
             KeyboardManager.RemoveNotificationShortcuts(workspace);
             return true;
         }

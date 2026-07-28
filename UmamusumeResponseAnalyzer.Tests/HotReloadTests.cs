@@ -350,7 +350,7 @@ namespace UmamusumeResponseAnalyzer.Tests
             const string pluginName = "TransientShortcutPlugin";
             var pluginPath = Path.Combine(_tempDir, "Plugins", $"{pluginName}.dll");
             var shortcutLog = Path.Combine(_tempDir, "shortcut-log.txt");
-            var uiHost = new UiHost(_application);
+            var uiHost = new UiHost(_application, static () => [], static _ => { });
             PluginManager.BindLiveDisplay(_application, _ => uiHost.ForPlugin(pluginName));
             KeyboardManager.OverlaySink = uiHost;
             var persistentInvocations = 0;

@@ -3,6 +3,7 @@ using System.Collections.ObjectModel;
 using System.Drawing;
 using Terminal.Gui.Drawing;
 using Terminal.Gui.Input;
+using Terminal.Gui.Testing;
 using Terminal.Gui.Text;
 using Terminal.Gui.ViewBase;
 using Terminal.Gui.Views;
@@ -19,14 +20,16 @@ public sealed class LiveDisplayRenderTests : IDisposable
         ["运行环境", "初始化结果", "插件摘要", "最近日志"];
 
     readonly TerminalGuiTestApp terminal;
+    readonly List<string> workspaceTaskbarOrder = [];
     UiHost host;
     Task? run;
     ShutdownCommandTarget? shutdownTarget;
+    int workspaceTaskbarSaveCount;
 
     public LiveDisplayRenderTests()
     {
         terminal = new(width: 80, height: 18);
-        host = new UiHost(terminal.Application);
+        host = CreateHost();
         BindHost(host);
     }
 
@@ -92,6 +95,122 @@ public sealed class LiveDisplayRenderTests : IDisposable
     }
 
     [Fact]
+    public async Task BackgroundWorkspaceCreation_ReleasesIdentityGateBeforeTimedEventsDrain()
+    {
+        await StartAsync();
+
+        const string title = "Concurrent plugin workspace";
+        LiveDisplayWorkspace? competingWorkspace = null;
+        var armed = 0;
+        EventHandler<Terminal.Gui.App.TimeoutEventArgs> added = (_, _) =>
+        {
+            if (Interlocked.Exchange(ref armed, 0) == 0)
+                return;
+
+            var competing = Task.Factory.StartNew(
+                () => host.CreateWorkspace(title.ToUpperInvariant()),
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
+            if (!competing.Wait(TimeSpan.FromSeconds(5)))
+                throw new TimeoutException("workspaceIdentityGate was held while scheduling the UI drain.");
+            competingWorkspace = competing.GetAwaiter().GetResult();
+        };
+        var timedEvents = terminal.Application.TimedEvents
+            ?? throw new InvalidOperationException("Terminal.Gui timed events are unavailable.");
+        timedEvents.Added += added;
+        LiveDisplayWorkspace workspace;
+        try
+        {
+            Volatile.Write(ref armed, 1);
+            workspace = await Task.Factory.StartNew(
+                    () => host.CreateWorkspace(title),
+                    CancellationToken.None,
+                    TaskCreationOptions.LongRunning,
+                    TaskScheduler.Default)
+                .WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        finally
+        {
+            timedEvents.Added -= added;
+        }
+
+        Assert.Same(workspace, competingWorkspace);
+        Assert.Same(workspace, host.CurrentWorkspace);
+
+        host.ForPlugin("ConcurrentCreate").SetPanel(
+            workspace,
+            "main",
+            "main",
+            LiveDisplayContent.Text("Concurrent workspace ready"));
+        await terminal.WaitForScreenAsync("Concurrent workspace ready");
+        var taskbar = await GetWorkspaceTaskbarAsync();
+        var parts = await terminal.InvokeAsync(() => TaskbarParts(taskbar));
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() =>
+                parts.Popup.SubViews
+                    .OfType<Shortcut>()
+                    .Count(item => item.Title.Equals(title, StringComparison.OrdinalIgnoreCase)) == 1));
+
+        Assert.False(await terminal.InvokeAsync(() => parts.Popup.Visible));
+    }
+
+    [Fact]
+    public async Task TombstonedWorkspace_DelayedRegistrationCannotResurrectCanonicalIdentity()
+    {
+        await StartAsync();
+
+        const string title = "Delayed tombstone workspace";
+        LiveDisplayWorkspace? tombstonedWorkspace = null;
+        var armed = 0;
+        EventHandler<Terminal.Gui.App.TimeoutEventArgs> added = (_, _) =>
+        {
+            if (Interlocked.Exchange(ref armed, 0) == 0)
+                return;
+
+            tombstonedWorkspace = host.CreateWorkspace(title.ToUpperInvariant());
+            host.RemoveWorkspace(tombstonedWorkspace);
+        };
+        var timedEvents = terminal.Application.TimedEvents
+            ?? throw new InvalidOperationException("Terminal.Gui timed events are unavailable.");
+        timedEvents.Added += added;
+        LiveDisplayWorkspace first;
+        try
+        {
+            Volatile.Write(ref armed, 1);
+            first = await Task.Factory.StartNew(
+                    () => host.CreateWorkspace(title),
+                    CancellationToken.None,
+                    TaskCreationOptions.LongRunning,
+                    TaskScheduler.Default)
+                .WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        finally
+        {
+            timedEvents.Added -= added;
+        }
+
+        Assert.Same(first, tombstonedWorkspace);
+        var replacement = host.CreateWorkspace(title);
+        Assert.NotSame(first, replacement);
+        Assert.Same(replacement, host.CurrentWorkspace);
+
+        host.ForPlugin("DelayedTombstone").SetPanel(
+            replacement,
+            "main",
+            "main",
+            LiveDisplayContent.Text("Replacement workspace registered"));
+        await terminal.WaitForScreenAsync("Replacement workspace registered");
+
+        var taskbar = await GetWorkspaceTaskbarAsync();
+        var parts = await terminal.InvokeAsync(() => TaskbarParts(taskbar));
+        var titles = await terminal.InvokeAsync(() =>
+            parts.Popup.SubViews.OfType<Shortcut>().Select(item => item.Title).ToArray());
+        Assert.Equal(1, titles.Count(candidate =>
+            candidate.Equals(title, StringComparison.OrdinalIgnoreCase)));
+    }
+
+    [Fact]
     public async Task MainWindow_FillsScreenWithoutBorder()
     {
         await StartAsync();
@@ -123,7 +242,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
         await terminal.WaitForScreenAsync($"Body {panelCount}");
         var screen = await terminal.CaptureScreenAsync();
         var viewportY = await terminal.InvokeAsync(
-            () => terminal.Application.TopRunnableView!.SubViews.First().SubViews.Single().Viewport.Y);
+            () => terminal.Application.TopRunnableView!.SubViews.First().SubViews.Last().Viewport.Y);
 
         Assert.Equal(0, viewportY);
         for (var i = 1; i <= panelCount; i++)
@@ -234,6 +353,1011 @@ public sealed class LiveDisplayRenderTests : IDisposable
         Assert.Contains("PopupOverFullBleed", screen);
         Assert.DoesNotContain("NormalBody", screen);
         Assert.DoesNotContain("HiddenLog", screen);
+    }
+
+    [Fact]
+    public async Task WorkspaceTaskbar_OverlaysWorkspaceAndUsesNativeShortcutInteraction()
+    {
+        var output = host.ForPlugin("Taskbar");
+        var first = output.CreateWorkspace("First Workspace");
+        var second = output.CreateWorkspace("Second Workspace");
+        Button? focusTarget = null;
+        output.SetPanel(
+            first,
+            "main",
+            "main",
+            new LiveDisplayContent(() =>
+            {
+                var root = new View { Width = Dim.Fill(), Height = Dim.Fill() };
+                var background = new Label
+                {
+                    Text = string.Join(Environment.NewLine, Enumerable.Repeat(new string('W', 80), 18)),
+                    Width = Dim.Fill(),
+                    Height = Dim.Fill()
+                };
+                focusTarget = new Button { X = 1, Y = 1, Text = "Workspace focus" };
+                root.Add(background, focusTarget);
+                return root;
+            }),
+            fullBleed: true);
+        output.SetPanel(
+            second,
+            "main",
+            "main",
+            LiveDisplayContent.Text("Second workspace body"),
+            fullBleed: true);
+        host.SwitchWorkspace(first);
+
+        await StartAsync();
+        await terminal.WaitForScreenAsync("Workspace focus");
+        await terminal.InvokeAsync(() => focusTarget!.SetFocus());
+        var before = await terminal.InvokeAsync(() =>
+        {
+            var top = terminal.Application.TopRunnableView!;
+            var taskbar = Descendants(top).OfType<WorkspaceTaskbarView>().Single();
+            var parts = TaskbarParts(taskbar);
+            var surface = top.SubViews.First().SubViews.Single(view =>
+                !ReferenceEquals(view, parts.Trigger));
+            return (
+                Surface: surface,
+                surface.Frame,
+                surface.Viewport,
+                ContentSize: surface.GetContentSize(),
+                Taskbar: taskbar,
+                parts.Popup,
+                parts.Trigger,
+                Top: top);
+        });
+        Assert.False(before.Popup.Visible);
+        Assert.Equal(new Rectangle(0, 0, 80, 18), before.Frame);
+        Assert.Equal(new Rectangle(0, 0, 80, 18), before.Viewport);
+        Assert.Equal(new Rectangle(0, 0, 80, 18), before.Taskbar.Frame);
+
+        await terminal.MoveMouseAsync(new Point(0, 17));
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() => before.Popup.Visible));
+        await terminal.RedrawAsync();
+
+        var after = await terminal.InvokeAsync(() => (
+            before.Surface.Frame,
+            before.Surface.Viewport,
+            ContentSize: before.Surface.GetContentSize(),
+            PopupFrame: before.Popup.FrameToScreen(),
+            Items: before.Popup.SubViews.OfType<Shortcut>().ToArray(),
+            Focused: before.Top.MostFocused,
+            ZOrder: before.Top.SubViews.ToArray()));
+        Assert.Equal(before.Frame, after.Frame);
+        Assert.Equal(before.Viewport, after.Viewport);
+        Assert.Equal(before.ContentSize, after.ContentSize);
+        Assert.Same(focusTarget, after.Focused);
+        Assert.Same(before.Taskbar, after.ZOrder[1]);
+        Assert.IsType<Label>(after.ZOrder[2]);
+        Assert.IsType<Label>(after.ZOrder[3]);
+        Assert.IsType<CommandModeView>(after.ZOrder[4]);
+        Assert.Equal(["First Workspace", "Second Workspace"], after.Items.Select(x => x.Title).ToArray());
+        Assert.Equal(
+            ["First Workspace", "Second Workspace"],
+            after.Items.Select(x => x.CommandView!.Text).ToArray());
+        Assert.All(after.Items, item =>
+        {
+            Assert.Equal(Key.Empty, item.Key);
+            Assert.Equal(string.Empty, item.HelpText);
+        });
+
+        var bottomCells = await terminal.InvokeAsync(() =>
+        {
+            var contents = terminal.Application.Driver!.Contents!;
+            return (
+                Left: contents[17, 0].Grapheme.ToString(),
+                Right: contents[17, 79].Grapheme.ToString());
+        });
+        Assert.Equal("W", bottomCells.Left);
+        Assert.Equal("W", bottomCells.Right);
+        Assert.True(after.PopupFrame.X > 0);
+        Assert.True(after.PopupFrame.Right < 80);
+        Assert.Equal(18, after.PopupFrame.Bottom);
+        Assert.InRange(Math.Abs(after.PopupFrame.X - (80 - after.PopupFrame.Right)), 0, 1);
+
+        var firstItem = after.Items[0];
+        var secondItem = after.Items[1];
+        var firstCell = await terminal.InvokeAsync(
+            () => firstItem.CommandView!.ViewportToScreen(Point.Empty));
+        var secondCell = await terminal.InvokeAsync(
+            () => secondItem.CommandView!.ViewportToScreen(Point.Empty));
+        var activeAttribute = await terminal.CaptureAttributeAsync(firstCell);
+        var inactiveAttribute = await terminal.CaptureAttributeAsync(secondCell);
+        Assert.Equal(
+            new Terminal.Gui.Drawing.Attribute(StandardColor.Black, StandardColor.Cyan).Background,
+            activeAttribute!.Value.Background);
+        Assert.Equal(
+            new Terminal.Gui.Drawing.Attribute(StandardColor.White, StandardColor.RaisinBlack).Background,
+            inactiveAttribute!.Value.Background);
+
+        var firstFrame = await terminal.InvokeAsync(firstItem.FrameToScreen);
+        var secondFrame = await terminal.InvokeAsync(secondItem.FrameToScreen);
+        Assert.Equal(firstFrame.Right, secondFrame.X);
+        Assert.Equal(after.PopupFrame.Width - 2, firstFrame.Width + secondFrame.Width);
+        var firstActivations = 0;
+        await terminal.InvokeAsync(() => firstItem.Activated += (_, _) => firstActivations++);
+        await terminal.ClickAsync(new Point(firstFrame.X + firstFrame.Width / 2, firstFrame.Y));
+        await terminal.WaitForAsync(() => firstActivations == 1);
+        Assert.Same(first, host.CurrentWorkspace);
+        Assert.Same(
+            focusTarget,
+            await terminal.InvokeAsync(() => terminal.Application.TopRunnableView!.MostFocused));
+
+        await terminal.MoveMouseAsync(new Point(secondFrame.X + secondFrame.Width / 2, secondFrame.Y));
+        await terminal.WaitForAsync(async () =>
+            (await terminal.CaptureAttributeAsync(secondCell))?.Background ==
+            new Terminal.Gui.Drawing.Attribute(StandardColor.White, StandardColor.DarkSlateGray).Background);
+        Assert.Same(
+            focusTarget,
+            await terminal.InvokeAsync(() => terminal.Application.TopRunnableView!.MostFocused));
+
+        var activations = 0;
+        await terminal.InvokeAsync(() => secondItem.Activated += (_, _) => activations++);
+        await terminal.ClickAsync(new Point(secondFrame.X + secondFrame.Width / 2, secondFrame.Y));
+        await terminal.WaitForAsync(() => ReferenceEquals(host.CurrentWorkspace, second));
+        await terminal.WaitForAsync(() => activations == 1);
+        await terminal.WaitForAsync(async () =>
+            (await terminal.CaptureAttributeAsync(secondCell))?.Background ==
+            new Terminal.Gui.Drawing.Attribute(StandardColor.Black, StandardColor.Cyan).Background);
+        Assert.Equal(1, activations);
+
+        var third = output.CreateWorkspace("Third Workspace");
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() => before.Popup.SubViews.OfType<Shortcut>().Count()) == 3);
+        host.RemoveWorkspace(third);
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() => before.Popup.SubViews.OfType<Shortcut>().Count()) == 2);
+
+        await terminal.ResizeAsync(24, 10);
+        await terminal.WaitForAsync(async () =>
+        {
+            var frame = await terminal.InvokeAsync(before.Popup.FrameToScreen);
+            return frame.X >= 0 && frame.Right <= 24 && frame.Width <= 24;
+        });
+        Assert.Equal(24, await terminal.InvokeAsync(() => before.Popup.Frame.Width));
+
+        host.RemoveWorkspace(second);
+        await terminal.WaitForAsync(() => ReferenceEquals(host.CurrentWorkspace, first));
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() => before.Popup.SubViews.OfType<Shortcut>().Count()) == 1);
+        var remaining = await terminal.InvokeAsync(() => before.Popup.SubViews.OfType<Shortcut>().Single());
+        var remainingCell = await terminal.InvokeAsync(
+            () => remaining.CommandView!.ViewportToScreen(Point.Empty));
+        await terminal.WaitForAsync(async () =>
+            (await terminal.CaptureAttributeAsync(remainingCell))?.Background ==
+            new Terminal.Gui.Drawing.Attribute(StandardColor.Black, StandardColor.Cyan).Background);
+
+        await terminal.MoveMouseAsync(Point.Empty);
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() => !before.Popup.Visible));
+        Assert.True(await terminal.InvokeAsync(() => before.Trigger.Visible));
+    }
+
+    [Fact]
+    public async Task WorkspaceTaskbar_BottomTriggerDoesNotBlockWorkspaceControlOrStickOutsidePopup()
+    {
+        var output = host.ForPlugin("TaskbarClickThrough");
+        var workspace = output.CreateWorkspace("Centered taskbar item");
+        Button? bottomButton = null;
+        var accepted = 0;
+        output.SetPanel(
+            workspace,
+            "main",
+            "main",
+            new LiveDisplayContent(() =>
+            {
+                var root = new View { Width = Dim.Fill(), Height = Dim.Fill() };
+                bottomButton = new Button
+                {
+                    X = 0,
+                    Y = Pos.AnchorEnd() + 1,
+                    Text = "BottomTarget",
+                    ShadowStyle = ShadowStyles.None
+                };
+                bottomButton.Accepting += (_, _) => accepted++;
+                root.Add(bottomButton);
+                return root;
+            }),
+            fullBleed: true);
+
+        await StartAsync();
+        await terminal.WaitForScreenAsync("BottomTarget");
+        var taskbar = await GetWorkspaceTaskbarAsync();
+        var parts = await terminal.InvokeAsync(() => TaskbarParts(taskbar));
+        var buttonFrame = await terminal.InvokeAsync(bottomButton!.FrameToScreen);
+        var point = new Point(buttonFrame.X + buttonFrame.Width / 2, buttonFrame.Y);
+        Assert.Equal(
+            new Rectangle(0, 17, 80, 1),
+            await terminal.InvokeAsync(parts.Trigger.FrameToScreen));
+
+        await terminal.MoveMouseAsync(point);
+        var triggerState = await terminal.InvokeAsync(() => parts.Trigger.MouseState);
+        Assert.True(
+            triggerState.HasFlag(MouseState.In),
+            $"Trigger mouse state: {triggerState}");
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() => parts.Popup.Visible));
+        await terminal.ClickAsync(point);
+        await terminal.WaitForAsync(() => accepted == 1);
+        Assert.Equal(1, accepted);
+        Assert.Same(
+            bottomButton,
+            await terminal.InvokeAsync(() => terminal.Application.TopRunnableView!.MostFocused));
+
+        await terminal.MoveMouseAsync(Point.Empty);
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() => !parts.Popup.Visible));
+    }
+
+    [Fact]
+    public async Task WorkspaceTaskbar_PositionReportShowsAfterWorkspaceRegistration()
+    {
+        await StartAsync();
+        var taskbar = await GetWorkspaceTaskbarAsync();
+        var parts = await terminal.InvokeAsync(() => TaskbarParts(taskbar));
+        var bottom = new Point(0, 17);
+
+        await terminal.MoveMouseAsync(bottom);
+        Assert.False(await terminal.InvokeAsync(() => parts.Popup.Visible));
+
+        var output = host.ForPlugin("LateTaskbar");
+        var workspace = output.CreateWorkspace("Late workspace");
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() => parts.Popup.SubViews.OfType<Shortcut>().Count()) == 1);
+        output.SetPanel(
+            workspace,
+            "main",
+            "main",
+            LiveDisplayContent.Text("Late workspace body"),
+            switchToWorkspace: false);
+        Assert.False(await terminal.InvokeAsync(() => parts.Popup.Visible));
+
+        await terminal.MoveMouseAsync(bottom);
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() => parts.Popup.Visible));
+    }
+
+    [Fact]
+    public async Task WorkspaceTaskbar_HoverTransitionsUseOneNativeFramebufferUpdate()
+    {
+        var output = host.ForPlugin("TaskbarHoverPerformance");
+        var active = output.CreateWorkspace("主");
+        var chineseTitle = "超长的workspace标题";
+        var emojiTitle = "👩‍💻e\u0301 telemetry";
+        var chinese = output.CreateWorkspace(chineseTitle);
+        var emoji = output.CreateWorkspace(emojiTitle);
+        host.SwitchWorkspace(active);
+
+        await StartAsync();
+        await terminal.ResizeAsync(30, 12);
+        await terminal.MoveMouseAsync(new Point(0, 11));
+        var taskbar = await GetWorkspaceTaskbarAsync();
+        var parts = await terminal.InvokeAsync(() => TaskbarParts(taskbar));
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() => parts.Popup.Visible));
+        var items = await terminal.InvokeAsync(
+            () => parts.Popup.SubViews.OfType<Shortcut>().ToArray());
+
+        var iteration = 0;
+        var popupLayouts = 0;
+        var popupDraws = 0;
+        var itemLayouts = 0;
+        var itemDraws = 0;
+        var titleChanges = 0;
+        var textChanges = 0;
+        var frameChanges = 0;
+        var layoutAndDraws = 0;
+        var frameStates = new List<TaskbarFramebufferState>();
+        var captureEnabled = false;
+        var injectedAtIteration = 0;
+        var renderedAfterIterations = 0;
+        TaskCompletionSource? expectedFrame = null;
+        Func<bool>? frameCondition = null;
+
+        await terminal.InvokeAsync(() =>
+        {
+            terminal.Application.Iteration += (_, _) => iteration++;
+            terminal.Application.LayoutAndDrawComplete += (_, _) =>
+            {
+                if (!captureEnabled)
+                    return;
+
+                layoutAndDraws++;
+                var contents = terminal.Application.Driver!.Contents!;
+                var popupFrame = parts.Popup.FrameToScreen();
+                var popupCells = new TaskbarCellState[popupFrame.Width * popupFrame.Height];
+                var cellIndex = 0;
+                for (var y = popupFrame.Top; y < popupFrame.Bottom; y++)
+                {
+                    for (var x = popupFrame.Left; x < popupFrame.Right; x++)
+                    {
+                        var cell = contents[y, x];
+                        popupCells[cellIndex++] = new(
+                            cell.Grapheme.ToString(),
+                            cell.Attribute);
+                    }
+                }
+
+                frameStates.Add(new(
+                    parts.Popup.Visible,
+                    popupFrame,
+                    items.Select(item => item.Title).ToArray(),
+                    items.Select(item =>
+                    {
+                        var commandView = item.CommandView!;
+                        var origin = commandView.ViewportToScreen(Point.Empty);
+                        var graphemes = new List<string>();
+                        for (var x = origin.X; x < origin.X + commandView.Viewport.Width;)
+                        {
+                            var grapheme = contents[origin.Y, x].Grapheme.ToString();
+                            graphemes.Add(grapheme);
+                            x += Math.Max(1, grapheme.GetColumns());
+                        }
+
+                        return string.Concat(graphemes).TrimEnd();
+                    }).ToArray(),
+                    items.Select(item => item.FrameToScreen()).ToArray(),
+                    items.Select(item => item.MouseState).ToArray(),
+                    items.Select(item =>
+                    {
+                        var point = item.CommandView!.ViewportToScreen(Point.Empty);
+                        return contents[point.Y, point.X].Attribute;
+                    }).ToArray(),
+                    popupCells));
+                if (frameCondition?.Invoke() == true)
+                {
+                    renderedAfterIterations = iteration - injectedAtIteration;
+                    captureEnabled = false;
+                    frameCondition = null;
+                    var completion = expectedFrame;
+                    expectedFrame = null;
+                    completion?.TrySetResult();
+                }
+            };
+            parts.Popup.SubViewsLaidOut += (_, _) => popupLayouts++;
+            parts.Popup.DrawComplete += (_, _) => popupDraws++;
+            foreach (var item in items)
+            {
+                item.SubViewsLaidOut += (_, _) => itemLayouts++;
+                item.DrawComplete += (_, _) => itemDraws++;
+                item.TitleChanged += (_, _) => titleChanges++;
+                item.FrameChanged += (_, _) => frameChanges++;
+                item.CommandView!.TextChanged += (_, _) => textChanges++;
+            }
+        });
+
+        async Task<TaskbarTransitionMetrics> ProbeAsync(
+            Point point,
+            Func<bool> condition)
+        {
+            var completion = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            await terminal.InvokeAsync(() =>
+            {
+                popupLayouts = 0;
+                popupDraws = 0;
+                itemLayouts = 0;
+                itemDraws = 0;
+                titleChanges = 0;
+                textChanges = 0;
+                frameChanges = 0;
+                layoutAndDraws = 0;
+                frameStates.Clear();
+                expectedFrame = completion;
+                frameCondition = condition;
+                captureEnabled = true;
+            });
+
+            await terminal.InvokeAsync(() =>
+            {
+                injectedAtIteration = iteration;
+                terminal.Application.GetInputInjector().InjectMouse(
+                    MouseAt(point, MouseFlags.PositionReport),
+                    new InputInjectionOptions
+                    {
+                        Mode = InputInjectionMode.Pipeline,
+                        AutoProcess = false,
+                        TimeProvider = terminal.Time
+                    });
+            });
+            await completion.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+            return await terminal.InvokeAsync(() =>
+            {
+                return new TaskbarTransitionMetrics(
+                    titleChanges,
+                    textChanges,
+                    popupLayouts,
+                    itemLayouts,
+                    popupDraws,
+                    itemDraws,
+                    frameChanges,
+                    layoutAndDraws,
+                    renderedAfterIterations,
+                    [.. frameStates]);
+            });
+        }
+
+        static void AssertPopupCells(
+            TaskbarFramebufferState frame,
+            params Terminal.Gui.Drawing.Attribute[] itemAttributes)
+        {
+            var popupAttribute =
+                new Terminal.Gui.Drawing.Attribute(StandardColor.White, StandardColor.RaisinBlack);
+            Assert.Equal(
+                frame.PopupFrame.Width * frame.PopupFrame.Height,
+                frame.PopupCells.Length);
+            for (var y = 0; y < frame.PopupFrame.Height; y++)
+            {
+                for (var x = 0; x < frame.PopupFrame.Width; x++)
+                {
+                    var cell = frame.PopupCells[y * frame.PopupFrame.Width + x];
+                    if (y == 0 || y == frame.PopupFrame.Height - 1 ||
+                        x == 0 || x == frame.PopupFrame.Width - 1)
+                    {
+                        Assert.Equal(popupAttribute, cell.Attribute);
+                        var expectedBorder = y switch
+                        {
+                            0 when x == 0 => "┌",
+                            0 when x == frame.PopupFrame.Width - 1 => "┐",
+                            0 => "─",
+                            _ when y == frame.PopupFrame.Height - 1 && x == 0 => "└",
+                            _ when y == frame.PopupFrame.Height - 1 &&
+                                   x == frame.PopupFrame.Width - 1 => "┘",
+                            _ when y == frame.PopupFrame.Height - 1 => "─",
+                            _ => "│"
+                        };
+                        Assert.Equal(expectedBorder, cell.Grapheme);
+                        continue;
+                    }
+
+                    var screenX = frame.PopupFrame.X + x;
+                    var itemIndex = Array.FindIndex(
+                        frame.ItemFrames,
+                        itemFrame => screenX >= itemFrame.Left && screenX < itemFrame.Right);
+                    Assert.InRange(itemIndex, 0, itemAttributes.Length - 1);
+                    Assert.Equal(itemAttributes[itemIndex], cell.Attribute);
+                }
+            }
+        }
+
+        var chineseFrame = await terminal.InvokeAsync(items[1].FrameToScreen);
+        var chinesePoint = new Point(
+            chineseFrame.X + chineseFrame.Width / 2,
+            chineseFrame.Y);
+        var enter = await ProbeAsync(
+            chinesePoint,
+            () => items[1].Title == chineseTitle);
+
+        Assert.Equal(2, enter.TitleChanges);
+        Assert.Equal(2, enter.TextChanges);
+        Assert.Equal(1, enter.PopupLayouts);
+        Assert.Equal(2, enter.ItemLayouts);
+        Assert.Equal(1, enter.PopupDraws);
+        Assert.Equal(3, enter.ItemDraws);
+        Assert.Equal(3, enter.FrameChanges);
+        Assert.Equal(1, enter.LayoutAndDraws);
+        Assert.Equal(1, enter.Iterations);
+        var enterFrame = Assert.Single(enter.Frames);
+        Assert.True(enterFrame.PopupVisible);
+        Assert.Equal(new Rectangle(0, 9, 30, 3), enterFrame.PopupFrame);
+        Assert.Equal(["主", chineseTitle, "…"], enterFrame.Titles);
+        Assert.Equal(
+            ["主", chineseTitle, "…"],
+            enterFrame.VisibleTexts.Select(text => text.Normalize()).ToArray());
+        Assert.Equal(
+            [
+                new Rectangle(1, 10, 4, 1),
+                new Rectangle(5, 10, 21, 1),
+                new Rectangle(26, 10, 3, 1)
+            ],
+            enterFrame.ItemFrames);
+        Assert.False(enterFrame.MouseStates[0].HasFlag(MouseState.In));
+        Assert.True(enterFrame.MouseStates[1].HasFlag(MouseState.In));
+        Assert.False(enterFrame.MouseStates[2].HasFlag(MouseState.In));
+        Assert.Equal(
+            new Terminal.Gui.Drawing.Attribute(StandardColor.Black, StandardColor.Cyan),
+            enterFrame.Attributes[0]);
+        Assert.Equal(
+            new Terminal.Gui.Drawing.Attribute(StandardColor.White, StandardColor.DarkSlateGray),
+            enterFrame.Attributes[1]);
+        Assert.Equal(
+            new Terminal.Gui.Drawing.Attribute(StandardColor.White, StandardColor.RaisinBlack),
+            enterFrame.Attributes[2]);
+        AssertPopupCells(
+            enterFrame,
+            new Terminal.Gui.Drawing.Attribute(StandardColor.Black, StandardColor.Cyan),
+            new Terminal.Gui.Drawing.Attribute(StandardColor.White, StandardColor.DarkSlateGray),
+            new Terminal.Gui.Drawing.Attribute(StandardColor.White, StandardColor.RaisinBlack));
+
+        var emojiFrame = await terminal.InvokeAsync(items[2].FrameToScreen);
+        var emojiPoint = new Point(
+            emojiFrame.X + emojiFrame.Width / 2,
+            emojiFrame.Y);
+        var adjacent = await ProbeAsync(
+            emojiPoint,
+            () => items[2].Title == emojiTitle);
+
+        Assert.Equal(2, adjacent.TitleChanges);
+        Assert.Equal(2, adjacent.TextChanges);
+        Assert.Equal(1, adjacent.PopupLayouts);
+        Assert.Equal(2, adjacent.ItemLayouts);
+        Assert.Equal(1, adjacent.PopupDraws);
+        Assert.Equal(3, adjacent.ItemDraws);
+        Assert.Equal(3, adjacent.FrameChanges);
+        Assert.Equal(1, adjacent.LayoutAndDraws);
+        Assert.Equal(1, adjacent.Iterations);
+        var adjacentFrame = Assert.Single(adjacent.Frames);
+        Assert.True(adjacentFrame.PopupVisible);
+        Assert.Equal(new Rectangle(0, 9, 30, 3), adjacentFrame.PopupFrame);
+        Assert.Equal(["主", "超长的…", emojiTitle], adjacentFrame.Titles);
+        Assert.Equal(
+            new[] { "主", "超长的…", emojiTitle }.Select(text => text.Normalize()).ToArray(),
+            adjacentFrame.VisibleTexts.Select(text => text.Normalize()).ToArray());
+        Assert.Equal(
+            [
+                new Rectangle(1, 10, 4, 1),
+                new Rectangle(5, 10, 9, 1),
+                new Rectangle(14, 10, 15, 1)
+            ],
+            adjacentFrame.ItemFrames);
+        Assert.False(adjacentFrame.MouseStates[0].HasFlag(MouseState.In));
+        Assert.False(adjacentFrame.MouseStates[1].HasFlag(MouseState.In));
+        Assert.True(adjacentFrame.MouseStates[2].HasFlag(MouseState.In));
+        Assert.Equal(
+            new Terminal.Gui.Drawing.Attribute(StandardColor.Black, StandardColor.Cyan),
+            adjacentFrame.Attributes[0]);
+        Assert.Equal(
+            new Terminal.Gui.Drawing.Attribute(StandardColor.White, StandardColor.RaisinBlack),
+            adjacentFrame.Attributes[1]);
+        Assert.Equal(
+            new Terminal.Gui.Drawing.Attribute(StandardColor.White, StandardColor.DarkSlateGray),
+            adjacentFrame.Attributes[2]);
+        AssertPopupCells(
+            adjacentFrame,
+            new Terminal.Gui.Drawing.Attribute(StandardColor.Black, StandardColor.Cyan),
+            new Terminal.Gui.Drawing.Attribute(StandardColor.White, StandardColor.RaisinBlack),
+            new Terminal.Gui.Drawing.Attribute(StandardColor.White, StandardColor.DarkSlateGray));
+
+        var nextIteration = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        EventHandler<Terminal.Gui.App.EventArgs<Terminal.Gui.App.IApplication?>>?
+            nextIterationHandler = null;
+        await terminal.InvokeAsync(() =>
+        {
+            titleChanges = 0;
+            textChanges = 0;
+            popupLayouts = 0;
+            popupDraws = 0;
+            itemLayouts = 0;
+            itemDraws = 0;
+            frameChanges = 0;
+            layoutAndDraws = 0;
+            frameStates.Clear();
+            captureEnabled = true;
+            nextIterationHandler = (_, _) =>
+            {
+                terminal.Application.Iteration -= nextIterationHandler;
+                nextIteration.TrySetResult();
+            };
+            terminal.Application.Iteration += nextIterationHandler;
+            taskbar.Refresh([active, chinese, emoji], active);
+        });
+        await nextIteration.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await terminal.InvokeAsync(() => captureEnabled = false);
+        Assert.Equal(0, titleChanges);
+        Assert.Equal(0, textChanges);
+        Assert.Equal(0, popupLayouts);
+        Assert.Equal(0, itemLayouts);
+        Assert.Equal(0, popupDraws);
+        Assert.Equal(0, itemDraws);
+        Assert.Equal(0, frameChanges);
+        Assert.Equal(0, layoutAndDraws);
+
+        var leave = await ProbeAsync(
+            Point.Empty,
+            () => !parts.Popup.Visible);
+
+        Assert.Equal(2, leave.TitleChanges);
+        Assert.Equal(2, leave.TextChanges);
+        Assert.Equal(1, leave.PopupLayouts);
+        Assert.Equal(3, leave.ItemLayouts);
+        Assert.Equal(0, leave.PopupDraws);
+        Assert.Equal(0, leave.ItemDraws);
+        Assert.Equal(3, leave.FrameChanges);
+        Assert.Equal(1, leave.LayoutAndDraws);
+        Assert.Equal(1, leave.Iterations);
+        var leaveFrame = Assert.Single(leave.Frames);
+        Assert.False(leaveFrame.PopupVisible);
+        Assert.Equal(["主", "超长的wor…", "👩‍💻e\u0301 telem…"], leaveFrame.Titles);
+        Assert.Equal(
+            [
+                new Rectangle(1, 10, 4, 1),
+                new Rectangle(5, 10, 12, 1),
+                new Rectangle(17, 10, 12, 1)
+            ],
+            leaveFrame.ItemFrames);
+    }
+
+    [Fact]
+    public async Task WorkspaceTaskbar_AppliesDeferredActiveLayoutWhenMousePressEnds()
+    {
+        var output = host.ForPlugin("TaskbarDeferredLayout");
+        var first = output.CreateWorkspace("主");
+        var secondTitle = "切换后必须完整显示的workspace";
+        var second = output.CreateWorkspace(secondTitle);
+        var third = output.CreateWorkspace("另一个很长的workspace标题");
+        host.SwitchWorkspace(first);
+
+        await StartAsync();
+        await terminal.ResizeAsync(30, 12);
+        await terminal.MoveMouseAsync(new Point(0, 11));
+        var taskbar = await GetWorkspaceTaskbarAsync();
+        var parts = await terminal.InvokeAsync(() => TaskbarParts(taskbar));
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() => parts.Popup.Visible));
+        var items = await terminal.InvokeAsync(
+            () => parts.Popup.SubViews.OfType<Shortcut>().ToArray());
+        var firstFrame = await terminal.InvokeAsync(items[0].FrameToScreen);
+        var point = new Point(firstFrame.X + firstFrame.Width / 2, firstFrame.Y);
+        await terminal.MoveMouseAsync(point);
+        await terminal.WaitForAsync(async () =>
+            (await terminal.InvokeAsync(() => items[0].MouseState)).HasFlag(MouseState.In));
+
+        var action = await terminal.InvokeAsync(() => items[0].Action);
+        var pressed = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        EventHandler<Mouse>? pressedHandler = null;
+        await terminal.InvokeAsync(() =>
+        {
+            items[0].Action = null;
+            pressedHandler = (_, mouse) =>
+            {
+                if (mouse.Flags.HasFlag(MouseFlags.LeftButtonPressed))
+                    pressed.TrySetResult();
+            };
+            items[0].MouseEvent += pressedHandler;
+            items[0].CommandView!.MouseEvent += pressedHandler;
+            terminal.Application.GetInputInjector().InjectMouse(
+                MouseAt(point, MouseFlags.LeftButtonPressed),
+                new InputInjectionOptions
+                {
+                    Mode = InputInjectionMode.Pipeline,
+                    AutoProcess = false,
+                    TimeProvider = terminal.Time
+                });
+        });
+        await pressed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await terminal.InvokeAsync(() =>
+        {
+            items[0].MouseEvent -= pressedHandler;
+            items[0].CommandView!.MouseEvent -= pressedHandler;
+        });
+        await terminal.InvokeAsync(() => taskbar.Refresh([first, second, third], second));
+        Assert.NotEqual(secondTitle, await terminal.InvokeAsync(() => items[1].Title));
+
+        await terminal.InvokeAsync(() =>
+            terminal.Application.GetInputInjector().InjectMouse(
+                MouseAt(point, MouseFlags.LeftButtonReleased),
+                new InputInjectionOptions
+                {
+                    Mode = InputInjectionMode.Pipeline,
+                    AutoProcess = false,
+                    TimeProvider = terminal.Time
+                }));
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() => items[1].Title) == secondTitle);
+
+        await terminal.InvokeAsync(() =>
+        {
+            items[0].Action = action;
+            taskbar.Refresh([first, second, third], first);
+        });
+    }
+
+    [Fact]
+    public async Task WorkspaceTaskbar_TruncatesGraphemeTitlesAndExpandsActiveAndHovered()
+    {
+        var output = host.ForPlugin("TaskbarTitles");
+        var active = output.CreateWorkspace("主");
+        var chineseTitle = "超长的workspace标题";
+        var emojiTitle = "👩‍💻e\u0301 telemetry";
+        _ = output.CreateWorkspace(chineseTitle);
+        _ = output.CreateWorkspace(emojiTitle);
+        ListView? content = null;
+        output.SetPanel(
+            active,
+            "main",
+            "main",
+            new LiveDisplayContent(() =>
+            {
+                content = new ListView { Width = Dim.Fill(), Height = Dim.Fill() };
+                content.SetSource(new ObservableCollection<string>(["zero", "one", "two"]));
+                content.SelectedItem = 1;
+                return content;
+            }),
+            fullBleed: true);
+        host.SwitchWorkspace(active);
+
+        await StartAsync();
+        await terminal.WaitForScreenAsync("one");
+        await terminal.InvokeAsync(() => content!.SetFocus());
+        await terminal.MoveMouseAsync(new Point(0, 17));
+        var taskbar = await GetWorkspaceTaskbarAsync();
+        var parts = await terminal.InvokeAsync(() => TaskbarParts(taskbar));
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() => parts.Popup.Visible));
+        var items = await terminal.InvokeAsync(() => parts.Popup.SubViews.OfType<Shortcut>().ToArray());
+        Assert.Equal(["主", chineseTitle, emojiTitle], items.Select(item => item.Title).ToArray());
+        Assert.Equal(0, workspaceTaskbarSaveCount);
+
+        await terminal.ResizeAsync(30, 12);
+        await terminal.WaitForAsync(async () =>
+        {
+            var titles = await terminal.InvokeAsync(() => items.Select(item => item.Title).ToArray());
+            return titles[0] == "主" &&
+                   titles[1].EndsWith('…') &&
+                   titles[2].EndsWith('…');
+        });
+        var shortened = await terminal.InvokeAsync(() => items.Select(item => item.Title).ToArray());
+        Assert.Equal("主", shortened[0]);
+        AssertValidGraphemePrefix(chineseTitle, shortened[1]);
+        AssertValidGraphemePrefix(emojiTitle, shortened[2]);
+        Assert.Equal(
+            shortened[1].Normalize(),
+            (await CaptureViewTextAsync(items[1].CommandView!)).Normalize());
+        Assert.Equal(
+            shortened[2].Normalize(),
+            (await CaptureViewTextAsync(items[2].CommandView!)).Normalize());
+
+        var chineseFrame = await terminal.InvokeAsync(items[1].FrameToScreen);
+        await terminal.MoveMouseAsync(new Point(chineseFrame.X + chineseFrame.Width / 2, chineseFrame.Y));
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() => items[1].Title) == chineseTitle);
+        Assert.Equal("主", await terminal.InvokeAsync(() => items[0].Title));
+        Assert.EndsWith("…", await terminal.InvokeAsync(() => items[2].Title));
+        Assert.Equal(
+            chineseTitle.Normalize(),
+            (await CaptureViewTextAsync(items[1].CommandView!)).Normalize());
+        Assert.True(await terminal.InvokeAsync(() => content!.HasFocus));
+        Assert.Equal(1, await terminal.InvokeAsync(() => content!.SelectedItem));
+
+        var activeFrame = await terminal.InvokeAsync(items[0].FrameToScreen);
+        await terminal.MoveMouseAsync(new Point(activeFrame.X + activeFrame.Width / 2, activeFrame.Y));
+        await terminal.WaitForAsync(async () =>
+            (await terminal.InvokeAsync(() => items[1].Title)).EndsWith('…'));
+        Assert.Equal("主", await terminal.InvokeAsync(() => items[0].Title));
+
+        await terminal.ResizeAsync(80, 18);
+        await terminal.WaitForAsync(async () =>
+            (await terminal.InvokeAsync(() => items.Select(item => item.Title).ToArray()))
+            .SequenceEqual(new[] { "主", chineseTitle, emojiTitle }));
+        var popupFrame = await terminal.InvokeAsync(parts.Popup.FrameToScreen);
+        Assert.True(popupFrame.Left >= 0);
+        Assert.True(popupFrame.Right <= 80);
+        Assert.Equal(0, workspaceTaskbarSaveCount);
+    }
+
+    [Fact]
+    public async Task WorkspaceTaskbar_ClickThresholdAndDragUseNativeCaptureWithoutDoubleActivation()
+    {
+        var output = host.ForPlugin("TaskbarDrag");
+        var workspaces = new[]
+        {
+            output.CreateWorkspace("A"),
+            output.CreateWorkspace("B"),
+            output.CreateWorkspace("C"),
+            output.CreateWorkspace("D")
+        };
+        host.SwitchWorkspace(workspaces[0]);
+
+        await StartAsync();
+        await terminal.MoveMouseAsync(new Point(0, 17));
+        var taskbar = await GetWorkspaceTaskbarAsync();
+        var parts = await terminal.InvokeAsync(() => TaskbarParts(taskbar));
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() => parts.Popup.Visible));
+        var items = await terminal.InvokeAsync(() => parts.Popup.SubViews.OfType<Shortcut>().ToArray());
+        var activations = new int[items.Length];
+        await terminal.InvokeAsync(() =>
+        {
+            for (var index = 0; index < items.Length; index++)
+            {
+                var captured = index;
+                items[index].Activated += (_, _) => activations[captured]++;
+            }
+        });
+
+        var smallMoveFrame = await terminal.InvokeAsync(items[1].FrameToScreen);
+        var smallMoveStart = new Point(
+            smallMoveFrame.X + smallMoveFrame.Width / 2,
+            smallMoveFrame.Y);
+        await terminal.InjectAsync(MouseAt(smallMoveStart, MouseFlags.LeftButtonPressed));
+        await terminal.InjectAsync(MouseAt(
+            smallMoveStart with { X = smallMoveStart.X + 1 },
+            MouseFlags.LeftButtonPressed | MouseFlags.PositionReport));
+        await terminal.InjectAsync(MouseAt(
+            smallMoveStart with { X = smallMoveStart.X + 1 },
+            MouseFlags.LeftButtonReleased));
+        await terminal.WaitForAsync(() => ReferenceEquals(host.CurrentWorkspace, workspaces[1]));
+        await terminal.WaitForAsync(() => activations[1] == 1);
+        await terminal.WaitForAsync(async () =>
+            !await terminal.InvokeAsync(() => terminal.Application.Mouse.IsGrabbed()));
+        Assert.Equal(1, activations.Sum());
+        Assert.Equal(0, workspaceTaskbarSaveCount);
+
+        host.SwitchWorkspace(workspaces[0]);
+        await terminal.WaitForAsync(() => ReferenceEquals(host.CurrentWorkspace, workspaces[0]));
+        await terminal.RedrawAsync();
+        items = await terminal.InvokeAsync(() => parts.Popup.SubViews.OfType<Shortcut>().ToArray());
+        var draggedActivations = 0;
+        await terminal.InvokeAsync(() => items[3].Activated += (_, _) => draggedActivations++);
+        var frozenFrames = await terminal.InvokeAsync(() =>
+            items.Select(item => item.FrameToScreen()).ToArray());
+        var dragStart = new Point(
+            frozenFrames[3].X + frozenFrames[3].Width / 2,
+            frozenFrames[3].Y);
+        var dragLeft = new Point(frozenFrames[0].X, frozenFrames[0].Y);
+        await terminal.MoveMouseAsync(dragStart);
+        await terminal.WaitForAsync(async () =>
+            (await terminal.InvokeAsync(() => items[3].MouseState)).HasFlag(MouseState.In));
+        Assert.False(await terminal.InvokeAsync(() => terminal.Application.Mouse.IsGrabbed()));
+        frozenFrames = await terminal.InvokeAsync(() =>
+            items.Select(item => item.FrameToScreen()).ToArray());
+        dragStart = new Point(
+            frozenFrames[3].X + frozenFrames[3].Width / 2,
+            frozenFrames[3].Y);
+        dragLeft = new Point(frozenFrames[0].X, frozenFrames[0].Y);
+        Assert.Equal(
+            items,
+            await terminal.InvokeAsync(() => parts.Popup.SubViews.OfType<Shortcut>().ToArray()));
+        await terminal.InjectAsync(MouseAt(dragStart, MouseFlags.LeftButtonPressed));
+        await terminal.InjectAsync(MouseAt(
+            dragLeft,
+            MouseFlags.LeftButtonPressed | MouseFlags.PositionReport));
+        Assert.True(await terminal.InvokeAsync(() => terminal.Application.Mouse.IsGrabbed(items[3])));
+        Assert.True(await terminal.InvokeAsync(() => parts.Popup.Visible));
+        var popupFrame = await terminal.InvokeAsync(parts.Popup.FrameToScreen);
+        var outsidePopup = new Point(popupFrame.Left - 1, dragStart.Y);
+        await terminal.InjectAsync(MouseAt(
+            outsidePopup,
+            MouseFlags.LeftButtonPressed | MouseFlags.PositionReport));
+        Assert.True(await terminal.InvokeAsync(() => parts.Popup.Visible));
+        Assert.True(await terminal.InvokeAsync(() => terminal.Application.Mouse.IsGrabbed(items[3])));
+        Assert.Equal(
+            frozenFrames,
+            await terminal.InvokeAsync(() => items.Select(item => item.FrameToScreen()).ToArray()));
+        Assert.Same(workspaces[0], host.CurrentWorkspace);
+        Assert.Equal(0, workspaceTaskbarSaveCount);
+
+        await terminal.InjectAsync(MouseAt(dragLeft, MouseFlags.LeftButtonReleased));
+        await terminal.WaitForAsync(() => workspaceTaskbarSaveCount == 1);
+        await terminal.WaitForAsync(async () =>
+            (await terminal.InvokeAsync(() => parts.Popup.SubViews.OfType<Shortcut>().Select(item => item.Title).ToArray()))
+            .SequenceEqual(new[] { "D", "A", "B", "C" }));
+        Assert.False(await terminal.InvokeAsync(() => terminal.Application.Mouse.IsGrabbed()));
+        Assert.Same(workspaces[0], host.CurrentWorkspace);
+        Assert.Equal(0, draggedActivations);
+        Assert.Equal(["D", "A", "B", "C"], workspaceTaskbarOrder);
+
+        items = await terminal.InvokeAsync(() => parts.Popup.SubViews.OfType<Shortcut>().ToArray());
+        var rightFrames = await terminal.InvokeAsync(() =>
+            items.Select(item => item.FrameToScreen()).ToArray());
+        var dragRightStart = new Point(
+            rightFrames[0].X + rightFrames[0].Width / 2,
+            rightFrames[0].Y);
+        var dragRight = new Point(rightFrames[^1].Right - 1, rightFrames[^1].Y);
+        await terminal.InjectAsync(MouseAt(dragRightStart, MouseFlags.LeftButtonPressed));
+        await terminal.InjectAsync(MouseAt(
+            dragRight,
+            MouseFlags.LeftButtonPressed | MouseFlags.PositionReport));
+        await terminal.InjectAsync(MouseAt(dragRight, MouseFlags.LeftButtonReleased));
+        await terminal.WaitForAsync(() => workspaceTaskbarSaveCount == 2);
+        await terminal.WaitForAsync(async () =>
+            (await terminal.InvokeAsync(() => parts.Popup.SubViews.OfType<Shortcut>().Select(item => item.Title).ToArray()))
+            .SequenceEqual(new[] { "A", "B", "C", "D" }));
+        Assert.Same(workspaces[0], host.CurrentWorkspace);
+
+        items = await terminal.InvokeAsync(() => parts.Popup.SubViews.OfType<Shortcut>().ToArray());
+        var noChangeFrame = await terminal.InvokeAsync(items[1].FrameToScreen);
+        var noChangeStart = new Point(
+            noChangeFrame.X + noChangeFrame.Width / 2,
+            noChangeFrame.Y);
+        var noChangeMove = noChangeStart with { X = noChangeStart.X + 2 };
+        await terminal.InjectAsync(MouseAt(noChangeStart, MouseFlags.LeftButtonPressed));
+        await terminal.InjectAsync(MouseAt(
+            noChangeMove,
+            MouseFlags.LeftButtonPressed | MouseFlags.PositionReport));
+        await terminal.InjectAsync(MouseAt(noChangeMove, MouseFlags.LeftButtonReleased));
+        await terminal.WaitForAsync(async () =>
+            !await terminal.InvokeAsync(() => terminal.Application.Mouse.IsGrabbed()));
+        Assert.Equal(2, workspaceTaskbarSaveCount);
+        Assert.Same(workspaces[0], host.CurrentWorkspace);
+    }
+
+    [Fact]
+    public async Task WorkspaceTaskbar_PersistentTitleOrderRestoresAbsentAndLeavesHostOrderUntouched()
+    {
+        workspaceTaskbarOrder.AddRange(["Third", "Missing", "First"]);
+        var output = host.ForPlugin("TaskbarOrder");
+        var first = output.CreateWorkspace("First");
+        var second = output.CreateWorkspace("Second");
+        _ = output.CreateWorkspace("Third");
+        var missing = output.CreateWorkspace("Missing");
+        _ = output.CreateWorkspace("Fourth");
+        output.BindWorkspaceHotkey(second, ConsoleKey.F8);
+
+        await StartAsync();
+        await terminal.MoveMouseAsync(new Point(0, 17));
+        var taskbar = await GetWorkspaceTaskbarAsync();
+        var parts = await terminal.InvokeAsync(() => TaskbarParts(taskbar));
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() => parts.Popup.Visible));
+        await terminal.WaitForAsync(async () =>
+            (await terminal.InvokeAsync(() => parts.Popup.SubViews.OfType<Shortcut>().Select(item => item.Title).ToArray()))
+            .SequenceEqual(new[] { "Third", "Missing", "First", "Second", "Fourth" }));
+
+        var items = await terminal.InvokeAsync(() => parts.Popup.SubViews.OfType<Shortcut>().ToArray());
+        var frames = await terminal.InvokeAsync(() => items.Select(item => item.FrameToScreen()).ToArray());
+        var source = new Point(frames[^1].X + frames[^1].Width / 2, frames[^1].Y);
+        var target = new Point(frames[0].X, frames[0].Y);
+        await terminal.InjectAsync(MouseAt(source, MouseFlags.LeftButtonPressed));
+        await terminal.InjectAsync(MouseAt(
+            target,
+            MouseFlags.LeftButtonPressed | MouseFlags.PositionReport));
+        await terminal.InjectAsync(MouseAt(target, MouseFlags.LeftButtonReleased));
+        await terminal.WaitForAsync(() => workspaceTaskbarSaveCount == 1);
+        Assert.Equal(["Fourth", "Third", "Missing", "First", "Second"], workspaceTaskbarOrder);
+
+        await terminal.StopAsync(host, run!);
+        run = null;
+        var secondHost = CreateHost();
+        host = secondHost;
+        BindHost(secondHost);
+        var secondOutput = secondHost.ForPlugin("TaskbarOrderReloaded");
+        var reloadedFirst = secondOutput.CreateWorkspace("First");
+        var reloadedSecond = secondOutput.CreateWorkspace("Second");
+        _ = secondOutput.CreateWorkspace("Third");
+        _ = secondOutput.CreateWorkspace("Fourth");
+        secondOutput.BindWorkspaceHotkey(reloadedSecond, ConsoleKey.F8);
+        secondHost.SwitchWorkspace(reloadedFirst);
+
+        await StartAsync();
+        await terminal.MoveMouseAsync(new Point(0, 17));
+        taskbar = await GetWorkspaceTaskbarAsync();
+        parts = await terminal.InvokeAsync(() => TaskbarParts(taskbar));
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() => parts.Popup.Visible));
+        await terminal.WaitForAsync(async () =>
+            (await terminal.InvokeAsync(() => parts.Popup.SubViews.OfType<Shortcut>().Select(item => item.Title).ToArray()))
+            .SequenceEqual(new[] { "Fourth", "Third", "First", "Second" }));
+
+        _ = secondOutput.CreateWorkspace(missing.Title);
+        await terminal.WaitForAsync(async () =>
+            (await terminal.InvokeAsync(() => parts.Popup.SubViews.OfType<Shortcut>().Select(item => item.Title).ToArray()))
+            .SequenceEqual(new[] { "Fourth", "Third", "Missing", "First", "Second" }));
+        Assert.Equal(1, workspaceTaskbarSaveCount);
+
+        await terminal.InjectAsync(Key.F8);
+        await terminal.WaitForAsync(() => ReferenceEquals(secondHost.CurrentWorkspace, reloadedSecond));
+        await terminal.MoveMouseAsync(Point.Empty);
+        await terminal.WaitForAsync(async () =>
+            !await terminal.InvokeAsync(() => parts.Popup.Visible));
+        await secondHost.HandleCommandAsync("/workspace list");
+        await terminal.WaitForScreenAsync("Workspaces");
+        var screen = await terminal.CaptureScreenAsync();
+        var list = screen[screen.IndexOf("Workspaces", StringComparison.Ordinal)..];
+        Assert.True(list.IndexOf("First", StringComparison.Ordinal) <
+                    list.IndexOf("Second", StringComparison.Ordinal));
+        Assert.True(list.IndexOf("Second", StringComparison.Ordinal) <
+                    list.IndexOf("Third", StringComparison.Ordinal));
+        Assert.True(list.IndexOf("Third", StringComparison.Ordinal) <
+                    list.IndexOf("Fourth", StringComparison.Ordinal));
+        Assert.True(list.IndexOf("Fourth", StringComparison.Ordinal) <
+                    list.IndexOf("Missing", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -359,7 +1483,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
         await terminal.WaitForScreenAsync("ShortContent");
         var shortened = await terminal.CaptureScreenAsync();
         var viewportY = await terminal.InvokeAsync(
-            () => terminal.Application.TopRunnableView!.SubViews.First().SubViews.Single().Viewport.Y);
+            () => terminal.Application.TopRunnableView!.SubViews.First().SubViews.Last().Viewport.Y);
 
         Assert.Equal(0, viewportY);
         Assert.DoesNotContain("line-50", shortened);
@@ -574,6 +1698,99 @@ public sealed class LiveDisplayRenderTests : IDisposable
     }
 
     [Fact]
+    public async Task BackgroundWorkspaceRemoval_ReleasesIdentityGateAndCleansUpOnce()
+    {
+        var output = host.ForPlugin("ConcurrentRemoval");
+        var removed = output.CreateWorkspace("Removed concurrently");
+        var replacement = output.CreateWorkspace("Replacement workspace");
+        var disposed = 0;
+        var shortcutCalls = 0;
+        output.SetPanel(
+            removed,
+            "main",
+            "main",
+            new LiveDisplayContent(() =>
+            {
+                var view = new Label { Text = "Concurrent removal target" };
+                view.Disposing += (_, _) => disposed++;
+                return view;
+            }));
+        output.SetPanel(
+            replacement,
+            "main",
+            "main",
+            LiveDisplayContent.Text("Replacement remains"),
+            switchToWorkspace: false);
+        output.Notify(
+            removed,
+            "Removal shortcut",
+            ttl: TimeSpan.FromMinutes(1),
+            shortcuts: new LiveDisplayShortcut(ConsoleKey.F8, () =>
+            {
+                Interlocked.Increment(ref shortcutCalls);
+                return Task.CompletedTask;
+            }));
+
+        await StartAsync();
+        await terminal.WaitForScreenAsync("Concurrent removal target");
+        await terminal.WaitForScreenAsync("Removal shortcut");
+        Assert.Equal(1, KeyboardManager.TransientShortcutCountForTests);
+
+        LiveDisplayWorkspace? competingWorkspace = null;
+        var armed = 0;
+        EventHandler<Terminal.Gui.App.TimeoutEventArgs> added = (_, _) =>
+        {
+            if (Interlocked.Exchange(ref armed, 0) == 0)
+                return;
+
+            var competing = Task.Factory.StartNew(
+                () => host.CreateWorkspace("replacement WORKSPACE"),
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
+            if (!competing.Wait(TimeSpan.FromSeconds(5)))
+                throw new TimeoutException("workspaceIdentityGate was held while scheduling workspace removal.");
+            competingWorkspace = competing.GetAwaiter().GetResult();
+        };
+        var timedEvents = terminal.Application.TimedEvents
+            ?? throw new InvalidOperationException("Terminal.Gui timed events are unavailable.");
+        timedEvents.Added += added;
+        try
+        {
+            Volatile.Write(ref armed, 1);
+            await Task.Factory.StartNew(
+                    () => output.RemoveWorkspace(removed),
+                    CancellationToken.None,
+                    TaskCreationOptions.LongRunning,
+                    TaskScheduler.Default)
+                .WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        finally
+        {
+            timedEvents.Added -= added;
+        }
+
+        output.RemoveWorkspace(removed);
+        await terminal.WaitForScreenAsync("Replacement remains");
+        await terminal.WaitForAsync(() => Volatile.Read(ref disposed) == 1);
+        await terminal.InjectAsync(Key.F8);
+
+        Assert.Same(replacement, competingWorkspace);
+        Assert.Same(replacement, host.CurrentWorkspace);
+        Assert.Equal(1, disposed);
+        Assert.Equal(0, shortcutCalls);
+        Assert.Equal(0, KeyboardManager.TransientShortcutCountForTests);
+
+        var taskbar = await GetWorkspaceTaskbarAsync();
+        var parts = await terminal.InvokeAsync(() => TaskbarParts(taskbar));
+        var titles = await terminal.InvokeAsync(() =>
+            parts.Popup.SubViews.OfType<Shortcut>().Select(item => item.Title).ToArray());
+        Assert.DoesNotContain(removed.Title, titles);
+        Assert.Equal(1, titles.Count(title =>
+            title.Equals(replacement.Title, StringComparison.OrdinalIgnoreCase)));
+    }
+
+    [Fact]
     public async Task EqualWorkspaceAlias_UsesCanonicalIdentityForOutputRemovalAndDisposal()
     {
         var output = host.ForPlugin("Canonical");
@@ -702,6 +1919,114 @@ public sealed class LiveDisplayRenderTests : IDisposable
         await terminal.InjectAsync(Key.Enter);
         await terminal.WaitForAsync(() => commandMode.IsOpen);
         Assert.Equal(string.Empty, commandInput.Text);
+    }
+
+    [Fact]
+    public async Task WorkspaceTaskbar_CommandModeSuppressesTriggerAndPreservesInputFocus()
+    {
+        var output = host.ForPlugin("TaskbarCommand");
+        var first = output.CreateWorkspace("Taskbar command");
+        var second = output.CreateWorkspace("Other workspace");
+        View? focusTarget = null;
+        output.SetPanel(
+            first,
+            "main",
+            "main",
+            new LiveDisplayContent(() =>
+            {
+                focusTarget = new View
+                {
+                    Text = "TaskbarCommandFocus",
+                    Width = Dim.Fill(),
+                    Height = Dim.Fill(),
+                    CanFocus = true
+                };
+                return focusTarget;
+            }),
+            fullBleed: true);
+        output.SetPanel(second, "main", "main", LiveDisplayContent.Text("Other"), fullBleed: true);
+        host.SwitchWorkspace(first);
+
+        await StartAsync();
+        await terminal.WaitForScreenAsync("TaskbarCommandFocus");
+        await terminal.InvokeAsync(() => focusTarget!.SetFocus());
+        var taskbar = await GetWorkspaceTaskbarAsync();
+        var parts = await terminal.InvokeAsync(() => TaskbarParts(taskbar));
+        await terminal.MoveMouseAsync(new Point(0, 17));
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() => parts.Popup.Visible));
+        var taskbarCell = await terminal.InvokeAsync(() =>
+            parts.Popup.SubViews
+                .OfType<Shortcut>()
+                .First()
+                .CommandView!
+                .ViewportToScreen(Point.Empty));
+        var taskbarAttribute = await terminal.CaptureAttributeAsync(taskbarCell);
+        Assert.Equal(
+            new Terminal.Gui.Drawing.Attribute(StandardColor.Black, StandardColor.Cyan).Background,
+            taskbarAttribute!.Value.Background);
+
+        var dragItem = await terminal.InvokeAsync(() =>
+            parts.Popup.SubViews.OfType<Shortcut>().Last());
+        var dragFrame = await terminal.InvokeAsync(dragItem.FrameToScreen);
+        var dragStart = new Point(dragFrame.X + dragFrame.Width / 2, dragFrame.Y);
+        var dragMove = dragStart with { X = dragStart.X - 2 };
+        var orderBeforeCommand = await terminal.InvokeAsync(() =>
+            parts.Popup.SubViews.OfType<Shortcut>().Select(item => item.Title).ToArray());
+        await terminal.InjectAsync(MouseAt(dragStart, MouseFlags.LeftButtonPressed));
+        await terminal.InjectAsync(MouseAt(
+            dragMove,
+            MouseFlags.LeftButtonPressed | MouseFlags.PositionReport));
+        Assert.True(await terminal.InvokeAsync(() => terminal.Application.Mouse.IsGrabbed(dragItem)));
+
+        await terminal.InjectAsync(new Key('/'));
+        var commandMode = await GetCommandModeAsync();
+        var commandInput = await GetCommandInputAsync(commandMode);
+        await terminal.WaitForAsync(() => commandMode.IsOpen);
+        Assert.False(await terminal.InvokeAsync(() => parts.Popup.Visible));
+        Assert.False(await terminal.InvokeAsync(() => parts.Trigger.Visible));
+        Assert.False(await terminal.InvokeAsync(() => terminal.Application.Mouse.IsGrabbed()));
+        Assert.Equal(
+            orderBeforeCommand,
+            await terminal.InvokeAsync(() =>
+                parts.Popup.SubViews.OfType<Shortcut>().Select(item => item.Title).ToArray()));
+        Assert.Equal(0, workspaceTaskbarSaveCount);
+        Assert.True(await terminal.InvokeAsync(() => commandInput.HasFocus));
+        Assert.Equal("/", commandInput.Text);
+
+        foreach (var point in new[] { new Point(0, 17), new Point(40, 17), new Point(79, 17) })
+            await terminal.MoveMouseAsync(point);
+        await terminal.InjectAsync(new Key('马'));
+        await terminal.RedrawAsync();
+        var commandScreen = await terminal.CaptureScreenAsync();
+        var commandAttribute = await terminal.CaptureAttributeAsync(taskbarCell);
+
+        Assert.False(await terminal.InvokeAsync(() => parts.Popup.Visible));
+        Assert.False(await terminal.InvokeAsync(() => parts.Trigger.Visible));
+        Assert.True(commandMode.IsOpen);
+        Assert.True(await terminal.InvokeAsync(() => commandInput.HasFocus));
+        Assert.Equal("/马", commandInput.Text);
+        Assert.NotEqual(taskbarAttribute, commandAttribute);
+        Assert.Contains("Command Mode", commandScreen);
+        Assert.DoesNotContain("Taskbar command", commandScreen);
+        Assert.DoesNotContain("Other workspace", commandScreen);
+        Assert.Same(
+            commandMode,
+            await terminal.InvokeAsync(() => terminal.Application.TopRunnableView!.SubViews.Last()));
+
+        await terminal.InjectAsync(Key.Esc);
+        await terminal.WaitForAsync(() => !commandMode.IsOpen);
+        await terminal.RedrawAsync();
+        Assert.False(await terminal.InvokeAsync(() => parts.Popup.Visible));
+        Assert.True(await terminal.InvokeAsync(() => parts.Trigger.Visible));
+        Assert.Same(
+            focusTarget,
+            await terminal.InvokeAsync(() => terminal.Application.TopRunnableView!.MostFocused));
+
+        await terminal.MoveMouseAsync(Point.Empty);
+        await terminal.MoveMouseAsync(new Point(0, 17));
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() => parts.Popup.Visible));
     }
 
     [Fact]
@@ -1519,6 +2844,143 @@ public sealed class LiveDisplayRenderTests : IDisposable
     }
 
     [Fact]
+    public async Task BootstrapUpdates_ReleaseStateGateBeforeTimedEventsDrain()
+    {
+        var bootstrap = new BootstrapWorkspace(host);
+        bootstrap.SetPhase("database", "数据文件", LiveDisplaySeverity.Info, "旧数据文件状态");
+        await StartAsync();
+        await terminal.ResizeAsync(120, 36);
+        await terminal.WaitForScreenAsync("旧数据文件状态");
+
+        var pluginOutput = host.ForPlugin("ConcurrentInit");
+        LiveDisplayWorkspace? pluginWorkspace = null;
+        var armed = 0;
+        EventHandler<Terminal.Gui.App.TimeoutEventArgs> added = (_, _) =>
+        {
+            if (Interlocked.Exchange(ref armed, 0) == 0)
+                return;
+
+            var initialization = Task.Factory.StartNew(
+                () =>
+                {
+                    var workspace = pluginOutput.CreateWorkspace("Concurrent initialized plugin");
+                    pluginOutput.SetPanel(
+                        workspace,
+                        "main",
+                        "main",
+                        LiveDisplayContent.Text("Concurrent plugin ready"),
+                        switchToWorkspace: false);
+                    bootstrap.SetPhase(
+                        "database",
+                        "数据文件",
+                        LiveDisplaySeverity.Success,
+                        "后台初始化完成");
+                    return workspace;
+                },
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
+            if (!initialization.Wait(TimeSpan.FromSeconds(5)))
+                throw new TimeoutException("Bootstrap state lock was held while scheduling its UI refresh.");
+            pluginWorkspace = initialization.GetAwaiter().GetResult();
+        };
+        var timedEvents = terminal.Application.TimedEvents
+            ?? throw new InvalidOperationException("Terminal.Gui timed events are unavailable.");
+        timedEvents.Added += added;
+        try
+        {
+            Volatile.Write(ref armed, 1);
+            await Task.Factory.StartNew(
+                    () => bootstrap.SetSettings([("状态", "并发初始化")]),
+                    CancellationToken.None,
+                    TaskCreationOptions.LongRunning,
+                    TaskScheduler.Default)
+                .WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        finally
+        {
+            timedEvents.Added -= added;
+        }
+
+        await terminal.WaitForScreenAsync("后台初始化完成");
+        Assert.DoesNotContain("旧数据文件状态", await terminal.CaptureScreenAsync());
+        Assert.NotNull(pluginWorkspace);
+
+        var taskbar = await GetWorkspaceTaskbarAsync();
+        var parts = await terminal.InvokeAsync(() => TaskbarParts(taskbar));
+        var titles = await terminal.InvokeAsync(() =>
+            parts.Popup.SubViews.OfType<Shortcut>().Select(item => item.Title).ToArray());
+        Assert.Equal(1, titles.Count(title =>
+            title.Equals(pluginWorkspace!.Title, StringComparison.OrdinalIgnoreCase)));
+        Assert.Same(bootstrap.Workspace, host.CurrentWorkspace);
+    }
+
+    [Fact]
+    public async Task PluginInitializationAndTaskbarInput_CompleteConcurrently()
+    {
+        var bootstrap = new BootstrapWorkspace(host);
+        bootstrap.SetPhase("database", "数据文件", LiveDisplaySeverity.Info, "等待后台初始化");
+        await StartAsync();
+        await terminal.ResizeAsync(120, 36);
+        await terminal.WaitForScreenAsync("等待后台初始化");
+
+        var pluginOutput = host.ForPlugin("ConcurrentTaskbarInit");
+        var initializationStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseInitialization = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var initialization = Task.Factory.StartNew(
+                () =>
+                {
+                    initializationStarted.TrySetResult();
+                    releaseInitialization.Task.GetAwaiter().GetResult();
+                    var workspace = pluginOutput.CreateWorkspace("Taskbar concurrent plugin");
+                    pluginOutput.SetPanel(
+                        workspace,
+                        "main",
+                        "main",
+                        LiveDisplayContent.Text("Taskbar concurrent plugin ready"),
+                        switchToWorkspace: false);
+                    bootstrap.SetPhase(
+                        "database",
+                        "数据文件",
+                        LiveDisplaySeverity.Success,
+                        "taskbar 操作期间初始化完成");
+                    return workspace;
+                },
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
+        try
+        {
+            await initializationStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.False(initialization.IsCompleted);
+
+            await terminal.MoveMouseAsync(new Point(0, 35));
+            var taskbar = await GetWorkspaceTaskbarAsync();
+            var parts = await terminal.InvokeAsync(() => TaskbarParts(taskbar));
+            await terminal.WaitForAsync(async () =>
+                await terminal.InvokeAsync(() => parts.Popup.Visible));
+            Assert.False(initialization.IsCompleted);
+
+            releaseInitialization.TrySetResult();
+            var pluginWorkspace = await initialization.WaitAsync(TimeSpan.FromSeconds(5));
+            await terminal.WaitForScreenAsync("taskbar 操作期间初始化完成");
+
+            var titles = await terminal.InvokeAsync(() =>
+                parts.Popup.SubViews.OfType<Shortcut>().Select(item => item.Title).ToArray());
+            Assert.Equal(1, titles.Count(title =>
+                title.Equals(pluginWorkspace.Title, StringComparison.OrdinalIgnoreCase)));
+            Assert.Same(bootstrap.Workspace, host.CurrentWorkspace);
+        }
+        finally
+        {
+            releaseInitialization.TrySetResult();
+            await initialization.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+    }
+
+    [Fact]
     public async Task BootstrapDashboard_UsesNativeScrollingAndResponsiveLayout()
     {
         var bootstrap = new BootstrapWorkspace(host);
@@ -1927,14 +3389,39 @@ public sealed class LiveDisplayRenderTests : IDisposable
         var firstCommandMode = await GetCommandModeAsync();
         await terminal.WaitForAsync(() => firstCommandMode.IsOpen);
         var disposedCommandModes = 0;
+        var firstTaskbar = await GetWorkspaceTaskbarAsync();
+        var disposedTaskbars = 0;
+        var disposedTaskbarTriggers = 0;
         firstCommandMode.Disposing += (_, _) => disposedCommandModes++;
+        firstTaskbar.Disposing += (_, _) => disposedTaskbars++;
+        firstTaskbar.BottomEdgeTrigger.Disposing += (_, _) => disposedTaskbarTriggers++;
+
+        await terminal.InjectAsync(Key.Esc);
+        await terminal.WaitForAsync(() => !firstCommandMode.IsOpen);
+        var firstTaskbarParts = await terminal.InvokeAsync(() => TaskbarParts(firstTaskbar));
+        await terminal.MoveMouseAsync(new Point(0, 17));
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() => firstTaskbarParts.Popup.Visible));
+        var item = await terminal.InvokeAsync(() =>
+            firstTaskbarParts.Popup.SubViews.OfType<Shortcut>().Single());
+        var itemFrame = await terminal.InvokeAsync(item.FrameToScreen);
+        var dragStart = new Point(itemFrame.X + itemFrame.Width / 2, itemFrame.Y);
+        await terminal.InjectAsync(MouseAt(dragStart, MouseFlags.LeftButtonPressed));
+        await terminal.InjectAsync(MouseAt(
+            dragStart with { X = dragStart.X + 2 },
+            MouseFlags.LeftButtonPressed | MouseFlags.PositionReport));
+        Assert.True(await terminal.InvokeAsync(() => terminal.Application.Mouse.IsGrabbed()));
 
         cancellation.Cancel();
         await run.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Empty(terminal.Application.SessionStack!);
+        Assert.False(terminal.Application.Mouse.IsGrabbed());
+        Assert.Equal(0, workspaceTaskbarSaveCount);
         Assert.Equal(1, disposedCommandModes);
+        Assert.Equal(1, disposedTaskbars);
+        Assert.Equal(1, disposedTaskbarTriggers);
 
-        var second = new UiHost(terminal.Application);
+        var second = CreateHost();
         host = second;
         BindHost(second);
         _ = new BootstrapWorkspace(second);
@@ -1956,12 +3443,16 @@ public sealed class LiveDisplayRenderTests : IDisposable
             CommandModes: Descendants(terminal.Application.TopRunnableView!)
                 .OfType<CommandModeView>()
                 .Count(),
+            Taskbars: Descendants(terminal.Application.TopRunnableView!)
+                .OfType<WorkspaceTaskbarView>()
+                .Count(),
             TextFields: Descendants(terminal.Application.TopRunnableView!)
                 .OfType<CommandModeView>()
                 .SelectMany(Descendants)
                 .OfType<TextField>()
                 .Count()));
         Assert.Equal(1, secondSession.CommandModes);
+        Assert.Equal(1, secondSession.Taskbars);
         Assert.Equal(1, secondSession.TextFields);
 
         await terminal.InjectAsync(Key.Esc);
@@ -2042,6 +3533,17 @@ public sealed class LiveDisplayRenderTests : IDisposable
         await host.Ready.WaitAsync(TimeSpan.FromSeconds(5));
     }
 
+    UiHost CreateHost()
+        => new(
+            terminal.Application,
+            () => workspaceTaskbarOrder,
+            titles =>
+            {
+                workspaceTaskbarOrder.Clear();
+                workspaceTaskbarOrder.AddRange(titles);
+                workspaceTaskbarSaveCount++;
+            });
+
     void BindHost(
         UiHost value,
         CancellationToken cancellationToken = default,
@@ -2086,8 +3588,52 @@ public sealed class LiveDisplayRenderTests : IDisposable
             .OfType<CommandModeView>()
             .Single());
 
+    Task<WorkspaceTaskbarView> GetWorkspaceTaskbarAsync()
+        => terminal.InvokeAsync(() => Descendants(terminal.Application.TopRunnableView!)
+            .OfType<WorkspaceTaskbarView>()
+            .Single());
+
     Task<TextField> GetCommandInputAsync(CommandModeView commandMode)
         => terminal.InvokeAsync(() => Descendants(commandMode).OfType<TextField>().Single());
+
+    static (View Popup, View Trigger) TaskbarParts(WorkspaceTaskbarView taskbar)
+    {
+        var popup = taskbar.SubViews.Single(view => view.BorderStyle == LineStyle.Single);
+        return (popup, taskbar.BottomEdgeTrigger);
+    }
+
+    Task<string> CaptureViewTextAsync(View view)
+        => terminal.InvokeAsync(() =>
+        {
+            var origin = view.ViewportToScreen(Point.Empty);
+            var right = origin.X + view.Viewport.Width;
+            var contents = terminal.Application.Driver!.Contents!;
+            var graphemes = new List<string>();
+            for (var x = origin.X; x < right;)
+            {
+                var grapheme = contents[origin.Y, x].Grapheme.ToString();
+                graphemes.Add(grapheme);
+                x += Math.Max(1, grapheme.GetColumns());
+            }
+
+            return string.Concat(graphemes).TrimEnd();
+        });
+
+    Mouse MouseAt(Point point, MouseFlags flags)
+        => new()
+        {
+            ScreenPosition = point,
+            Flags = flags,
+            Timestamp = terminal.Time.Now
+        };
+
+    static void AssertValidGraphemePrefix(string fullTitle, string shortened)
+    {
+        var full = fullTitle.ToStringList();
+        var visible = shortened.ToStringList();
+        Assert.Equal("…", visible[^1]);
+        Assert.Equal(full.Take(visible.Count - 1), visible.Take(visible.Count - 1));
+    }
 
     static void AssertValidBootstrapFrame(BootstrapDrawFrame frame)
     {
@@ -2175,6 +3721,32 @@ public sealed class LiveDisplayRenderTests : IDisposable
             });
         }
     }
+
+    sealed record TaskbarFramebufferState(
+        bool PopupVisible,
+        Rectangle PopupFrame,
+        string[] Titles,
+        string[] VisibleTexts,
+        Rectangle[] ItemFrames,
+        MouseState[] MouseStates,
+        Terminal.Gui.Drawing.Attribute?[] Attributes,
+        TaskbarCellState[] PopupCells);
+
+    sealed record TaskbarCellState(
+        string Grapheme,
+        Terminal.Gui.Drawing.Attribute? Attribute);
+
+    sealed record TaskbarTransitionMetrics(
+        int TitleChanges,
+        int TextChanges,
+        int PopupLayouts,
+        int ItemLayouts,
+        int PopupDraws,
+        int ItemDraws,
+        int FrameChanges,
+        int LayoutAndDraws,
+        int Iterations,
+        TaskbarFramebufferState[] Frames);
 
     sealed record BootstrapDrawFrame(
         string Screen,

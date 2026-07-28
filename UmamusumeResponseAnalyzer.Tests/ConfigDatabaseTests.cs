@@ -73,6 +73,7 @@ namespace UmamusumeResponseAnalyzer.Tests
                 Assert.NotNull(Config.Updater);
                 Assert.NotNull(Config.Language);
                 Assert.NotNull(Config.Misc);
+                Assert.Empty(Config.WorkspaceTaskbarTitleOrder);
                 Assert.Equal(yaml, File.ReadAllText(path));
             });
         }
@@ -193,7 +194,8 @@ namespace UmamusumeResponseAnalyzer.Tests
                     ForceUseGithubToUpdate = true
                 },
                 Language = new LanguageConfig(),
-                Misc = new MiscConfig { SaveResponseForDebug = true }
+                Misc = new MiscConfig { SaveResponseForDebug = true },
+                WorkspaceTaskbarTitleOrder = ["插件", "启动信息", "遥测"]
             };
 
             var yaml = Serializer.Serialize(original);
@@ -214,6 +216,7 @@ namespace UmamusumeResponseAnalyzer.Tests
             Assert.True(restored.Updater.ForceUseGithubToUpdate);
             // Misc
             Assert.True(restored.Misc.SaveResponseForDebug);
+            Assert.Equal(["插件", "启动信息", "遥测"], restored.WorkspaceTaskbarTitleOrder);
         }
 
         [Fact]
@@ -224,8 +227,27 @@ namespace UmamusumeResponseAnalyzer.Tests
 
             Assert.Contains("listen-port", yaml);
             Assert.Contains("listen-address", yaml);
+            Assert.Contains("workspace-taskbar-title-order", yaml);
             // 不应出现原始 PascalCase
             Assert.DoesNotContain("ListenPort", yaml);
+        }
+
+        [Fact]
+        public void WorkspaceTaskbarTitleOrder_SaveAndInitialize_RoundTrips()
+        {
+            WithConfigFile("{}", path =>
+            {
+                Config.Initialize();
+                Assert.Empty(Config.WorkspaceTaskbarTitleOrder);
+
+                Config.WorkspaceTaskbarTitleOrder = ["Third", "暂未加载", "First"];
+                Config.Save();
+                Config.WorkspaceTaskbarTitleOrder = [];
+                Config.Initialize();
+
+                Assert.Equal(["Third", "暂未加载", "First"], Config.WorkspaceTaskbarTitleOrder);
+                Assert.Contains("workspace-taskbar-title-order", File.ReadAllText(path));
+            });
         }
 
         [Fact]

@@ -295,7 +295,7 @@ public sealed class KeyboardManagerTests : IDisposable
     [Fact]
     public async Task WorkspaceRemoval_UnregistersOnlyItsTransientShortcut()
     {
-        var output = new UiHost(application).ForPlugin("owner");
+        var output = new UiHost(application, static () => [], static _ => { }).ForPlugin("owner");
         var removed = output.CreateWorkspace("removed");
         var kept = output.CreateWorkspace("kept");
         var calls = new List<string>();

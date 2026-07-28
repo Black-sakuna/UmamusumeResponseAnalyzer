@@ -22,6 +22,11 @@ namespace UmamusumeResponseAnalyzer
         public static UpdaterConfig Updater => Current.Updater;
         public static LanguageConfig Language => Current.Language;
         public static MiscConfig Misc => Current.Misc;
+        internal static List<string> WorkspaceTaskbarTitleOrder
+        {
+            get => Current.WorkspaceTaskbarTitleOrder;
+            set => Current.WorkspaceTaskbarTitleOrder = value;
+        }
 
         internal static void Initialize()
         {
@@ -108,6 +113,7 @@ namespace UmamusumeResponseAnalyzer
         public UpdaterConfig Updater { get; set; } = new();
         public LanguageConfig Language { get; set; } = new();
         public MiscConfig Misc { get; set; } = new();
+        public List<string> WorkspaceTaskbarTitleOrder { get; set; } = [];
     }
 
     #region class

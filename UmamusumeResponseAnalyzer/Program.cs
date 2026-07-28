@@ -134,7 +134,14 @@ namespace UmamusumeResponseAnalyzer
             ExceptionDispatchInfo? workflowFailure = null;
             try
             {
-                uiHost = new(application);
+                uiHost = new(
+                    application,
+                    () => Config.WorkspaceTaskbarTitleOrder,
+                    titles =>
+                    {
+                        Config.WorkspaceTaskbarTitleOrder = [.. titles];
+                        Config.Save();
+                    });
                 bootstrap = new(uiHost);
                 shutdownTarget = new(() =>
                 {

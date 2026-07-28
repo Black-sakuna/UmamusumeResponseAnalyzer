@@ -33,7 +33,7 @@ internal sealed class BootstrapWorkspace
         Workspace = uiHost.CreateWorkspace("启动");
         uiHost.BindWorkspaceHotkey(Workspace, ConsoleKey.B, ConsoleModifiers.Control, "启动信息");
         uiHost.LogAdded += OnLogAdded;
-        RefreshLocked();
+        Refresh();
         uiHost.RemoveWorkspaceWhenAnotherPanelActivates(Workspace, () =>
         {
             uiHost.LogAdded -= OnLogAdded;
@@ -50,17 +50,15 @@ internal sealed class BootstrapWorkspace
         {
             settings.Clear();
             settings.AddRange(values);
-            RefreshLocked();
         }
+        Refresh();
     }
 
     public void SetPhase(string key, string label, LiveDisplaySeverity severity, string detail)
     {
         lock (gate)
-        {
             phases[key] = new(label, severity, detail);
-            RefreshLocked();
-        }
+        Refresh();
     }
 
     public void SetPluginSummary(IReadOnlyList<BootstrapPluginRow> values)
@@ -69,8 +67,8 @@ internal sealed class BootstrapWorkspace
         {
             plugins.Clear();
             plugins.AddRange(values);
-            RefreshLocked();
         }
+        Refresh();
     }
 
     public void Log(string source, string text, LiveDisplaySeverity severity = LiveDisplaySeverity.Info)
@@ -86,26 +84,37 @@ internal sealed class BootstrapWorkspace
             logs.Add(new(SeverityLabel(line.Severity), line.PluginId, line.Text));
             if (logs.Count > MaxLogRows)
                 logs.RemoveRange(0, logs.Count - MaxLogRows);
-            RefreshLocked();
         }
+        Refresh();
     }
 
-    void RefreshLocked()
+    void Refresh()
     {
-        var settingsSnapshot = settings.ToArray();
-        var phaseSnapshot = phases.Values.ToArray();
-        var pluginSnapshot = plugins.ToArray();
-        var logSnapshot = logs.ToArray();
         uiHost.SetPanel(new LiveDisplayPanel(
             Workspace,
             HostSource,
             "status",
             "启动状态",
-            new LiveDisplayContent(() => new BootstrapDashboardView(
-                settingsSnapshot,
-                phaseSnapshot,
-                pluginSnapshot,
-                logSnapshot)),
+            new LiveDisplayContent(() =>
+            {
+                (string Label, string Value)[] settingsSnapshot;
+                BootstrapPhase[] phaseSnapshot;
+                BootstrapPluginRow[] pluginSnapshot;
+                BootstrapLogRow[] logSnapshot;
+                lock (gate)
+                {
+                    settingsSnapshot = settings.ToArray();
+                    phaseSnapshot = phases.Values.ToArray();
+                    pluginSnapshot = plugins.ToArray();
+                    logSnapshot = logs.ToArray();
+                }
+
+                return new BootstrapDashboardView(
+                    settingsSnapshot,
+                    phaseSnapshot,
+                    pluginSnapshot,
+                    logSnapshot);
+            }),
             DateTimeOffset.Now,
             FullBleed: true));
     }
