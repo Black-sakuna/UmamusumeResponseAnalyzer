@@ -1,13 +1,15 @@
 using System.Collections.ObjectModel;
 using System.Data;
+using System.Drawing;
 using Terminal.Gui.App;
+using Terminal.Gui.Input;
 using Terminal.Gui.ViewBase;
 using Terminal.Gui.Views;
 using UmamusumeResponseAnalyzer.Plugin;
 
 namespace UmamusumeResponseAnalyzer.LiveDisplay;
 
-internal sealed class BootstrapWorkspace
+internal sealed class BootstrapWorkspace : IDisposable
 {
     const string HostSource = "URA";
     const int MaxLogRows = 128;
@@ -26,6 +28,7 @@ internal sealed class BootstrapWorkspace
     };
     readonly List<BootstrapPluginRow> plugins = [];
     readonly List<BootstrapLogRow> logs = [];
+    bool disposed;
 
     public BootstrapWorkspace(UiHost uiHost)
     {
@@ -33,13 +36,8 @@ internal sealed class BootstrapWorkspace
         Workspace = uiHost.CreateWorkspace("启动");
         uiHost.BindWorkspaceHotkey(Workspace, ConsoleKey.B, ConsoleModifiers.Control, "启动信息");
         uiHost.LogAdded += OnLogAdded;
+        LiveDisplayConsole.DefaultLogWorkspace = Workspace;
         Refresh();
-        uiHost.RemoveWorkspaceWhenAnotherPanelActivates(Workspace, () =>
-        {
-            uiHost.LogAdded -= OnLogAdded;
-            if (LiveDisplayConsole.DefaultLogWorkspace == Workspace)
-                LiveDisplayConsole.DefaultLogWorkspace = null;
-        });
     }
 
     public LiveDisplayWorkspace Workspace { get; }
@@ -81,7 +79,11 @@ internal sealed class BootstrapWorkspace
 
         lock (gate)
         {
-            logs.Add(new(SeverityLabel(line.Severity), line.PluginId, line.Text));
+            logs.Add(new(
+                SeverityLabel(line.Severity),
+                line.PluginId,
+                line.Text,
+                line.ExceptionDetails));
             if (logs.Count > MaxLogRows)
                 logs.RemoveRange(0, logs.Count - MaxLogRows);
         }
@@ -116,7 +118,19 @@ internal sealed class BootstrapWorkspace
                     logSnapshot);
             }),
             DateTimeOffset.Now,
-            FullBleed: true));
+            FullBleed: true),
+            switchToWorkspace: false);
+    }
+
+    public void Dispose()
+    {
+        if (disposed)
+            return;
+
+        disposed = true;
+        uiHost.LogAdded -= OnLogAdded;
+        if (ReferenceEquals(LiveDisplayConsole.DefaultLogWorkspace, Workspace))
+            LiveDisplayConsole.DefaultLogWorkspace = null;
     }
 
     internal static string SeverityLabel(LiveDisplaySeverity severity) => severity switch
@@ -160,7 +174,8 @@ internal sealed record BootstrapPluginRow(
 internal sealed record BootstrapLogRow(
     string Status,
     string Source,
-    string Text);
+    string Text,
+    string? ExceptionDetails = null);
 
 internal sealed class BootstrapDashboardView : View
 {
@@ -170,6 +185,10 @@ internal sealed class BootstrapDashboardView : View
     readonly FrameView phaseFrame;
     readonly FrameView pluginFrame;
     readonly FrameView logFrame;
+    readonly ListView logList;
+    readonly IReadOnlyList<BootstrapLogRow> logs;
+    PopoverMenu? logContextMenu;
+    string? exceptionDetailsToCopy;
     bool? wideLayout;
 
     public BootstrapDashboardView(
@@ -184,6 +203,7 @@ internal sealed class BootstrapDashboardView : View
         Height = Dim.Fill();
         CanFocus = true;
         TabStop = TabBehavior.TabGroup;
+        this.logs = logs;
 
         environmentFrame = CreateFrame(
             "运行环境",
@@ -206,7 +226,7 @@ internal sealed class BootstrapDashboardView : View
                 ["插件名", "版本", "状态", "结果"],
                 plugins.Select(x => new[] { x.Name, x.Version, x.Status, x.Result })));
 
-        var logList = new ListView
+        logList = new ListView
         {
             X = 0,
             Y = 0,
@@ -217,6 +237,12 @@ internal sealed class BootstrapDashboardView : View
             KeystrokeNavigator = null,
             ViewportSettings = ViewportSettingsFlags.HasScrollBars
         };
+        logList.Activating += LogListActivating;
+        logList.CommandNotBound += LogListCommandNotBound;
+        logList.MouseBindings.ReplaceCommands(
+            MouseFlags.RightButtonClicked,
+            Command.Activate,
+            Command.Context);
         logList.SetSource(new ObservableCollection<string>(
             logs.Select(x => $"{x.Status} [{x.Source}] {x.Text}")));
         if (logs.Count > 0)
@@ -233,6 +259,108 @@ internal sealed class BootstrapDashboardView : View
         if (wideLayout != useWideLayout)
             ApplyLayout(useWideLayout);
         base.OnSubViewLayout(args);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            logList.Activating -= LogListActivating;
+            logList.CommandNotBound -= LogListCommandNotBound;
+            if (logContextMenu is { } contextMenu)
+            {
+                contextMenu.App?.Popovers?.Hide(contextMenu);
+                contextMenu.App?.Popovers?.DeRegister(contextMenu);
+                contextMenu.Dispose();
+                logContextMenu = null;
+                exceptionDetailsToCopy = null;
+            }
+        }
+        base.Dispose(disposing);
+    }
+
+    void LogListActivating(object? sender, CommandEventArgs e)
+    {
+        if (e.Context is
+            {
+                Command: Command.Activate,
+                Binding: MouseBinding { MouseEvent: { } mouse }
+            } &&
+            (mouse.Flags & MouseFlags.RightButtonClicked) != 0)
+        {
+            logList.SelectedItem = null;
+        }
+    }
+
+    void LogListCommandNotBound(object? sender, CommandEventArgs e)
+    {
+        if (e.Context is not
+            {
+                Command: Command.Context,
+                Binding: MouseBinding { MouseEvent: { } mouse }
+            })
+            return;
+
+        e.Handled = true;
+        ShowLogContextMenu(mouse.ScreenPosition);
+    }
+
+    void ShowLogContextMenu(Point screenPosition)
+    {
+        exceptionDetailsToCopy = null;
+        if (logList.SelectedItem is not { } selected ||
+            selected < 0 ||
+            selected >= logs.Count ||
+            logs[selected].ExceptionDetails is not { } details)
+        {
+            if (logContextMenu is { Visible: true } visibleMenu)
+                visibleMenu.App?.Popovers?.Hide(visibleMenu);
+            return;
+        }
+
+        exceptionDetailsToCopy = details;
+        if (logContextMenu is null)
+        {
+            var app = App ?? throw new InvalidOperationException(
+                "Bootstrap dashboard must be attached before showing its context menu.");
+            logContextMenu = new PopoverMenu(new Menu(new MenuItem[]
+            {
+                new("复制完整 backtrace", action: CopyExceptionDetails)
+            }))
+            {
+                App = app
+            };
+            app.Popovers?.Register(logContextMenu);
+        }
+
+        logContextMenu.Target = new WeakReference<View>(logList);
+        logContextMenu.MakeVisible(screenPosition);
+    }
+
+    void CopyExceptionDetails()
+    {
+        if (logContextMenu is { } contextMenu)
+            contextMenu.Target = null;
+
+        var details = exceptionDetailsToCopy;
+        exceptionDetailsToCopy = null;
+        if (details is null)
+            return;
+
+        try
+        {
+            if (logContextMenu?.App?.Clipboard?.TrySetClipboardData(details) == true)
+                return;
+        }
+        catch (Exception exception)
+        {
+            LiveDisplayConsole.LogException("Clipboard", exception);
+        }
+
+        LiveDisplayConsole.Notify(
+            "URA",
+            "复制完整 backtrace 失败：系统 clipboard 不可用。",
+            LiveDisplaySeverity.Error);
     }
 
     void ApplyLayout(bool useWideLayout)

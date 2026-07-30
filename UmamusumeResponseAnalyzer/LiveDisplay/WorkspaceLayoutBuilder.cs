@@ -12,17 +12,15 @@ internal static class WorkspaceLayoutBuilder
 
     internal sealed class WorkspaceSurface
     {
-        readonly LiveDisplayWorkspace? workspace;
         readonly PanelView[] panels;
         readonly bool fullBleed;
-        readonly Label logLabel;
+        readonly View panelContainer;
 
         public WorkspaceSurface(
             LiveDisplayWorkspace? workspace,
             IReadOnlyList<(LiveDisplayPanel Panel, View View)> panelViews,
             Func<LiveDisplayWorkspace, string> workspaceLabel)
         {
-            this.workspace = workspace;
             fullBleed = panelViews.Count == 1 && panelViews[0].Panel.FullBleed;
             View = new View
             {
@@ -31,6 +29,9 @@ internal static class WorkspaceLayoutBuilder
                 CanFocus = true,
                 TabStop = TabBehavior.TabGroup
             };
+            panelContainer = fullBleed ? View : new View();
+            if (!fullBleed)
+                View.Add(panelContainer);
             panels = panelViews
                 .Select(x =>
                 {
@@ -42,25 +43,27 @@ internal static class WorkspaceLayoutBuilder
                                 : 0,
                             view.Height is DimFill));
                     EnableFocusPath(x.View);
+                    var frame = fullBleed
+                        ? null
+                        : new FrameView
+                        {
+                            Title = $"{x.Panel.PluginId} - {x.Panel.Title}",
+                            X = 0,
+                            Width = Dim.Fill()
+                        };
+                    frame?.Border.GetOrCreateView();
                     return new PanelView(
                         x.Panel,
                         x.View,
                         metadata.DeclaredHeight,
                         metadata.FillsViewportHeight,
-                        fullBleed
-                            ? null
-                            : new FrameView
-                            {
-                                Title = $"{x.Panel.PluginId} - {x.Panel.Title}",
-                                X = 0,
-                                Width = Dim.Fill()
-                            });
+                        frame);
                 })
                 .ToArray();
 
             if (workspace is not null && panels.Length == 0)
             {
-                View.Add(new Label
+                panelContainer.Add(new Label
                 {
                     Text = $"{workspaceLabel(workspace)} 还没有插件输出。",
                     X = 1,
@@ -75,45 +78,32 @@ internal static class WorkspaceLayoutBuilder
                 {
                     if (panel.Frame is null)
                     {
-                        View.Add(panel.View);
+                        panelContainer.Add(panel.View);
                     }
                     else
                     {
                         panel.Frame.Add(panel.View);
-                        View.Add(panel.Frame);
+                        panelContainer.Add(panel.Frame);
                     }
                 }
             }
-
-            logLabel = new Label
-            {
-                X = 0,
-                Width = Dim.Fill(),
-                Visible = false
-            };
-            View.Add(logLabel);
+            if (!fullBleed)
+                EnableFocusPath(panelContainer);
         }
 
         public View View { get; }
         public int MaxScroll { get; private set; }
 
-        public void Update(
-            IReadOnlyList<LiveDisplayLogLine> logs,
-            int width,
-            int height,
-            int scrollOffset)
+        public void Update(int width, int height, int scrollOffset)
         {
             width = Math.Max(1, width);
             height = Math.Max(1, height);
-            var visibleLogLines = GetVisibleLogLines(workspace, fullBleed, logs, width, height);
-            var logHeight = visibleLogLines.Length;
-            var bodyHeight = Math.Max(1, height - logHeight);
             var panelHeights = CalculatePanelHeights(
                 panels.Select(x => (x.Panel, x.View, x.DeclaredHeight, x.FillsViewportHeight)).ToArray(),
-                bodyHeight,
+                height,
                 fullBleed,
                 width);
-            var contentHeight = Math.Max(height, panelHeights.Sum() + logHeight);
+            var contentHeight = Math.Max(height, panelHeights.Sum());
             MaxScroll = Math.Max(0, contentHeight - height);
             scrollOffset = Math.Clamp(scrollOffset, 0, MaxScroll);
 
@@ -139,11 +129,12 @@ internal static class WorkspaceLayoutBuilder
                 y += panelHeight;
             }
 
-            logLabel.Text = string.Join(Environment.NewLine, visibleLogLines);
-            logLabel.Y = contentHeight - logHeight;
-            logLabel.Height = logHeight;
-            logLabel.Visible = logHeight > 0;
             View.SetContentSize(new Size(width, contentHeight));
+            if (!fullBleed)
+            {
+                panelContainer.Width = width;
+                panelContainer.Height = contentHeight;
+            }
             View.Viewport = new Rectangle(0, MaxScroll - scrollOffset, width, height);
             View.SetNeedsLayout();
             View.SetNeedsDraw();
@@ -177,7 +168,6 @@ internal static class WorkspaceLayoutBuilder
     public static WorkspaceSurface BuildWorkspaceLayout(
         LiveDisplayWorkspace? workspace,
         IReadOnlyCollection<LiveDisplayPanel> panels,
-        IReadOnlyList<LiveDisplayLogLine> logs,
         Func<LiveDisplayWorkspace, string> workspaceLabel,
         int width,
         int height,
@@ -189,26 +179,8 @@ internal static class WorkspaceLayoutBuilder
             .Select(panel => (Panel: panel, View: createView(panel)))
             .ToArray();
         var surface = new WorkspaceSurface(workspace, activePanelViews, workspaceLabel);
-        surface.Update(logs, width, height, scrollOffset);
+        surface.Update(width, height, scrollOffset);
         return surface;
-    }
-
-    static string[] GetVisibleLogLines(
-        LiveDisplayWorkspace? workspace,
-        bool fullBleed,
-        IReadOnlyList<LiveDisplayLogLine> logs,
-        int width,
-        int height)
-    {
-        if (fullBleed)
-            return [];
-
-        var logEntryLimit = workspace is null ? 18 : 14;
-        var logLines = logs.TakeLast(logEntryLimit)
-            .SelectMany(line => WrapLines(FormatLog(line), Math.Max(1, width)))
-            .ToArray();
-        var maxLogHeight = workspace is null ? height : Math.Max(1, height / 3);
-        return logLines.TakeLast(maxLogHeight).ToArray();
     }
 
     static LiveDisplayPanel[] SelectPanels(
@@ -317,16 +289,4 @@ internal static class WorkspaceLayoutBuilder
         }
     }
 
-    static string FormatLog(LiveDisplayLogLine line)
-        => $"{SeverityText(line.Severity)} [{line.PluginId}] {line.Text}";
-
-    static string SeverityText(LiveDisplaySeverity severity) => severity switch
-    {
-        LiveDisplaySeverity.Trace => "TRACE",
-        LiveDisplaySeverity.Info => "INFO ",
-        LiveDisplaySeverity.Success => "OK   ",
-        LiveDisplaySeverity.Warning => "WARN ",
-        LiveDisplaySeverity.Error => "ERR  ",
-        _ => "INFO "
-    };
 }

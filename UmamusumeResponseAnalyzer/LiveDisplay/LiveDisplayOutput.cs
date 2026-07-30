@@ -13,7 +13,8 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         LiveDisplayWorkspace? Workspace,
         string PluginId,
         string Text,
-        LiveDisplaySeverity Severity);
+        LiveDisplaySeverity Severity,
+        string? ExceptionDetails = null);
 
     internal sealed record LiveDisplayNotification(
         LiveDisplayWorkspace? Workspace,

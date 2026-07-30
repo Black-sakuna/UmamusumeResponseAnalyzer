@@ -179,7 +179,8 @@ public static class LiveDisplayConsole
             DefaultLogWorkspace,
             source,
             FormatExceptionLogMessage(ex),
-            severity));
+            severity,
+            ex.ToString()));
     }
 
     internal static string FormatExceptionLogMessage(Exception ex)

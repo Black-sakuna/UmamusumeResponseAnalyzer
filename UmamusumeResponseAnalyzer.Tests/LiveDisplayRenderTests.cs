@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
 using System.Drawing;
+using Terminal.Gui.Drivers;
 using Terminal.Gui.Drawing;
 using Terminal.Gui.Input;
 using Terminal.Gui.Testing;
@@ -278,7 +279,6 @@ public sealed class LiveDisplayRenderTests : IDisposable
         var surface = WorkspaceLayoutBuilder.BuildWorkspaceLayout(
             workspace,
             panels,
-            [],
             value => value.Title,
             width: 80,
             height: 8,
@@ -315,7 +315,6 @@ public sealed class LiveDisplayRenderTests : IDisposable
         var surface = WorkspaceLayoutBuilder.BuildWorkspaceLayout(
             workspace,
             [panel],
-            [],
             value => value.Title,
             width: 80,
             height: 18,
@@ -590,6 +589,111 @@ public sealed class LiveDisplayRenderTests : IDisposable
         await terminal.MoveMouseAsync(Point.Empty);
         await terminal.WaitForAsync(async () =>
             await terminal.InvokeAsync(() => !parts.Popup.Visible));
+    }
+
+    [Fact]
+    public async Task WorkspaceTaskbar_FramedLongWorkspaceBottomBorderTriggersWithoutChangingViewport()
+    {
+        var output = host.ForPlugin("FramedTaskbar");
+        var workspace = output.CreateWorkspace("Framed long workspace");
+        ListView? content = null;
+        output.SetPanel(
+            workspace,
+            "main",
+            "Long panel",
+            new LiveDisplayContent(() =>
+            {
+                content = new ListView { Width = Dim.Fill(), Height = 30 };
+                content.SetSource(new ObservableCollection<string>(
+                    Enumerable.Range(1, 40).Select(index => $"row-{index:00}").ToArray()));
+                content.SelectedItem = 25;
+                return content;
+            }));
+
+        await StartAsync();
+        await terminal.InvokeAsync(() => content!.SetFocus());
+        await terminal.RedrawAsync();
+
+        var taskbar = await GetWorkspaceTaskbarAsync();
+        var parts = await terminal.InvokeAsync(() => TaskbarParts(taskbar));
+        var before = await terminal.InvokeAsync(CaptureLayout);
+        var borderView = Assert.IsType<BorderView>(
+            await terminal.InvokeAsync(() => before.Panel.Border.View));
+        var borderViewDisposed = 0;
+        borderView.Disposing += (_, _) => borderViewDisposed++;
+
+        Assert.Equal(0, before.ScrollOffset);
+        Assert.True(before.Viewport.Y > 0);
+        Assert.Equal(before.ContentSize.Height, before.PanelFrame.Bottom);
+        Assert.Equal("╰", before.BottomLeft.Grapheme.ToString());
+
+        await terminal.MoveMouseAsync(new Point(40, 16));
+        await terminal.MoveMouseAsync(new Point(40, 17));
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() => parts.Popup.Visible));
+
+        var shown = await terminal.InvokeAsync(CaptureLayout);
+        Assert.Equal(before.SurfaceFrame, shown.SurfaceFrame);
+        Assert.Equal(before.Viewport, shown.Viewport);
+        Assert.Equal(before.ContentSize, shown.ContentSize);
+        Assert.Equal(before.PanelFrame, shown.PanelFrame);
+        Assert.Same(content, await terminal.InvokeAsync(() => terminal.Application.TopRunnableView!.MostFocused));
+        Assert.Equal(25, await terminal.InvokeAsync(() => content!.SelectedItem));
+
+        await terminal.MoveMouseAsync(Point.Empty);
+        await terminal.WaitForAsync(async () =>
+            !await terminal.InvokeAsync(() => parts.Popup.Visible));
+        await terminal.MoveMouseAsync(new Point(40, 16));
+        await terminal.MoveMouseAsync(new Point(40, 17));
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() => parts.Popup.Visible));
+
+        await terminal.MoveMouseAsync(Point.Empty);
+        await terminal.WaitForAsync(async () =>
+            !await terminal.InvokeAsync(() => parts.Popup.Visible));
+        await terminal.InjectAsync(MouseAt(new Point(40, 17), MouseFlags.WheeledUp));
+        await terminal.WaitForAsync(async () =>
+            (await terminal.InvokeAsync(CaptureLayout)).ScrollOffset == 1);
+
+        var scrolled = await terminal.InvokeAsync(CaptureLayout);
+        Assert.Equal(before.Viewport.Y - 1, scrolled.Viewport.Y);
+        Assert.Same(content, await terminal.InvokeAsync(() => terminal.Application.TopRunnableView!.MostFocused));
+        Assert.Equal(25, await terminal.InvokeAsync(() => content!.SelectedItem));
+
+        await terminal.MoveMouseAsync(Point.Empty);
+        await terminal.WaitForAsync(async () =>
+            !await terminal.InvokeAsync(() => parts.Popup.Visible));
+        await terminal.MoveMouseAsync(new Point(40, 17));
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() => parts.Popup.Visible));
+
+        host.RequestShutdown();
+        await run!.WaitAsync(TimeSpan.FromSeconds(5));
+        run = null;
+        Assert.Equal(1, borderViewDisposed);
+
+        (Rectangle SurfaceFrame,
+            Rectangle Viewport,
+            Size ContentSize,
+            FrameView Panel,
+            Rectangle PanelFrame,
+            int ScrollOffset,
+            Cell BottomLeft)
+            CaptureLayout()
+        {
+            var workspaceLayer = terminal.Application.TopRunnableView!.SubViews.First();
+            var surface = workspaceLayer.SubViews.Single(
+                view => Descendants(view).OfType<FrameView>().Any());
+            var panel = Descendants(surface).OfType<FrameView>().Single();
+            return (
+                surface.Frame,
+                surface.Viewport,
+                surface.GetContentSize(),
+                panel,
+                panel.Frame,
+                surface.GetContentSize().Height - surface.Viewport.Height - surface.Viewport.Y,
+                terminal.Application.Driver!.Contents![17, 0]);
+        }
     }
 
     [Fact]
@@ -1361,55 +1465,94 @@ public sealed class LiveDisplayRenderTests : IDisposable
     }
 
     [Fact]
-    public async Task Panels_AreSortedAndLatestLogsFollowTail()
+    public async Task Panels_AreSortedAndLogsDoNotAffectWorkspaceLayout()
     {
         var outputB = host.ForPlugin("Plugin-B");
         var outputA = host.ForPlugin("Plugin-A");
         var workspace = outputB.CreateWorkspace("普通");
-        outputB.SetPanel(workspace, "b", "B", LiveDisplayContent.Text("Body-B"));
+        outputB.SetPanel(workspace, "b", "B", LiveDisplayContent.Text(Lines(1, 30)));
         outputA.SetPanel(workspace, "a", "A", LiveDisplayContent.Text("Body-A 中文🐎"));
-        for (var i = 0; i < 19; i++)
-            outputA.Log(workspace, $"log-{i:00}");
-        outputA.Log(
-            workspace,
-            $"latest-prefix-{new string('x', 400)}{Environment.NewLine}physical-tail");
 
         await StartAsync();
-        await terminal.WaitForScreenAsync("physical-tail");
-        var bottom = await terminal.CaptureScreenAsync();
+        await terminal.WaitForScreenAsync("line-30");
+        var before = await terminal.InvokeAsync(CaptureLayout);
+        var screen = await terminal.CaptureScreenAsync();
+        Assert.Equal(["Plugin-A - A", "Plugin-B - B"], before.PanelTitles);
+        Assert.Empty(before.LogLabels);
+        Assert.True(before.Viewport.Y > 0);
+        Assert.Equal(before.ContentSize.Height, before.PanelFrames[^1].Bottom);
+        Assert.Equal("╰", before.BottomLeft.Grapheme.ToString());
 
-        Assert.Contains("physical-tail", bottom);
-        Assert.DoesNotContain("latest-prefix", bottom);
-        Assert.DoesNotContain("log-00", bottom);
+        host.Log(new LiveDisplayLogLine(null, "Host", "GlobalLogMustStayHidden", LiveDisplaySeverity.Info));
+        outputA.Log(workspace, "ScopedLogMustStayHidden");
+        await terminal.WaitForAsync(async () =>
+            (await terminal.InvokeAsync(() => host.GetLogsForTests(null))).Count == 1 &&
+            (await terminal.InvokeAsync(() => host.GetLogsForTests(workspace))).Count == 1);
+        await terminal.RedrawAsync();
 
-        await terminal.InjectAsync(Key.Home);
-        await terminal.WaitForScreenAsync("中文🐎");
-        var top = await terminal.CaptureScreenAsync();
-        Assert.True(
-            top.IndexOf("Plugin-A - A", StringComparison.Ordinal) >= 0 &&
-            top.IndexOf("Plugin-A - A", StringComparison.Ordinal) <
-            top.IndexOf("Plugin-B - B", StringComparison.Ordinal));
-        Assert.Contains("中文🐎", top);
+        var after = await terminal.InvokeAsync(CaptureLayout);
+        screen = await terminal.CaptureScreenAsync();
+        Assert.Equal(before.Frame, after.Frame);
+        Assert.Equal(before.Viewport, after.Viewport);
+        Assert.Equal(before.ContentSize, after.ContentSize);
+        Assert.Equal(before.PanelFrames, after.PanelFrames);
+        Assert.Equal(before.BottomLeft, after.BottomLeft);
+        Assert.Equal(before.BottomRight, after.BottomRight);
+        Assert.DoesNotContain("GlobalLogMustStayHidden", screen);
+        Assert.DoesNotContain("ScopedLogMustStayHidden", screen);
 
-        await terminal.InjectAsync(Key.End);
-        await terminal.WaitForScreenAsync("physical-tail");
+        (Rectangle Frame,
+            Rectangle Viewport,
+            Size ContentSize,
+            string[] PanelTitles,
+            Rectangle[] PanelFrames,
+            Label[] LogLabels,
+            Cell BottomLeft,
+            Cell BottomRight)
+            CaptureLayout()
+        {
+            var workspaceLayer = terminal.Application.TopRunnableView!.SubViews.First();
+            var surface = workspaceLayer.SubViews.Single(
+                view => Descendants(view).OfType<FrameView>().Any());
+            var frames = Descendants(surface).OfType<FrameView>().ToArray();
+            var contents = terminal.Application.Driver!.Contents!;
+            return (
+                surface.Frame,
+                surface.Viewport,
+                surface.GetContentSize(),
+                frames.Select(x => x.Title.ToString()!).ToArray(),
+                frames.Select(x => x.Frame).ToArray(),
+                surface.SubViews.OfType<Label>().ToArray(),
+                contents[17, 0],
+                contents[17, 79]);
+        }
     }
 
     [Fact]
-    public async Task NoWorkspace_ShowsOnlyLatest18GlobalLogEntries()
+    public async Task LogsRemainScopedAndBoundedWithoutCreatingAVisibleLogSurface()
     {
-        for (var i = 0; i < 20; i++)
-            host.Log(new LiveDisplayLogLine(null, "Host", $"global-{i:00}", LiveDisplaySeverity.Info));
+        var output = host.ForPlugin("Logs");
+        var workspace = output.CreateWorkspace("Log storage");
+        for (var i = 0; i < 302; i++)
+        {
+            host.Log(new LiveDisplayLogLine(null, "Host", $"global-{i:000}", LiveDisplaySeverity.Info));
+            output.Log(workspace, $"scoped-{i:000}");
+        }
 
         await StartAsync();
         await terminal.ResizeAsync(80, 30);
-        await terminal.WaitForScreenAsync("global-19");
+        var global = await terminal.InvokeAsync(() => host.GetLogsForTests(null));
+        var scoped = await terminal.InvokeAsync(() => host.GetLogsForTests(workspace));
         var screen = await terminal.CaptureScreenAsync();
 
-        Assert.Contains("global-02", screen);
-        Assert.Contains("global-19", screen);
-        Assert.DoesNotContain("global-01", screen);
-        Assert.DoesNotContain("还没有插件输出", screen);
+        Assert.Equal(300, global.Count);
+        Assert.Equal("global-002", global[0].Text);
+        Assert.Equal("global-301", global[^1].Text);
+        Assert.Equal(300, scoped.Count);
+        Assert.Equal("scoped-002", scoped[0].Text);
+        Assert.Equal("scoped-301", scoped[^1].Text);
+        Assert.DoesNotContain("global-", screen);
+        Assert.DoesNotContain("scoped-", screen);
     }
 
     [Fact]
@@ -1479,7 +1622,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
         await terminal.WaitForScreenAsync("line-50");
 
         await terminal.InvokeAsync(() => content!.Text = "ShortContent");
-        output.Log(workspace, "refresh retained content height");
+        await terminal.ResizeAsync(99, 30);
         await terminal.WaitForScreenAsync("ShortContent");
         var shortened = await terminal.CaptureScreenAsync();
         var viewportY = await terminal.InvokeAsync(
@@ -1647,10 +1790,17 @@ public sealed class LiveDisplayRenderTests : IDisposable
 
         Assert.Equal(first, host.CurrentWorkspace);
         Assert.Contains("FirstBody", screen);
-        Assert.Contains("GlobalLog", screen);
         Assert.Contains("GlobalNotify", screen);
+        Assert.DoesNotContain("GlobalLog", screen);
         Assert.DoesNotContain("SecondLog", screen);
         Assert.DoesNotContain("SecondNotify", screen);
+        Assert.Contains(
+            await terminal.InvokeAsync(() => host.GetLogsForTests(null)),
+            line => line.Text == "GlobalLog");
+        Assert.Contains(
+            await terminal.InvokeAsync(() => host.GetLogsForTests(second)),
+            line => line.Text == "SecondLog");
+        Assert.Empty(await terminal.InvokeAsync(() => host.GetLogsForTests(first)));
         Assert.Single(host.GetNotificationsForTests(second));
     }
 
@@ -1681,13 +1831,19 @@ public sealed class LiveDisplayRenderTests : IDisposable
         output.SetPanel(first, "main", "第一", LiveDisplayContent.Text("FirstBody"));
         output.SetPanel(second, "main", "第二", LiveDisplayContent.Text("SecondBody"));
 
+        await StartAsync();
+        await terminal.WaitForScreenAsync("SecondBody");
+        output.Log(first, "StoredBeforeRemoval");
+        await terminal.WaitForAsync(async () =>
+            (await terminal.InvokeAsync(() => host.GetLogsForTests(first)))
+            .Any(line => line.Text == "StoredBeforeRemoval"));
+
         output.RemoveWorkspace(first);
         output.RemoveWorkspace(first);
         output.SetPanel(first, "late", "late", LiveDisplayContent.Text("LateBody"));
         var recreated = output.CreateWorkspace("第一");
         output.SetPanel(recreated, "main", "recreated", LiveDisplayContent.Text("RecreatedBody"));
 
-        await StartAsync();
         await terminal.WaitForScreenAsync("RecreatedBody");
         var screen = await terminal.CaptureScreenAsync();
 
@@ -1826,9 +1982,9 @@ public sealed class LiveDisplayRenderTests : IDisposable
         Assert.Equal(1, disposed);
         Assert.Null(host.CurrentWorkspace);
         Assert.DoesNotContain("LateCanonicalBody", screen);
-        Assert.DoesNotContain("LateAliasLog", screen);
         Assert.DoesNotContain("LateSecondAliasBody", screen);
-        Assert.DoesNotContain("LateSecondAliasLog", screen);
+        Assert.Empty(await terminal.InvokeAsync(() => host.GetLogsForTests(alias)));
+        Assert.Empty(await terminal.InvokeAsync(() => host.GetLogsForTests(secondAlias)));
     }
 
     [Fact]
@@ -2355,7 +2511,9 @@ public sealed class LiveDisplayRenderTests : IDisposable
         await terminal.ClickAsync(new Point(inputFrame.X + 1, inputFrame.Y));
         await terminal.InjectAsync(Key.A);
         output.Log(workspace, "RetainFocusLog");
-        await terminal.WaitForScreenAsync("RetainFocusLog");
+        await terminal.WaitForAsync(async () =>
+            (await terminal.InvokeAsync(() => host.GetLogsForTests(workspace)))
+            .Any(line => line.Text == "RetainFocusLog"));
         Assert.True(await terminal.InvokeAsync(() => input!.HasFocus));
         await terminal.InjectAsync(Key.B);
         await terminal.InjectAsync(Key.Tab);
@@ -3338,7 +3496,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
     }
 
     [Fact]
-    public async Task BootstrapWorkspace_PersistsUntilAnotherPanelActivatesAndCtrlBReturnsToIt()
+    public async Task BootstrapWorkspace_PersistsForSessionAndRefreshDoesNotActivateIt()
     {
         var bootstrap = new BootstrapWorkspace(host);
         var output = host.ForPlugin("Other");
@@ -3351,6 +3509,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
             switchToWorkspace: false);
 
         await StartAsync();
+        await terminal.ResizeAsync(120, 36);
         await terminal.WaitForScreenAsync("运行环境");
         host.SwitchWorkspace(other);
         await terminal.WaitForScreenAsync("QuietOther");
@@ -3358,26 +3517,429 @@ public sealed class LiveDisplayRenderTests : IDisposable
         await terminal.WaitForScreenAsync("运行环境");
         Assert.Same(bootstrap.Workspace, host.CurrentWorkspace);
 
-        var disposed = 0;
+        output.SetPanel(other, "main", "main", LiveDisplayContent.Text("ActivatedOther"));
+        await terminal.WaitForScreenAsync("ActivatedOther");
+        bootstrap.SetPhase("host", "宿主", LiveDisplaySeverity.Warning, "后台状态已更新");
+        await terminal.RedrawAsync();
+
+        Assert.Same(other, host.CurrentWorkspace);
+        Assert.Contains("ActivatedOther", await terminal.CaptureScreenAsync());
+        Assert.DoesNotContain("后台状态已更新", await terminal.CaptureScreenAsync());
+
+        var taskbar = await GetWorkspaceTaskbarAsync();
+        var parts = await terminal.InvokeAsync(() => TaskbarParts(taskbar));
+        await terminal.MoveMouseAsync(new Point(0, 35));
+        await terminal.WaitForAsync(async () => await terminal.InvokeAsync(() => parts.Popup.Visible));
+        var titles = await terminal.InvokeAsync(() =>
+            parts.Popup.SubViews.OfType<Shortcut>().Select(x => x.Title).ToArray());
+        Assert.Contains("启动", titles);
+        Assert.Contains("Other", titles);
+
+        await terminal.MoveMouseAsync(Point.Empty);
+        await terminal.WaitForAsync(async () => !await terminal.InvokeAsync(() => parts.Popup.Visible));
+        await terminal.InjectAsync(Key.B.WithCtrl);
+        await terminal.WaitForScreenAsync("后台状态已更新");
+        Assert.Same(bootstrap.Workspace, host.CurrentWorkspace);
+    }
+
+    [Fact]
+    public void BootstrapDefaultLogWorkspaceSurvivesProductionBindingOrder()
+    {
+        terminal.RunOnOwnerThread(() => LiveDisplayConsole.Unbind(host));
+        using var bootstrap = new BootstrapWorkspace(host);
+
+        Assert.Same(bootstrap.Workspace, LiveDisplayConsole.DefaultLogWorkspace);
+        terminal.RunOnOwnerThread(() => LiveDisplayConsole.Bind(host, terminal.Application));
+        Assert.Same(bootstrap.Workspace, LiveDisplayConsole.DefaultLogWorkspace);
+    }
+
+    [Fact]
+    public async Task ExceptionsRouteOnceToBootstrapWithoutSwitchingActiveWorkspace()
+    {
+        using var bootstrap = new BootstrapWorkspace(host);
+        var output = host.ForPlugin("Other");
+        var other = output.CreateWorkspace("Other");
+        output.SetPanel(
+            other,
+            "main",
+            "main",
+            LiveDisplayContent.Text("ActivePluginWorkspace"),
+            switchToWorkspace: false);
+
+        await StartAsync();
+        await terminal.ResizeAsync(120, 36);
+        host.SwitchWorkspace(other);
+        await terminal.WaitForScreenAsync("ActivePluginWorkspace");
+
+        LiveDisplayConsole.WriteException(new InvalidOperationException("write-exception-sentinel"));
+        LiveDisplayConsole.LogException("Analyzer", new ApplicationException("log-exception-sentinel"));
+        await host.HandleCommandAsync("/workspace switch \"unterminated");
+        output.Log(other, "ordinary-plugin-log");
+        await terminal.WaitForAsync(async () =>
+        {
+            var bootstrapLogs = await terminal.InvokeAsync(
+                () => host.GetLogsForTests(bootstrap.Workspace));
+            var pluginLogs = await terminal.InvokeAsync(() => host.GetLogsForTests(other));
+            return bootstrapLogs.Count(x => x.Text == "write-exception-sentinel") == 1 &&
+                   bootstrapLogs.Count(x => x.Text == "log-exception-sentinel") == 1 &&
+                   bootstrapLogs.Count(x => x.Text == "Quoted workspace title 缺少结束双引号。") == 1 &&
+                   pluginLogs.Count(x => x.Text == "ordinary-plugin-log") == 1;
+        });
+
+        Assert.Same(bootstrap.Workspace, LiveDisplayConsole.DefaultLogWorkspace);
+        Assert.Same(other, host.CurrentWorkspace);
+        var pluginScreen = await terminal.CaptureScreenAsync();
+        Assert.Contains("ActivePluginWorkspace", pluginScreen);
+        Assert.DoesNotContain("write-exception-sentinel", pluginScreen);
+        Assert.DoesNotContain("log-exception-sentinel", pluginScreen);
+
+        await terminal.InjectAsync(Key.B.WithCtrl);
+        await terminal.WaitForScreenAsync("write-exception-sentinel");
+        await terminal.WaitForScreenAsync("log-exception-sentinel");
+        var bootstrapScreen = await terminal.CaptureScreenAsync();
+        Assert.Contains("ERR [URA] write-exception-sentinel", bootstrapScreen);
+        Assert.Contains("ERR [Analyzer] log-exception-sentinel", bootstrapScreen);
+        Assert.Contains("ERR [Command] Quoted workspace title 缺少结束双引号。", bootstrapScreen);
+        Assert.DoesNotContain("ordinary-plugin-log", bootstrapScreen);
+        Assert.Equal(
+            3,
+            await terminal.InvokeAsync(() =>
+                Descendants(terminal.Application.TopRunnableView!)
+                    .OfType<BootstrapDashboardView>()
+                    .Single()
+                    .SubViews
+                    .OfType<FrameView>()
+                    .Single(x => x.Title.ToString() == "最近日志")
+                    .SubViews
+                    .OfType<ListView>()
+                    .Single()
+                    .Source!
+                    .Count));
+    }
+
+    [Fact]
+    public async Task BootstrapExceptionContextMenu_CopiesExactBacktraceThroughNativeInput()
+    {
+        using var bootstrap = new BootstrapWorkspace(host);
+        bootstrap.Log("Worker", "ordinary-log", LiveDisplaySeverity.Error);
+        var exception = CaptureBacktraceException();
+        var expectedBacktrace = exception.ToString();
+        Assert.Contains(typeof(AggregateException).FullName!, expectedBacktrace);
+        Assert.Contains(typeof(ApplicationException).FullName!, expectedBacktrace);
+        Assert.Contains(typeof(InvalidOperationException).FullName!, expectedBacktrace);
+        Assert.Contains(nameof(CaptureBacktraceException), expectedBacktrace);
+        LiveDisplayConsole.LogException("Analyzer", exception);
+        var clipboard = new CountingFakeClipboard();
+
+        await StartAsync();
+        await terminal.InvokeAsync(() => terminal.Application.Driver!.Clipboard = clipboard);
+        await terminal.ResizeAsync(120, 36);
+        await terminal.WaitForScreenAsync("compact-exception-sentinel");
+
+        var storedLogs = await terminal.InvokeAsync(
+            () => host.GetLogsForTests(bootstrap.Workspace));
+        Assert.Null(storedLogs.Single(x => x.Text == "ordinary-log").ExceptionDetails);
+        Assert.Equal(
+            expectedBacktrace,
+            storedLogs.Single(x => x.PluginId == "Analyzer").ExceptionDetails);
+        var compactScreen = await terminal.CaptureScreenAsync();
+        Assert.Contains("ERR [Analyzer] compact-exception-sentinel", compactScreen);
+        Assert.DoesNotContain(nameof(AggregateException), compactScreen);
+        Assert.DoesNotContain(nameof(CaptureBacktraceException), compactScreen);
+
+        var logList = await terminal.InvokeAsync(() =>
+        {
+            var list = Descendants(terminal.Application.TopRunnableView!)
+                .OfType<BootstrapDashboardView>()
+                .Single()
+                .SubViews
+                .OfType<FrameView>()
+                .Single(x => x.Title.ToString() == "最近日志")
+                .SubViews
+                .OfType<ListView>()
+                .Single();
+            list.SelectedItem = 0;
+            list.SetFocus();
+            return list;
+        });
+        await terminal.RedrawAsync();
+        var rowPoints = await terminal.InvokeAsync(() => (
+            Ordinary: logList.ViewportToScreen(new Point(1, -logList.Viewport.Y)),
+            Exception: logList.ViewportToScreen(new Point(1, 1 - logList.Viewport.Y)),
+            Blank: logList.ViewportToScreen(new Point(1, 3 - logList.Viewport.Y)),
+            OutsideMenu: logList.ViewportToScreen(
+                new Point(Math.Max(1, logList.Viewport.Width - 3), -logList.Viewport.Y))));
+
+        await RightClickAsync(rowPoints.Exception);
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() =>
+                terminal.Application.Popovers?.GetActivePopover() is PopoverMenu { Visible: true }));
+        var firstMenu = await terminal.InvokeAsync(() =>
+        {
+            Assert.Equal(1, logList.SelectedItem);
+            var menu = Assert.IsType<PopoverMenu>(
+                terminal.Application.Popovers!.GetActivePopover());
+            var item = Descendants(menu).OfType<MenuItem>().Single();
+            return (
+                Menu: menu,
+                Item: item,
+                ItemPoint: item.ViewportToScreen(new Point(1, 0)));
+        });
+        Assert.Contains("复制完整 backtrace", await terminal.CaptureScreenAsync());
+        Assert.Equal(
+            await terminal.InvokeAsync(() =>
+                firstMenu.Item.GetAttributeForRole(VisualRole.Focus)),
+            await terminal.CaptureAttributeAsync(firstMenu.ItemPoint));
+
+        await terminal.ClickAsync(firstMenu.ItemPoint);
+        await terminal.WaitForAsync(() => clipboard.WriteCount == 1);
+        AssertClipboard(expectedBacktrace, clipboard);
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() =>
+                terminal.Application.Popovers?.GetActivePopover() is null));
+        Assert.True(await terminal.InvokeAsync(() => logList.HasFocus));
+        Assert.Equal(1, await terminal.InvokeAsync(() => logList.SelectedItem));
+        Assert.Same(bootstrap.Workspace, host.CurrentWorkspace);
+        Assert.False((await GetCommandModeAsync()).IsOpen);
+
+        await RightClickAsync(rowPoints.Exception);
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() =>
+                terminal.Application.Popovers?.GetActivePopover() is PopoverMenu { Visible: true }));
+        await terminal.InjectAsync(Key.Enter);
+        await terminal.WaitForAsync(() => clipboard.WriteCount == 2);
+        AssertClipboard(expectedBacktrace, clipboard);
+        Assert.True(await terminal.InvokeAsync(() => logList.HasFocus));
+        Assert.Equal(1, await terminal.InvokeAsync(() => logList.SelectedItem));
+        Assert.False((await GetCommandModeAsync()).IsOpen);
+
+        await RightClickAsync(rowPoints.Exception);
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() =>
+                terminal.Application.Popovers?.GetActivePopover() is PopoverMenu { Visible: true }));
+        await terminal.InjectAsync(Key.Esc);
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() =>
+                terminal.Application.Popovers?.GetActivePopover() is null));
+        Assert.Equal(2, clipboard.WriteCount);
+        Assert.True(await terminal.InvokeAsync(() => logList.HasFocus));
+
+        await RightClickAsync(rowPoints.Exception);
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() =>
+                terminal.Application.Popovers?.GetActivePopover() is PopoverMenu { Visible: true }));
+        await terminal.ClickAsync(rowPoints.OutsideMenu);
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() =>
+                terminal.Application.Popovers?.GetActivePopover() is null));
+        Assert.Equal(2, clipboard.WriteCount);
+        Assert.True(await terminal.InvokeAsync(() => logList.HasFocus));
+
+        await RightClickAsync(rowPoints.Ordinary);
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() => logList.SelectedItem == 0));
+        Assert.Null(await terminal.InvokeAsync(() =>
+            terminal.Application.Popovers?.GetActivePopover()));
+        Assert.Equal(2, clipboard.WriteCount);
+
+        await terminal.InvokeAsync(() => logList.SelectedItem = 1);
+        await RightClickAsync(rowPoints.Blank);
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() => logList.SelectedItem is null));
+        Assert.Null(await terminal.InvokeAsync(() =>
+            terminal.Application.Popovers?.GetActivePopover()));
+        Assert.Equal(2, clipboard.WriteCount);
+
+        await terminal.InvokeAsync(() =>
+            terminal.Application.Driver!.Clipboard =
+                new FakeClipboard(isSupportedAlwaysFalse: true));
+        await RightClickAsync(rowPoints.Exception);
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() =>
+                terminal.Application.Popovers?.GetActivePopover() is PopoverMenu { Visible: true }));
+        await terminal.InjectAsync(Key.Enter);
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() =>
+                host.GetNotificationsForTests(null).Any(x =>
+                    x.Text == "复制完整 backtrace 失败：系统 clipboard 不可用。")));
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() =>
+                terminal.Application.Popovers?.GetActivePopover() is null));
+        Assert.False(run!.IsCompleted);
+        Assert.Same(bootstrap.Workspace, host.CurrentWorkspace);
+        Assert.True(await terminal.InvokeAsync(() => logList.HasFocus));
+    }
+
+    [Fact]
+    public async Task BootstrapExceptionContextMenu_ClipboardExceptionIsReportedWithoutEndingSession()
+    {
+        using var bootstrap = new BootstrapWorkspace(host);
+        LiveDisplayConsole.LogException("Analyzer", CaptureBacktraceException());
+        var clipboardException = new InvalidOperationException(
+            "clipboard-write-failure-sentinel");
+
+        await StartAsync();
+        await terminal.InvokeAsync(() =>
+            terminal.Application.Driver!.Clipboard =
+                new ThrowingFakeClipboard(clipboardException));
+        await terminal.ResizeAsync(120, 36);
+        await terminal.WaitForScreenAsync("compact-exception-sentinel");
+
+        var logList = await terminal.InvokeAsync(() =>
+            Descendants(terminal.Application.TopRunnableView!)
+                .OfType<BootstrapDashboardView>()
+                .Single()
+                .SubViews
+                .OfType<FrameView>()
+                .Single(x => x.Title.ToString() == "最近日志")
+                .SubViews
+                .OfType<ListView>()
+                .Single());
+        var exceptionRow = await terminal.InvokeAsync(() =>
+            logList.ViewportToScreen(new Point(1, -logList.Viewport.Y)));
+
+        await RightClickAsync(exceptionRow);
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() =>
+                terminal.Application.Popovers?.GetActivePopover() is PopoverMenu { Visible: true }));
+        await terminal.InjectAsync(Key.Enter);
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() =>
+                host.GetLogsForTests(bootstrap.Workspace).Any(x =>
+                    x.PluginId == "Clipboard" &&
+                    x.ExceptionDetails == clipboardException.ToString())));
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() =>
+                host.GetNotificationsForTests(null).Any(x =>
+                    x.Text == "复制完整 backtrace 失败：系统 clipboard 不可用。")));
+
+        Assert.False(run!.IsCompleted);
+        Assert.Same(bootstrap.Workspace, host.CurrentWorkspace);
+        Assert.Null(await terminal.InvokeAsync(() =>
+            terminal.Application.Popovers?.GetActivePopover()));
+    }
+
+    [Fact]
+    public async Task BootstrapExceptionContextMenu_ReleasesPopoverOnReplacementAndShutdown()
+    {
+        using var bootstrap = new BootstrapWorkspace(host);
+        LiveDisplayConsole.LogException("Analyzer", CaptureBacktraceException());
+        await StartAsync();
+        await terminal.ResizeAsync(120, 36);
+        await terminal.WaitForScreenAsync("compact-exception-sentinel");
+
+        var firstList = await terminal.InvokeAsync(() =>
+            Descendants(terminal.Application.TopRunnableView!)
+                .OfType<BootstrapDashboardView>()
+                .Single()
+                .SubViews
+                .OfType<FrameView>()
+                .Single(x => x.Title.ToString() == "最近日志")
+                .SubViews
+                .OfType<ListView>()
+                .Single());
+        var firstRow = await terminal.InvokeAsync(() =>
+            firstList.ViewportToScreen(new Point(1, -firstList.Viewport.Y)));
+        await RightClickAsync(firstRow);
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() =>
+                terminal.Application.Popovers?.GetActivePopover() is PopoverMenu { Visible: true }));
+
+        var firstMenu = await terminal.InvokeAsync(() =>
+            Assert.IsType<PopoverMenu>(
+                terminal.Application.Popovers!.GetActivePopover()));
+        var firstMenuDisposed = 0;
+        await terminal.InvokeAsync(() =>
+            firstMenu.Disposing += (_, _) => firstMenuDisposed++);
+
+        bootstrap.SetPhase("host", "宿主", LiveDisplaySeverity.Success, "context menu refresh");
+        await terminal.WaitForScreenAsync("context menu refresh");
+        await terminal.WaitForAsync(() => firstMenuDisposed == 1);
+        Assert.DoesNotContain(firstMenu, terminal.Application.Popovers!.Popovers);
+        Assert.NotSame(
+            firstList,
+            await terminal.InvokeAsync(() =>
+                Descendants(terminal.Application.TopRunnableView!)
+                    .OfType<BootstrapDashboardView>()
+                    .Single()
+                    .SubViews
+                    .OfType<FrameView>()
+                    .Single(x => x.Title.ToString() == "最近日志")
+                    .SubViews
+                    .OfType<ListView>()
+                    .Single()));
+
+        var replacementList = await terminal.InvokeAsync(() =>
+            Descendants(terminal.Application.TopRunnableView!)
+                .OfType<BootstrapDashboardView>()
+                .Single()
+                .SubViews
+                .OfType<FrameView>()
+                .Single(x => x.Title.ToString() == "最近日志")
+                .SubViews
+                .OfType<ListView>()
+                .Single());
+        var replacementRow = await terminal.InvokeAsync(() =>
+            replacementList.ViewportToScreen(new Point(1, -replacementList.Viewport.Y)));
+        await RightClickAsync(replacementRow);
+        await terminal.WaitForAsync(async () =>
+            await terminal.InvokeAsync(() =>
+                terminal.Application.Popovers?.GetActivePopover() is PopoverMenu { Visible: true }));
+        var replacementMenu = await terminal.InvokeAsync(() =>
+            Assert.IsType<PopoverMenu>(
+                terminal.Application.Popovers!.GetActivePopover()));
+        var replacementMenuDisposed = 0;
+        await terminal.InvokeAsync(() =>
+            replacementMenu.Disposing += (_, _) => replacementMenuDisposed++);
+
+        host.RequestShutdown();
+        await run!.WaitAsync(TimeSpan.FromSeconds(5));
+        run = null;
+
+        Assert.Equal(1, replacementMenuDisposed);
+        Assert.Empty(terminal.Application.Popovers!.Popovers);
+        Assert.Empty(terminal.Application.SessionStack!);
+    }
+
+    [Fact]
+    public async Task BootstrapWorkspaceDisposeDetachesLogCaptureAndClearsDefaultTarget()
+    {
+        var bootstrap = new BootstrapWorkspace(host);
+        await StartAsync();
+        await terminal.WaitForScreenAsync("运行环境");
+        var dashboardDisposed = 0;
         await terminal.InvokeAsync(() =>
             Descendants(terminal.Application.TopRunnableView!)
                 .OfType<BootstrapDashboardView>()
                 .Single()
-                .Disposing += (_, _) => disposed++);
-        output.SetPanel(other, "main", "main", LiveDisplayContent.Text("ActivatedOther"));
-        await terminal.WaitForScreenAsync("ActivatedOther");
-        await terminal.WaitForAsync(() => disposed == 1);
+                .Disposing += (_, _) => dashboardDisposed++);
 
-        Assert.Same(other, host.CurrentWorkspace);
-        Assert.Empty(await terminal.InvokeAsync(() =>
-            Descendants(terminal.Application.TopRunnableView!).OfType<BootstrapDashboardView>().ToArray()));
+        bootstrap.Dispose();
+        Assert.Null(LiveDisplayConsole.DefaultLogWorkspace);
+        host.Log(new LiveDisplayLogLine(
+            bootstrap.Workspace,
+            "Late",
+            "log-after-bootstrap-dispose",
+            LiveDisplaySeverity.Error));
+        await terminal.WaitForAsync(async () =>
+            (await terminal.InvokeAsync(() => host.GetLogsForTests(bootstrap.Workspace)))
+            .Any(x => x.Text == "log-after-bootstrap-dispose"));
+        await terminal.RedrawAsync();
+
+        Assert.Equal(0, dashboardDisposed);
+        Assert.DoesNotContain("log-after-bootstrap-dispose", await terminal.CaptureScreenAsync());
+
+        host.RequestShutdown();
+        await run!.WaitAsync(TimeSpan.FromSeconds(5));
+        run = null;
+        Assert.Equal(1, dashboardDisposed);
     }
 
     [Fact]
     public async Task CancellationCleansSessionAndSameApplicationCanRunAgain()
     {
         using var cancellation = new CancellationTokenSource();
-        _ = new BootstrapWorkspace(host);
+        var firstBootstrap = new BootstrapWorkspace(host);
         run = await terminal.StartAsync(host, cancellation.Token);
         await terminal.WaitForScreenAsync("运行环境");
         await terminal.InvokeAsync(() =>
@@ -3420,11 +3982,13 @@ public sealed class LiveDisplayRenderTests : IDisposable
         Assert.Equal(1, disposedCommandModes);
         Assert.Equal(1, disposedTaskbars);
         Assert.Equal(1, disposedTaskbarTriggers);
+        firstBootstrap.Dispose();
+        Assert.Null(LiveDisplayConsole.DefaultLogWorkspace);
 
         var second = CreateHost();
         host = second;
         BindHost(second);
-        _ = new BootstrapWorkspace(second);
+        var secondBootstrap = new BootstrapWorkspace(second);
         run = await terminal.StartAsync(second);
         await terminal.WaitForScreenAsync("初始化结果");
         await terminal.InvokeAsync(() =>
@@ -3457,6 +4021,8 @@ public sealed class LiveDisplayRenderTests : IDisposable
 
         await terminal.InjectAsync(Key.Esc);
         Assert.False((await GetCommandModeAsync()).IsOpen);
+        secondBootstrap.Dispose();
+        Assert.Null(LiveDisplayConsole.DefaultLogWorkspace);
     }
 
     [Fact]
@@ -3627,6 +4193,43 @@ public sealed class LiveDisplayRenderTests : IDisposable
             Timestamp = terminal.Time.Now
         };
 
+    async Task RightClickAsync(Point point)
+    {
+        await terminal.MoveMouseAsync(Point.Empty);
+        await terminal.MoveMouseAsync(point);
+        await terminal.InvokeAsync(() =>
+            terminal.Application.InjectSequence(
+                InputInjectionExtensions.RightButtonClick(point)));
+    }
+
+    static void AssertClipboard(string expected, FakeClipboard clipboard)
+    {
+        Assert.True(clipboard.TryGetClipboardData(out var actual));
+        Assert.Equal(expected, actual);
+    }
+
+    static Exception CaptureBacktraceException()
+    {
+        try
+        {
+            try
+            {
+                throw new InvalidOperationException("compact-exception-sentinel");
+            }
+            catch (Exception inner)
+            {
+                throw new AggregateException(
+                    "aggregate-backtrace-sentinel",
+                    new ApplicationException("compact-exception-sentinel", inner),
+                    new ArgumentException("compact-exception-sentinel"));
+            }
+        }
+        catch (Exception exception)
+        {
+            return exception;
+        }
+    }
+
     static void AssertValidGraphemePrefix(string fullTitle, string shortened)
     {
         var full = fullTitle.ToStringList();
@@ -3720,6 +4323,22 @@ public sealed class LiveDisplayRenderTests : IDisposable
                 return true;
             });
         }
+    }
+
+    sealed class CountingFakeClipboard : FakeClipboard
+    {
+        public int WriteCount { get; private set; }
+
+        protected override void SetClipboardDataImpl(string? text)
+        {
+            WriteCount++;
+            base.SetClipboardDataImpl(text);
+        }
+    }
+
+    sealed class ThrowingFakeClipboard(Exception exception) : FakeClipboard
+    {
+        protected override void SetClipboardDataImpl(string? text) => throw exception;
     }
 
     sealed record TaskbarFramebufferState(

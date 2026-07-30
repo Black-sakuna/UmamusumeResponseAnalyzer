@@ -7,14 +7,13 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
     internal abstract record UiEvent
     {
         public sealed record RegisterWorkspace(LiveDisplayWorkspace Workspace) : UiEvent;
-        public sealed record RemoveWorkspace(LiveDisplayWorkspace Workspace, LiveDisplayWorkspace? Replacement, Action? Removed = null) : UiEvent;
+        public sealed record RemoveWorkspace(LiveDisplayWorkspace Workspace, LiveDisplayWorkspace? Replacement) : UiEvent;
         public sealed record SetWorkspaceShortcut(
             LiveDisplayWorkspace Workspace,
             ConsoleKey Key,
             ConsoleModifiers Modifiers,
             string ShortcutText,
             KeyboardManager.HotkeyEntry Entry) : UiEvent;
-        public sealed record RemoveWorkspaceWhenAnotherPanelActivates(LiveDisplayWorkspace Workspace, Action? Removed) : UiEvent;
         public sealed record SetPanel(LiveDisplayPanel Panel, bool SwitchToWorkspace) : UiEvent;
         public sealed record Log(LiveDisplayLogLine Line) : UiEvent;
         public sealed record Notify(LiveDisplayNotification Notification) : UiEvent;

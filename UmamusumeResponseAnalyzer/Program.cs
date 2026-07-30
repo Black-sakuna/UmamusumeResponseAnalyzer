@@ -157,7 +157,6 @@ namespace UmamusumeResponseAnalyzer
                 shutdownBindingAdded = true;
                 LiveDisplayConsole.Bind(uiHost, application, lifetimeCts.Token);
                 liveDisplayBound = true;
-                LiveDisplayConsole.DefaultLogWorkspace = bootstrap.Workspace;
                 KeyboardManager.OverlaySink = uiHost;
                 PluginManager.BindLiveDisplay(application, plugin => uiHost.ForPlugin(plugin.Name));
 
@@ -396,6 +395,11 @@ namespace UmamusumeResponseAnalyzer
                         },
                         () =>
                         {
+                            bootstrap?.Dispose();
+                            return ValueTask.CompletedTask;
+                        },
+                        () =>
+                        {
                             if (liveDisplayBound)
                                 LiveDisplayConsole.Unbind(uiHost!);
                             return ValueTask.CompletedTask;
@@ -556,6 +560,7 @@ namespace UmamusumeResponseAnalyzer
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
             catch (Exception ex)
             {
+                LiveDisplayConsole.LogException("URA", ex, LiveDisplaySeverity.Warning);
                 uiHost.Notify(new LiveDisplayNotification(
                     Workspace: null,
                     "URA",

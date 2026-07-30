@@ -19,7 +19,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         {
             None = 0,
             WorkspaceStructure = 1,
-            LogContent = 2,
+            WorkspaceViewport = 2,
             Overlays = 4
         }
 
@@ -32,15 +32,14 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
 
         readonly Dictionary<LiveDisplayWorkspace, WorkspaceState> workspaces = [];
         readonly Dictionary<(LiveDisplayWorkspace Workspace, string PluginId, string Key), LiveDisplayPanel> panels = [];
-        readonly List<PendingWorkspaceRemoval> pendingWorkspaceRemovals = [];
         readonly object workspaceIdentityGate = new();
         readonly Dictionary<string, LiveDisplayWorkspace> workspaceRegistrations = new(StringComparer.OrdinalIgnoreCase);
         readonly Dictionary<LiveDisplayWorkspace, LiveDisplayWorkspace> workspaceAliases =
             new(ReferenceEqualityComparer.Instance);
         readonly object removedWorkspaceGate = new();
         readonly HashSet<LiveDisplayWorkspace> removedWorkspaces = new(ReferenceEqualityComparer.Instance);
-        readonly List<(long Sequence, LiveDisplayLogLine Line)> globalLogs = [];
-        readonly Dictionary<LiveDisplayWorkspace, List<(long Sequence, LiveDisplayLogLine Line)>> workspaceLogs =
+        readonly List<LiveDisplayLogLine> globalLogs = [];
+        readonly Dictionary<LiveDisplayWorkspace, List<LiveDisplayLogLine>> workspaceLogs =
             new(ReferenceEqualityComparer.Instance);
         readonly List<LiveDisplayNotification> notifications = [];
         readonly Dictionary<(LiveDisplayWorkspace Workspace, string PluginId, string Key), CachedPanelView> panelViews = [];
@@ -57,7 +56,6 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         int lastViewportMaxScroll;
         int popupVisibleLineCount = 1;
         bool shutdownRequested;
-        long logSequence;
         int runState;
         int drainScheduled;
         Window? window;
@@ -91,7 +89,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             var source = workspace is null
                 ? globalLogs
                 : workspaceLogs.GetValueOrDefault(workspace) ?? [];
-            return source.Select(x => x.Line).ToArray();
+            return source.ToArray();
         }
 
         internal IReadOnlyList<LiveDisplayNotification> GetNotificationsForTests(LiveDisplayWorkspace? workspace)
@@ -144,14 +142,11 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         {
             ArgumentNullException.ThrowIfNull(workspace);
             workspace = CanonicalizeWorkspace(workspace, createIfMissing: false) ?? workspace;
-            TryTombstoneWorkspace(workspace, preferredReplacement: null, queueRemoval: true, out _);
-        }
+            if (!TryTombstoneWorkspace(workspace, out var replacement))
+                return;
 
-        internal void RemoveWorkspaceWhenAnotherPanelActivates(LiveDisplayWorkspace workspace, Action? removed = null)
-        {
-            ArgumentNullException.ThrowIfNull(workspace);
-            workspace = CanonicalizeWorkspace(workspace) ?? workspace;
-            Post(new UiEvent.RemoveWorkspaceWhenAnotherPanelActivates(workspace, removed));
+            Post(new UiEvent.RemoveWorkspace(workspace, replacement));
+            KeyboardManager.RemoveNotificationShortcuts(workspace);
         }
 
         public void SetPanel(LiveDisplayPanel panel, bool switchToWorkspace = true)
@@ -253,8 +248,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             }
             catch (Exception ex)
             {
-                LogCommandWarning($"命令执行失败: {ex.Message}");
-                RefreshWorkspaceSurface();
+                LiveDisplayConsole.LogException("Command", ex);
             }
         }
 
@@ -655,7 +649,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                     workspaceStructurePending = true;
                 }
             }
-            else if (changes.HasFlag(UiChange.LogContent) && !workspaceStructurePending)
+            else if (changes.HasFlag(UiChange.WorkspaceViewport) && !workspaceStructurePending)
             {
                 RefreshWorkspaceSurface();
             }
@@ -700,25 +694,27 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             while (events.Reader.TryRead(out var uiEvent))
             {
                 var previousActiveWorkspace = activeWorkspace;
+                var previousWorkspaceCount = workspaces.Count;
                 Apply(uiEvent);
                 changes |= uiEvent switch
                 {
                     UiEvent.RegisterWorkspace or
                     UiEvent.RemoveWorkspace or
                     UiEvent.SetWorkspaceShortcut or
-                    UiEvent.RemoveWorkspaceWhenAnotherPanelActivates or
-                    UiEvent.SetPanel or
                     UiEvent.SwitchWorkspace or
-                    UiEvent.RunCommand => UiChange.WorkspaceStructure | UiChange.LogContent | UiChange.Overlays,
-                    UiEvent.Log => UiChange.LogContent,
+                    UiEvent.RunCommand => UiChange.WorkspaceStructure | UiChange.Overlays,
+                    UiEvent.SetPanel setPanel when
+                        ReferenceEquals(setPanel.Panel.Workspace, activeWorkspace) ||
+                        workspaces.Count != previousWorkspaceCount
+                        => UiChange.WorkspaceStructure | UiChange.Overlays,
                     UiEvent.Notify or
                     UiEvent.ShowPopup or
                     UiEvent.HidePopup => UiChange.Overlays,
-                    UiEvent.NavigateWorkspace => UiChange.LogContent,
+                    UiEvent.NavigateWorkspace => UiChange.WorkspaceViewport,
                     _ => UiChange.None
                 };
                 if (!ReferenceEquals(previousActiveWorkspace, activeWorkspace))
-                    changes |= UiChange.WorkspaceStructure | UiChange.LogContent | UiChange.Overlays;
+                    changes |= UiChange.WorkspaceStructure | UiChange.Overlays;
             }
             return changes;
         }
@@ -733,8 +729,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 case UiEvent.RemoveWorkspace removeWorkspace:
                     RemoveWorkspaceState(
                         removeWorkspace.Workspace,
-                        removeWorkspace.Replacement,
-                        removeWorkspace.Removed);
+                        removeWorkspace.Replacement);
                     break;
                 case UiEvent.SetWorkspaceShortcut setWorkspaceShortcut:
                     SetWorkspaceShortcut(
@@ -743,9 +738,6 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                         setWorkspaceShortcut.Modifiers,
                         setWorkspaceShortcut.ShortcutText,
                         setWorkspaceShortcut.Entry);
-                    break;
-                case UiEvent.RemoveWorkspaceWhenAnotherPanelActivates removeWorkspace:
-                    ArmWorkspaceRemovalWhenAnotherPanelActivates(removeWorkspace.Workspace, removeWorkspace.Removed);
                     break;
                 case UiEvent.SetPanel setPanel:
                     if (IsRemovedWorkspace(setPanel.Panel.Workspace))
@@ -763,7 +755,6 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                     panels[panelKey] = setPanel.Panel;
                     if (setPanel.SwitchToWorkspace)
                     {
-                        RemovePendingWorkspacesAfterPanelActivation(setPanel.Panel.Workspace);
                         if (!Equals(activeWorkspace, setPanel.Panel.Workspace))
                         {
                             activeWorkspace = setPanel.Panel.Workspace;
@@ -853,7 +844,6 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             workspaceSurface = WorkspaceLayoutBuilder.BuildWorkspaceLayout(
                 activeWorkspace,
                 panels.Values,
-                VisibleLogs(),
                 WorkspaceLabel,
                 width,
                 height,
@@ -888,7 +878,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             var focused = ReferenceEquals(application.TopRunnableView, window)
                 ? window.MostFocused
                 : null;
-            workspaceSurface.Update(VisibleLogs(), width, height, state?.ScrollOffset ?? 0);
+            workspaceSurface.Update(width, height, state?.ScrollOffset ?? 0);
             lastViewportWidth = width;
             lastViewportHeight = height;
             lastViewportMaxScroll = workspaceSurface.MaxScroll;
@@ -1345,21 +1335,9 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 workspaceLogs.Add(line.Workspace!, bank);
             }
 
-            bank.Add((++logSequence, line));
+            bank.Add(line);
             if (bank.Count > MaxLogLines)
                 bank.RemoveRange(0, bank.Count - MaxLogLines);
-        }
-
-        IReadOnlyList<LiveDisplayLogLine> VisibleLogs()
-        {
-            IEnumerable<(long Sequence, LiveDisplayLogLine Line)> visible = globalLogs;
-            if (activeWorkspace is not null && workspaceLogs.TryGetValue(activeWorkspace, out var scopedLogs))
-                visible = visible.Concat(scopedLogs);
-
-            return visible
-                .OrderBy(x => x.Sequence)
-                .Select(x => x.Line)
-                .ToArray();
         }
 
         List<LiveDisplayNotification> VisibleNotifications()
@@ -1443,44 +1421,8 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             };
         }
 
-        void ArmWorkspaceRemovalWhenAnotherPanelActivates(LiveDisplayWorkspace workspace, Action? removed)
+        void RemoveWorkspaceState(LiveDisplayWorkspace workspace, LiveDisplayWorkspace? replacement)
         {
-            if (IsRemovedWorkspace(workspace))
-            {
-                removed?.Invoke();
-                return;
-            }
-
-            if (pendingWorkspaceRemovals.Any(x => ReferenceEquals(x.Workspace, workspace)))
-                return;
-
-            pendingWorkspaceRemovals.Add(new(workspace, removed));
-        }
-
-        void RemovePendingWorkspacesAfterPanelActivation(LiveDisplayWorkspace activatedWorkspace)
-        {
-            foreach (var pending in pendingWorkspaceRemovals.ToList())
-            {
-                if (ReferenceEquals(pending.Workspace, activatedWorkspace))
-                    continue;
-
-                TryTombstoneWorkspace(pending.Workspace, activatedWorkspace, queueRemoval: false, out var replacement);
-                RemoveWorkspaceState(pending.Workspace, replacement, removed: null);
-            }
-        }
-
-        void RemoveWorkspaceState(LiveDisplayWorkspace workspace, LiveDisplayWorkspace? replacement, Action? removed)
-        {
-            var callbacks = pendingWorkspaceRemovals
-                .Where(x => ReferenceEquals(x.Workspace, workspace))
-                .Select(x => x.Removed)
-                .Where(x => x is not null)
-                .Cast<Action>()
-                .ToList();
-            pendingWorkspaceRemovals.RemoveAll(x => ReferenceEquals(x.Workspace, workspace));
-            if (removed is not null)
-                callbacks.Add(removed);
-
             if (workspaces.TryGetValue(workspace, out var state) && ReferenceEquals(state.Workspace, workspace))
             {
                 workspaces.Remove(workspace);
@@ -1503,8 +1445,6 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 Volatile.Write(ref currentWorkspace, activeWorkspace);
 
             RefreshWorkspaceCompletionTitles();
-            foreach (var callback in callbacks.Distinct())
-                callback();
         }
 
         void RefreshWorkspaceCompletionTitles()
@@ -1606,8 +1546,6 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
 
         bool TryTombstoneWorkspace(
             LiveDisplayWorkspace workspace,
-            LiveDisplayWorkspace? preferredReplacement,
-            bool queueRemoval,
             out LiveDisplayWorkspace? replacement)
         {
             lock (workspaceIdentityGate)
@@ -1637,17 +1575,11 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                     workspaceRegistrations.Remove(workspace.Title);
                 }
 
-                replacement = preferredReplacement is not null &&
-                    workspaceRegistrations.Values.Any(x => ReferenceEquals(x, preferredReplacement))
-                        ? preferredReplacement
-                        : workspaceRegistrations.Values.FirstOrDefault();
+                replacement = workspaceRegistrations.Values.FirstOrDefault();
 
                 if (ReferenceEquals(CurrentWorkspace, workspace))
                     Volatile.Write(ref currentWorkspace, replacement);
             }
-            if (queueRemoval)
-                Post(new UiEvent.RemoveWorkspace(workspace, replacement));
-            KeyboardManager.RemoveNotificationShortcuts(workspace);
             return true;
         }
 
@@ -1688,8 +1620,6 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 return workspace;
             }
         }
-
-        sealed record PendingWorkspaceRemoval(LiveDisplayWorkspace Workspace, Action? Removed);
 
         sealed record WorkspaceHotkey(
             ConsoleKey Key,
