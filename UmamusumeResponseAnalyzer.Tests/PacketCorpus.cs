@@ -17,7 +17,7 @@ namespace UmamusumeResponseAnalyzer.Tests
     public static class PacketCorpus
     {
         public sealed record EndpointPacket(string Path, GameEndpointDescriptor Endpoint);
-        public sealed record UnresolvedEndpointPacket(string Path, string CanonicalUrl, Exception Error);
+        public sealed record UnresolvedEndpointPacket(string Path, string CanonicalUrl);
 
         public static string? Directory { get; } = Resolve();
         public static bool Available => Directory is not null;
@@ -111,14 +111,9 @@ namespace UmamusumeResponseAnalyzer.Tests
             if (!TryGetCanonicalUrl(path, out var kind, out var canonicalUrl) || kind != AnalyzerKind.Response)
                 return null;
 
-            try
-            {
-                return new(path, Server.ResolveEndpoint(canonicalUrl));
-            }
-            catch
-            {
-                return null;
-            }
+            return Server.TryResolveEndpoint(canonicalUrl, out var endpoint)
+                ? new(path, endpoint)
+                : null;
         }
 
         static EndpointPacket? TryCreateRequestEndpointPacket(string path)
@@ -126,14 +121,9 @@ namespace UmamusumeResponseAnalyzer.Tests
             if (!TryGetCanonicalUrl(path, out var kind, out var canonicalUrl) || kind != AnalyzerKind.Request)
                 return null;
 
-            try
-            {
-                return new(path, Server.ResolveEndpoint(canonicalUrl));
-            }
-            catch
-            {
-                return null;
-            }
+            return Server.TryResolveEndpoint(canonicalUrl, out var endpoint)
+                ? new(path, endpoint)
+                : null;
         }
 
         static UnresolvedEndpointPacket? TryCreateUnresolvedResponseEndpointPacket(string path)
@@ -141,15 +131,9 @@ namespace UmamusumeResponseAnalyzer.Tests
             if (!TryGetCanonicalUrl(path, out var kind, out var canonicalUrl) || kind != AnalyzerKind.Response)
                 return null;
 
-            try
-            {
-                Server.ResolveEndpoint(canonicalUrl);
-                return null;
-            }
-            catch (Exception ex)
-            {
-                return new(path, canonicalUrl, ex);
-            }
+            return Server.TryResolveEndpoint(canonicalUrl, out _)
+                ? null
+                : new(path, canonicalUrl);
         }
 
         static bool TryGetPacketKind(string path, out AnalyzerKind kind)

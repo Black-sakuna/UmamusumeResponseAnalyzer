@@ -145,26 +145,26 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
 
         [Fact]
-        public void ResolveEndpoint_UsesExactGameEndpointCatalogPath()
+        public void TryResolveEndpoint_UsesExactGameEndpointCatalogPath()
         {
-            var descriptor = Server.ResolveEndpoint(AccountIndexPath);
+            Assert.True(Server.TryResolveEndpoint(AccountIndexPath, out var descriptor));
 
             Assert.Equal(typeof(GameApi.Account.Index), descriptor.EndpointType);
-            Assert.Throws<KeyNotFoundException>(() => Server.ResolveEndpoint(AccountIndexPath + "/"));
+            Assert.False(Server.TryResolveEndpoint(AccountIndexPath + "/", out _));
         }
 
         [Fact]
-        public void ResolveEndpoint_AcceptsAbsoluteCanonicalUrlWithQueryAndHash()
+        public void TryResolveEndpoint_AcceptsAbsoluteCanonicalUrlWithQueryAndHash()
         {
-            var descriptor = Server.ResolveEndpoint(AccountIndexAbsoluteUrl);
+            Assert.True(Server.TryResolveEndpoint(AccountIndexAbsoluteUrl, out var descriptor));
 
             Assert.Equal(typeof(GameApi.Account.Index), descriptor.EndpointType);
         }
 
         [Fact]
-        public void ResolveEndpoint_AcceptsPathWithoutUmamusumePrefixWhenCatalogPathExists()
+        public void TryResolveEndpoint_AcceptsPathWithoutUmamusumePrefixWhenCatalogPathExists()
         {
-            var descriptor = Server.ResolveEndpoint(AccountIndexPathWithoutPrefix);
+            Assert.True(Server.TryResolveEndpoint(AccountIndexPathWithoutPrefix, out var descriptor));
 
             Assert.Equal(typeof(GameApi.Account.Index), descriptor.EndpointType);
             Assert.Equal(AccountIndexPath, descriptor.Path);
@@ -173,30 +173,64 @@ namespace UmamusumeResponseAnalyzer.Tests
         [Theory]
         [InlineData(LegendLoadAbsoluteUrlWithoutPrefix, typeof(GameApi.SingleModeLegend.Load))]
         [InlineData(AccountIndexAbsoluteUrlWithoutPrefix, typeof(GameApi.Account.Index))]
-        public void ResolveEndpoint_AcceptsAbsoluteCanonicalUrlWithoutUmamusumePrefix(string canonicalUrl, Type endpointType)
+        public void TryResolveEndpoint_AcceptsAbsoluteCanonicalUrlWithoutUmamusumePrefix(string canonicalUrl, Type endpointType)
         {
-            var descriptor = Server.ResolveEndpoint(canonicalUrl);
+            Assert.True(Server.TryResolveEndpoint(canonicalUrl, out var descriptor));
 
             Assert.Equal(endpointType, descriptor.EndpointType);
         }
 
         [Theory]
-        [InlineData("/umamusume/account/index/", "triedPaths=/umamusume/account/index/, /account/index/")]
-        [InlineData("/unknown/path", "triedPaths=/umamusume/unknown/path, /unknown/path")]
-        public void ResolveEndpoint_FailsFastForUnknownPath(string canonicalUrl, string expectedTriedPaths)
+        [InlineData("/umamusume/account/index/")]
+        [InlineData("/unknown/path")]
+        [InlineData("/umamusume/account/indx")]
+        public void TryResolveEndpoint_ReturnsFalseForUnknownPath(string canonicalUrl)
         {
-            var ex = Assert.Throws<KeyNotFoundException>(() => Server.ResolveEndpoint(canonicalUrl));
-
-            Assert.Contains(expectedTriedPaths, ex.Message);
+            Assert.False(Server.TryResolveEndpoint(canonicalUrl, out _));
         }
 
         [Theory]
         [InlineData("")]
         [InlineData("account/index")]
         [InlineData("?path=/umamusume/account/index")]
-        public void ResolveEndpoint_FailsFastForInvalidPath(string canonicalUrl)
+        public void TryResolveEndpoint_FailsFastForInvalidPath(string canonicalUrl)
         {
-            Assert.Throws<FormatException>(() => Server.ResolveEndpoint(canonicalUrl));
+            Assert.Throws<FormatException>(() => Server.TryResolveEndpoint(canonicalUrl, out _));
+        }
+
+        [Fact]
+        public async Task DispatchUnknownEndpoints_AreSilentAndDoNotAffectKnownDispatch()
+        {
+            await RunWithUiHostAsync(async (terminal, host) =>
+            {
+                var requestPlugin = new RequestDispatchPlugin();
+                var responsePlugin = new ResponseDispatchPlugin();
+                PluginManager.RegisterMethods(requestPlugin);
+                PluginManager.RegisterMethods(responsePlugin);
+
+                await Server.DispatchRequest("/unknown/path", [0xC1]);
+                await Server.DispatchResponse("/umamusume/account/indx", [0xC1]);
+                await terminal.InvokeAsync(() => { });
+
+                Assert.Equal(0, requestPlugin.RawCalls);
+                Assert.Equal(0, requestPlugin.DtoCalls);
+                Assert.Equal(0, responsePlugin.RawCalls);
+                Assert.Equal(0, responsePlugin.DtoCalls);
+                Assert.Empty(await terminal.InvokeAsync(() => host.GetLogsForTests(null)));
+                Assert.Empty(await terminal.InvokeAsync(() => host.GetNotificationsForTests(null)));
+
+                await Server.DispatchRequest(
+                    AccountIndexPath,
+                    MessagePackSerializer.Serialize(new DataLinkIndexRequest()));
+                await Server.DispatchResponse(
+                    AccountIndexPath,
+                    MessagePackSerializer.Serialize(new DataLinkIndexResponse()));
+
+                Assert.Equal(1, requestPlugin.RawCalls);
+                Assert.Equal(1, requestPlugin.DtoCalls);
+                Assert.Equal(1, responsePlugin.RawCalls);
+                Assert.Equal(1, responsePlugin.DtoCalls);
+            });
         }
 
         [Fact]
@@ -287,6 +321,38 @@ namespace UmamusumeResponseAnalyzer.Tests
 
             Assert.Equal(0, plugin.DtoCalls);
             Assert.Equal(1, plugin.RawCalls);
+        }
+
+        [Fact]
+        public async Task DispatchKnownEndpointFailures_RemainReported()
+        {
+            await RunWithUiHostAsync(async (terminal, host) =>
+            {
+                var malformedPayloadPlugin = new ResponseDispatchPlugin();
+                PluginManager.RegisterMethods(malformedPayloadPlugin);
+
+                await Assert.ThrowsAsync<FormatException>(
+                    async () => await Server.DispatchResponse("account/index", [0xC0]));
+                await Server.DispatchResponse(AccountIndexPath, [0xC1]);
+
+                ResetAnalyzerState();
+                PluginManager.RegisterMethods(new ThrowingResponsePlugin());
+                await Server.DispatchResponse(
+                    AccountIndexPath,
+                    MessagePackSerializer.Serialize(new DataLinkIndexResponse()));
+
+                await terminal.WaitForAsync(async () =>
+                {
+                    var logs = await terminal.InvokeAsync(() => host.GetLogsForTests(null));
+                    var notifications = await terminal.InvokeAsync(() => host.GetNotificationsForTests(null));
+                    return logs.Any(x => x.Text.Contains("canonical URL 必须包含绝对 path", StringComparison.Ordinal))
+                        && logs.Any(x => x.Text.Contains("Gallop DTO 反序列化失败", StringComparison.Ordinal))
+                        && logs.Any(x => x.Text.Contains("analyzer failed", StringComparison.Ordinal))
+                        && notifications.Any(x => x.Text.Contains("canonical URL 必须包含绝对 path", StringComparison.Ordinal))
+                        && notifications.Any(x => x.Text.Contains("Gallop DTO 反序列化失败", StringComparison.Ordinal))
+                        && notifications.Any(x => x.Text.Contains("analyzer failed", StringComparison.Ordinal));
+                });
+            });
         }
 
         [Fact]
@@ -384,7 +450,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
 
         [Fact]
-        public async Task DispatchResponse_DebugFilesAreSavedBeforeUnknownEndpointFails()
+        public async Task DispatchResponse_UnknownEndpointDoesNotSaveDebugFiles()
         {
             var previous = Config.Misc.SaveResponseForDebug;
             var originalCwd = Directory.GetCurrentDirectory();
@@ -398,18 +464,10 @@ namespace UmamusumeResponseAnalyzer.Tests
                 var canonicalUrl = "https://example.test/unknown/path?viewer_id=1#fragment";
                 byte[] payload = [0xC0];
 
-                await Assert.ThrowsAsync<KeyNotFoundException>(async () => await Server.DispatchResponse(canonicalUrl, payload));
+                await Server.DispatchResponse(canonicalUrl, payload);
 
                 var packetsDir = Path.Combine(tempDir, "packets");
-                var msgpack = Assert.Single(Directory.GetFiles(packetsDir, "*.msgpack"));
-                Assert.Contains("unknown-path", Path.GetFileName(msgpack), StringComparison.Ordinal);
-                Assert.Equal(payload, File.ReadAllBytes(msgpack));
-
-#if DEBUG
-                var jsonPath = Assert.Single(Directory.GetFiles(packetsDir, "*.json"));
-                var debugJson = JObject.Parse(File.ReadAllText(jsonPath));
-                Assert.Equal(canonicalUrl, (string?)debugJson["url"]);
-#endif
+                Assert.False(Directory.Exists(packetsDir));
             }
             finally
             {
@@ -678,6 +736,29 @@ namespace UmamusumeResponseAnalyzer.Tests
                 await terminal.StopAsync(uiHost, run);
                 terminal.RunOnOwnerThread(() => LiveDisplayConsole.Unbind(uiHost));
                 ctx.Unload();
+            }
+        }
+
+        static async Task RunWithUiHostAsync(Func<TerminalGuiTestApp, UiHost, Task> action)
+        {
+            using var terminal = new TerminalGuiTestApp();
+            var host = new UiHost(terminal.Application, static () => [], static _ => { });
+            terminal.RunOnOwnerThread(() => LiveDisplayConsole.Bind(host, terminal.Application));
+            try
+            {
+                var run = await terminal.StartAsync(host);
+                try
+                {
+                    await action(terminal, host);
+                }
+                finally
+                {
+                    await terminal.StopAsync(host, run);
+                }
+            }
+            finally
+            {
+                terminal.RunOnOwnerThread(() => LiveDisplayConsole.Unbind(host));
             }
         }
 

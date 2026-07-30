@@ -274,18 +274,18 @@ namespace UmamusumeResponseAnalyzer
                 ctx.Request.Headers[DeviceHeaderName],
                 ctx.Request.Headers[DeviceSubtypeHeaderName]);
 
-        internal static GameEndpointDescriptor ResolveEndpoint(string canonicalUrl)
+        internal static bool TryResolveEndpoint(string canonicalUrl, out GameEndpointDescriptor descriptor)
         {
             var path = ExtractEndpointPath(canonicalUrl);
             var triedPaths = ResolveEndpointPathCandidates(path);
             foreach (var triedPath in triedPaths)
             {
-                if (GameEndpointCatalog.ByPath.TryGetValue(triedPath, out var descriptor))
-                    return descriptor;
+                if (GameEndpointCatalog.ByPath.TryGetValue(triedPath, out descriptor!))
+                    return true;
             }
 
-            throw new KeyNotFoundException(
-                $"未识别 Gallop endpoint: url={canonicalUrl}, path={path}, triedPaths={string.Join(", ", triedPaths)}");
+            descriptor = null!;
+            return false;
         }
 
         static string[] ResolveEndpointPathCandidates(string path)
@@ -321,8 +321,10 @@ namespace UmamusumeResponseAnalyzer
         {
             try
             {
+                if (!TryResolveEndpoint(canonicalUrl, out var descriptor))
+                    return;
+
                 SaveDebugPacket(kind, canonicalUrl, buffer);
-                var descriptor = ResolveEndpoint(canonicalUrl);
 
                 using var callback = await PluginManager.EnterPluginCallbackAsync();
                 await DispatchPacketLocked(kind, descriptor, buffer, headers);
