@@ -4,24 +4,24 @@ using Terminal.Gui.Drawing;
 using Terminal.Gui.Input;
 using Terminal.Gui.ViewBase;
 using Terminal.Gui.Views;
-using UmamusumeResponseAnalyzer.LiveDisplay;
+using UmamusumeResponseAnalyzer.TerminalGui;
 using Xunit;
 
 namespace UmamusumeResponseAnalyzer.Tests;
 
-[Collection("KeyboardManager")]
-public sealed class TerminalGuiDialogsTests
+[Collection("HotkeyManager")]
+public sealed class ModalDialogsTests
 {
     [Fact]
     public async Task OwnerAsyncBridge_DoesNotDependOnAsyncVoidContextContinuation()
     {
         using var terminal = new TerminalGuiTestApp();
         var context = new RejectSecondPostSynchronizationContext();
-        TerminalGuiDialogs.BindOwner(terminal.Application, context);
+        ModalDialogs.BindOwner(terminal.Application, context);
         try
         {
             var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            var run = TerminalGuiDialogs.InvokeOnOwnerAsync(
+            var run = ModalDialogs.InvokeOnOwnerAsync(
                 terminal.Application,
                 async () => await release.Task.ConfigureAwait(false));
 
@@ -32,7 +32,7 @@ public sealed class TerminalGuiDialogsTests
         }
         finally
         {
-            TerminalGuiDialogs.UnbindOwner(terminal.Application);
+            ModalDialogs.UnbindOwner(terminal.Application);
         }
     }
 
@@ -43,7 +43,7 @@ public sealed class TerminalGuiDialogsTests
         string? selected = null;
         var accepted = await terminal.StartAsync(() =>
         {
-            selected = TerminalGuiDialogs.Select(
+            selected = ModalDialogs.Select(
                 terminal.Application,
                 "选择项",
                 ["first", "second"]);
@@ -57,7 +57,7 @@ public sealed class TerminalGuiDialogsTests
 
         var cancelled = await terminal.StartAsync(() =>
         {
-            TerminalGuiDialogs.Select(terminal.Application, "取消选择", ["value"]);
+            ModalDialogs.Select(terminal.Application, "取消选择", ["value"]);
             return Task.CompletedTask;
         });
         await terminal.InjectAsync(Key.Esc);
@@ -70,7 +70,7 @@ public sealed class TerminalGuiDialogsTests
         using var terminal = new TerminalGuiTestApp();
         var cancelled = await terminal.StartAsync(() =>
         {
-            TerminalGuiDialogs.Select(
+            ModalDialogs.Select(
                 terminal.Application,
                 "列表 hover",
                 ["first", "second"]);
@@ -106,7 +106,7 @@ public sealed class TerminalGuiDialogsTests
         string? selected = null;
         var run = await terminal.StartAsync(() =>
         {
-            selected = TerminalGuiDialogs.Menu(
+            selected = ModalDialogs.Menu(
                 terminal.Application,
                 "原生菜单",
                 ["开始", "设置", "插件"]);
@@ -181,7 +181,7 @@ public sealed class TerminalGuiDialogsTests
         string? selected = null;
         var run = await terminal.StartAsync(() =>
         {
-            selected = TerminalGuiDialogs.Menu(
+            selected = ModalDialogs.Menu(
                 terminal.Application,
                 "原生菜单",
                 ["开始", "设置"]);
@@ -230,7 +230,7 @@ public sealed class TerminalGuiDialogsTests
 
         var escaped = await terminal.StartAsync(() =>
         {
-            TerminalGuiDialogs.Menu(terminal.Application, "Esc 取消", ["开始"]);
+            ModalDialogs.Menu(terminal.Application, "Esc 取消", ["开始"]);
             return Task.CompletedTask;
         });
         await terminal.InjectAsync(Key.Esc);
@@ -238,7 +238,7 @@ public sealed class TerminalGuiDialogsTests
 
         var closed = await terminal.StartAsync(() =>
         {
-            TerminalGuiDialogs.Menu(terminal.Application, "关闭取消", ["开始"]);
+            ModalDialogs.Menu(terminal.Application, "关闭取消", ["开始"]);
             return Task.CompletedTask;
         });
         await terminal.InvokeAsync(terminal.Application.RequestStop);
@@ -247,7 +247,7 @@ public sealed class TerminalGuiDialogsTests
         using var cancellation = new CancellationTokenSource();
         var cancelled = await terminal.StartAsync(() =>
         {
-            TerminalGuiDialogs.Menu(
+            ModalDialogs.Menu(
                 terminal.Application,
                 "Token 取消",
                 ["开始"],
@@ -268,11 +268,11 @@ public sealed class TerminalGuiDialogsTests
         var selected = new List<string>();
         var run = await terminal.StartAsync(() =>
         {
-            selected.Add(TerminalGuiDialogs.Menu(
+            selected.Add(ModalDialogs.Menu(
                 terminal.Application,
                 "更新设置",
                 ["TrainerIsMale: False"]));
-            selected.Add(TerminalGuiDialogs.Menu(
+            selected.Add(ModalDialogs.Menu(
                 terminal.Application,
                 "更新设置",
                 ["TrainerIsMale: True"]));
@@ -307,7 +307,7 @@ public sealed class TerminalGuiDialogsTests
         using var terminal = new TerminalGuiTestApp();
         var empty = await terminal.StartAsync(() =>
         {
-            TerminalGuiDialogs.MultiSelect<string>(
+            ModalDialogs.MultiSelect<string>(
                 terminal.Application,
                 "空多选",
                 []);
@@ -317,7 +317,7 @@ public sealed class TerminalGuiDialogsTests
 
         var cancelled = await terminal.StartAsync(() =>
         {
-            TerminalGuiDialogs.MultiSelect(
+            ModalDialogs.MultiSelect(
                 terminal.Application,
                 "取消多选",
                 ["a", "b"],
@@ -330,7 +330,7 @@ public sealed class TerminalGuiDialogsTests
         IReadOnlyList<string>? result = null;
         var accepted = await terminal.StartAsync(() =>
         {
-            result = TerminalGuiDialogs.MultiSelect(
+            result = ModalDialogs.MultiSelect(
                 terminal.Application,
                 "确认多选",
                 ["a", "b", "c"],
@@ -351,7 +351,7 @@ public sealed class TerminalGuiDialogsTests
         string? result = null;
         var accepted = await terminal.StartAsync(() =>
         {
-            result = TerminalGuiDialogs.Ask(terminal.Application, "输入", allowEmpty: false);
+            result = ModalDialogs.Ask(terminal.Application, "输入", allowEmpty: false);
             return Task.CompletedTask;
         });
         await terminal.InjectAsync(Key.A);
@@ -362,7 +362,7 @@ public sealed class TerminalGuiDialogsTests
 
         var cancelled = await terminal.StartAsync(() =>
         {
-            TerminalGuiDialogs.Ask(terminal.Application, "取消输入", value: "unchanged");
+            ModalDialogs.Ask(terminal.Application, "取消输入", value: "unchanged");
             return Task.CompletedTask;
         });
         await terminal.InjectAsync(Key.Esc);
@@ -375,7 +375,7 @@ public sealed class TerminalGuiDialogsTests
         using var terminal = new TerminalGuiTestApp();
         var cancelled = await terminal.StartAsync(() =>
         {
-            TerminalGuiDialogs.Ask(
+            ModalDialogs.Ask(
                 terminal.Application,
                 "输入 hover",
                 value: "hover-input");
@@ -429,7 +429,7 @@ public sealed class TerminalGuiDialogsTests
         var result = true;
         var run = await terminal.StartAsync(() =>
         {
-            result = TerminalGuiDialogs.Confirm(
+            result = ModalDialogs.Confirm(
                 terminal.Application,
                 "危险操作",
                 defaultValue);
@@ -449,7 +449,7 @@ public sealed class TerminalGuiDialogsTests
         var result = true;
         var run = await terminal.StartAsync(() =>
         {
-            result = TerminalGuiDialogs.Confirm(terminal.Application, "危险操作");
+            result = ModalDialogs.Confirm(terminal.Application, "危险操作");
             return Task.CompletedTask;
         });
 
@@ -465,7 +465,7 @@ public sealed class TerminalGuiDialogsTests
         using var terminal = new TerminalGuiTestApp();
         var select = await terminal.StartAsync(() =>
         {
-            TerminalGuiDialogs.Select(terminal.Application, "关闭选择", ["value"]);
+            ModalDialogs.Select(terminal.Application, "关闭选择", ["value"]);
             return Task.CompletedTask;
         });
         await terminal.InvokeAsync(terminal.Application.RequestStop);
@@ -474,7 +474,7 @@ public sealed class TerminalGuiDialogsTests
         var confirmed = true;
         var confirm = await terminal.StartAsync(() =>
         {
-            confirmed = TerminalGuiDialogs.Confirm(
+            confirmed = ModalDialogs.Confirm(
                 terminal.Application,
                 "关闭确认",
                 defaultValue: true);
@@ -493,7 +493,7 @@ public sealed class TerminalGuiDialogsTests
         using var cancellation = new CancellationTokenSource();
         var run = await terminal.StartAsync(() =>
         {
-            TerminalGuiDialogs.Select(
+            ModalDialogs.Select(
                 terminal.Application,
                 "等待取消",
                 ["value"],
@@ -516,7 +516,7 @@ public sealed class TerminalGuiDialogsTests
         {
             var ask = await terminal.StartAsync(() =>
             {
-                TerminalGuiDialogs.Ask(
+                ModalDialogs.Ask(
                     terminal.Application,
                     "取消输入",
                     cancellationToken: askCancellation.Token);
@@ -530,7 +530,7 @@ public sealed class TerminalGuiDialogsTests
         {
             var multi = await terminal.StartAsync(() =>
             {
-                TerminalGuiDialogs.MultiSelect(
+                ModalDialogs.MultiSelect(
                     terminal.Application,
                     "取消多选",
                     ["a", "b"],
@@ -550,7 +550,7 @@ public sealed class TerminalGuiDialogsTests
         using var terminal = new TerminalGuiTestApp(width: 80, height: 20);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var run = await terminal.StartAsync(() =>
-            TerminalGuiDialogs.RunProgressAsync(
+            ModalDialogs.RunProgressAsync(
                 terminal.Application,
                 async (progress, cancellationToken) =>
                 {
@@ -584,13 +584,13 @@ public sealed class TerminalGuiDialogsTests
     {
         using var terminal = new TerminalGuiTestApp();
         var succeeded = await terminal.StartAsync(() =>
-            TerminalGuiDialogs.RunProgressAsync(
+            ModalDialogs.RunProgressAsync(
                 terminal.Application,
                 (_, _) => Task.CompletedTask));
         await succeeded;
 
         var faulted = await terminal.StartAsync(() =>
-            TerminalGuiDialogs.RunProgressAsync(
+            ModalDialogs.RunProgressAsync(
                 terminal.Application,
                 (_, _) => throw new InvalidOperationException("progress failed")));
         var error = await Assert.ThrowsAsync<InvalidOperationException>(() => faulted);
@@ -598,7 +598,7 @@ public sealed class TerminalGuiDialogsTests
 
         using var cancellation = new CancellationTokenSource();
         var cancelled = await terminal.StartAsync(() =>
-            TerminalGuiDialogs.RunProgressAsync(
+            ModalDialogs.RunProgressAsync(
                 terminal.Application,
                 (_, token) => Task.Delay(System.Threading.Timeout.InfiniteTimeSpan, token),
                 cancellation.Token));
@@ -608,7 +608,7 @@ public sealed class TerminalGuiDialogsTests
         using var alreadyCancelled = new CancellationTokenSource();
         alreadyCancelled.Cancel();
         var immediateCancellation = await terminal.StartAsync(() =>
-            TerminalGuiDialogs.RunProgressAsync(
+            ModalDialogs.RunProgressAsync(
                 terminal.Application,
                 (_, token) => Task.Delay(System.Threading.Timeout.InfiniteTimeSpan, token),
                 alreadyCancelled.Token));
@@ -621,7 +621,7 @@ public sealed class TerminalGuiDialogsTests
         using var terminal = new TerminalGuiTestApp();
         var actionStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var run = await terminal.StartAsync(() =>
-            TerminalGuiDialogs.RunProgressAsync(
+            ModalDialogs.RunProgressAsync(
                 terminal.Application,
                 async (_, cancellationToken) =>
                 {

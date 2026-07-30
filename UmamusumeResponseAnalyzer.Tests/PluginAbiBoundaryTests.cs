@@ -1,6 +1,6 @@
 using Gallop;
 using Gallop.Endpoints;
-using UmamusumeResponseAnalyzer.LiveDisplay;
+using UmamusumeResponseAnalyzer.TerminalGui;
 using UmamusumeResponseAnalyzer.Plugin;
 using Xunit;
 
@@ -15,8 +15,8 @@ namespace UmamusumeResponseAnalyzer.Tests
 
             Assert.Same(hostAssembly, typeof(IPlugin).Assembly);
             Assert.Same(hostAssembly, typeof(AnalyzerAttribute).Assembly);
-            Assert.Same(hostAssembly, typeof(ILiveDisplayOutput).Assembly);
-            Assert.Same(hostAssembly, typeof(LiveDisplayWorkspace).Assembly);
+            Assert.Same(hostAssembly, typeof(IWorkspaceOutput).Assembly);
+            Assert.Same(hostAssembly, typeof(Workspace).Assembly);
             Assert.Same(hostAssembly, typeof(IGameEndpoint).Assembly);
             Assert.Same(hostAssembly, typeof(DataLinkIndexResponse).Assembly);
             Assert.Null(hostAssembly.GetType("UmamusumeResponseAnalyzer.Game.TurnInfo.SingleModeTurnData"));

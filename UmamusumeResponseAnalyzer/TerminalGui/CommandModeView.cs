@@ -6,7 +6,7 @@ using Terminal.Gui.Input;
 using Terminal.Gui.ViewBase;
 using Terminal.Gui.Views;
 
-namespace UmamusumeResponseAnalyzer.LiveDisplay;
+namespace UmamusumeResponseAnalyzer.TerminalGui;
 
 internal sealed class CommandModeView : FrameView
 {
@@ -242,8 +242,8 @@ internal sealed class CommandModeView : FrameView
         }
         catch (Exception ex)
         {
-            LiveDisplayConsole.Notify("Keyboard", $"命令补全失败: {ex.Message}", LiveDisplaySeverity.Error);
-            LiveDisplayConsole.LogException("Keyboard", ex);
+            TerminalUi.Notify("Keyboard", $"命令补全失败: {ex.Message}", UiSeverity.Error);
+            TerminalUi.LogException("Keyboard", ex);
             completionCandidates = [];
             SetNeedsLayout();
             SetNeedsDraw();

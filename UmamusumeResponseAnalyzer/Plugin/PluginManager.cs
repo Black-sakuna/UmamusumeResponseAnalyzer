@@ -7,7 +7,7 @@ using System.Runtime.ExceptionServices;
 using System.Runtime.Loader;
 using Terminal.Gui.App;
 using UmamusumeResponseAnalyzer;
-using UmamusumeResponseAnalyzer.LiveDisplay;
+using UmamusumeResponseAnalyzer.TerminalGui;
 using WatsonWebserver.Core;
 
 namespace UmamusumeResponseAnalyzer.Plugin
@@ -356,7 +356,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
         }.ToFrozenSet(StringComparer.Ordinal);
         static readonly PluginHostEvents HostEvents = new();
         static IApplication? application;
-        static Func<IPlugin, ILiveDisplayOutput>? liveDisplayFactory;
+        static Func<IPlugin, IWorkspaceOutput>? workspaceOutputFactory;
         static readonly AsyncLocal<int> PluginCallbackDepth = new();
         static readonly object AnalyzerGate = new();
 
@@ -466,10 +466,10 @@ namespace UmamusumeResponseAnalyzer.Plugin
         internal static IApplication Application
             => application ?? throw new InvalidOperationException("插件初始化前必须先绑定 Terminal.Gui application。");
 
-        internal static void BindLiveDisplay(IApplication application, Func<IPlugin, ILiveDisplayOutput> factory)
+        internal static void BindWorkspaceOutput(IApplication application, Func<IPlugin, IWorkspaceOutput> factory)
         {
             PluginManager.application = application;
-            liveDisplayFactory = factory;
+            workspaceOutputFactory = factory;
         }
 
         internal static void Init()
@@ -512,7 +512,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 }
                 catch (Exception ex)
                 {
-                    LiveDisplayConsole.LogException("Plugin", ex);
+                    TerminalUi.LogException("Plugin", ex);
                     if (!FailedPlugins.Contains(dll.FullName)) FailedPlugins.Add(dll.FullName);
                 }
             }
@@ -561,7 +561,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                         }
                         catch (Exception ex)
                         {
-                            LiveDisplayConsole.LogException("Plugin", ex);
+                            TerminalUi.LogException("Plugin", ex);
                             var pluginPath = $"{zip}|{entry.FullName}";
                             if (!FailedPlugins.Contains(pluginPath)) FailedPlugins.Add(pluginPath);
                         }
@@ -575,7 +575,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 }
 
                 if (!hasMainPlugin)
-                    LiveDisplayConsole.Log("Plugin", $"插件包 {Path.GetFileName(zip)} 未找到主插件 DLL {pluginName}.dll，已跳过。", LiveDisplaySeverity.Warning);
+                    TerminalUi.Log("Plugin", $"插件包 {Path.GetFileName(zip)} 未找到主插件 DLL {pluginName}.dll，已跳过。", UiSeverity.Warning);
 
                 // 关联卫星资源到对应的程序集元数据
                 foreach (var entry in satelliteEntries)
@@ -593,7 +593,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
             }
             catch (Exception ex)
             {
-                LiveDisplayConsole.LogException("Plugin", ex);
+                TerminalUi.LogException("Plugin", ex);
                 if (!FailedPlugins.Contains(zip)) FailedPlugins.Add(zip);
             }
         }
@@ -690,7 +690,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 foreach (var name in group)
                     if (Metadatas.TryGetValue(name, out var present))
                     {
-                        LiveDisplayConsole.Log("Plugin", $"插件 {name} 加载失败: 依赖的共享上下文插件 {string.Join("、", missing)} 未安装。", LiveDisplaySeverity.Error);
+                        TerminalUi.Log("Plugin", $"插件 {name} 加载失败: 依赖的共享上下文插件 {string.Join("、", missing)} 未安装。", UiSeverity.Error);
                         if (!FailedPlugins.Contains(present.FilePath)) FailedPlugins.Add(present.FilePath);
                     }
                 return;
@@ -744,7 +744,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 var type = assembly.GetExportedTypes().FirstOrDefault(x => typeof(IPlugin).IsAssignableFrom(x));
                 if (type == null)
                 {
-                    LiveDisplayConsole.Log("Plugin", $"插件 {m.PluginName} 加载失败: 未找到实现 {nameof(IPlugin)} 的公开类型。", LiveDisplaySeverity.Error);
+                    TerminalUi.Log("Plugin", $"插件 {m.PluginName} 加载失败: 未找到实现 {nameof(IPlugin)} 的公开类型。", UiSeverity.Error);
                     FailedPlugins.Add(m.FilePath);
                     return false;
                 }
@@ -752,7 +752,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 phase = "创建插件实例";
                 if (Activator.CreateInstance(type) is not IPlugin createdPlugin)
                 {
-                    LiveDisplayConsole.Log("Plugin", $"插件 {m.PluginName} 加载失败: 无法创建插件实例。type={type.FullName ?? type.Name}", LiveDisplaySeverity.Error);
+                    TerminalUi.Log("Plugin", $"插件 {m.PluginName} 加载失败: 无法创建插件实例。type={type.FullName ?? type.Name}", UiSeverity.Error);
                     FailedPlugins.Add(m.FilePath);
                     return false;
                 }
@@ -797,9 +797,9 @@ namespace UmamusumeResponseAnalyzer.Plugin
                     foreach (var route in RemoveRoutes(plugin))
                         route.WaitForIdle();
                     DisposeHostEventSubscriptions(plugin);
-                    KeyboardManager.UnregisterByOwner(plugin);
+                    HotkeyManager.UnregisterByOwner(plugin);
                     try { plugin.Dispose(); }
-                    catch (Exception disposeEx) { LiveDisplayConsole.LogException("Plugin", disposeEx); }
+                    catch (Exception disposeEx) { TerminalUi.LogException("Plugin", disposeEx); }
                 }
 
                 if (assemblyName is not null)
@@ -807,7 +807,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 if (assembly is not null)
                     Assemblies.Remove(assembly);
 
-                LiveDisplayConsole.LogException("Plugin", PluginLoadException(m, phase, ex));
+                TerminalUi.LogException("Plugin", PluginLoadException(m, phase, ex));
                 FailedPlugins.Add(m.FilePath);
                 return false;
             }
@@ -834,9 +834,9 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 foreach (var route in RemoveRoutes(plugin))
                     route.WaitForIdle();
                 DisposeHostEventSubscriptions(plugin);
-                KeyboardManager.UnregisterByOwner(plugin);
+                HotkeyManager.UnregisterByOwner(plugin);
                 try { plugin.Dispose(); }
-                catch (Exception ex) { LiveDisplayConsole.LogException("Plugin", ex); }
+                catch (Exception ex) { TerminalUi.LogException("Plugin", ex); }
             }
 
             foreach (var name in group)
@@ -882,10 +882,10 @@ namespace UmamusumeResponseAnalyzer.Plugin
             if (string.Equals(name, HostAssemblyName, StringComparison.Ordinal))
             {
                 if (actual.Version is not null && requested.Version > actual.Version)
-                    LiveDisplayConsole.Log(
+                    TerminalUi.Log(
                         "Plugin",
                         $"插件依赖的宿主 ABI 版本更高，请更新 UmamusumeResponseAnalyzer: 插件请求 {requested.FullName}，当前宿主 {actual.FullName}。",
-                        LiveDisplaySeverity.Warning);
+                        UiSeverity.Warning);
                 return;
             }
 
@@ -1178,12 +1178,12 @@ namespace UmamusumeResponseAnalyzer.Plugin
         /// </summary>
         internal static void InitializePlugin(IPlugin plugin)
         {
-            using (KeyboardManager.RegisterScope(plugin))
+            using (HotkeyManager.RegisterScope(plugin))
             {
-                var factory = GetLiveDisplayFactory();
-                var liveDisplay = factory(plugin);
+                var factory = GetWorkspaceOutputFactory();
+                var workspaceOutput = factory(plugin);
                 using var callback = EnterPluginCallbackScope();
-                InvokeContextInitialize(plugin, new PluginContext(Application, plugin, liveDisplay, HostEvents));
+                InvokeContextInitialize(plugin, new PluginContext(Application, plugin, workspaceOutput, HostEvents));
             }
         }
 
@@ -1195,7 +1195,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
 
         static bool TryInitializePlugin(IPlugin plugin, bool committed)
         {
-            _ = GetLiveDisplayFactory();
+            _ = GetWorkspaceOutputFactory();
             try
             {
                 InitializePlugin(plugin);
@@ -1207,7 +1207,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 var failedPlugin = Metadatas.TryGetValue(internalName, out var metadata)
                     ? metadata.FilePath
                     : plugin.Name;
-                LiveDisplayConsole.LogException(
+                TerminalUi.LogException(
                     "Plugin",
                     new InvalidOperationException($"插件初始化失败: plugin={plugin.Name} ({internalName})", ex));
                 if (!FailedPlugins.Contains(failedPlugin))
@@ -1217,8 +1217,8 @@ namespace UmamusumeResponseAnalyzer.Plugin
             }
         }
 
-        static Func<IPlugin, ILiveDisplayOutput> GetLiveDisplayFactory()
-            => liveDisplayFactory ?? throw new InvalidOperationException("插件初始化前必须先绑定 LiveDisplay。");
+        static Func<IPlugin, IWorkspaceOutput> GetWorkspaceOutputFactory()
+            => workspaceOutputFactory ?? throw new InvalidOperationException("插件初始化前必须先绑定 WorkspaceOutput。");
 
         static void CleanupPluginAfterInitializationFailure(IPlugin plugin, bool committed)
         {
@@ -1229,13 +1229,13 @@ namespace UmamusumeResponseAnalyzer.Plugin
             foreach (var route in RemoveRoutes(plugin))
                 route.WaitForIdle();
             DisposeHostEventSubscriptions(plugin);
-            KeyboardManager.UnregisterByOwner(plugin);
+            HotkeyManager.UnregisterByOwner(plugin);
 
             if (!committed)
                 return;
 
             try { plugin.Dispose(); }
-            catch (Exception ex) { LiveDisplayConsole.LogException("Plugin", ex); }
+            catch (Exception ex) { TerminalUi.LogException("Plugin", ex); }
         }
 
         static void InvokeContextInitialize(IPlugin plugin, IPluginContext context)
@@ -1347,7 +1347,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                             ResponseAnalyzerMethods.Clear();
                         }
                         application = null;
-                        liveDisplayFactory = null;
+                        workspaceOutputFactory = null;
                     }
                     finally
                     {
@@ -1365,16 +1365,16 @@ namespace UmamusumeResponseAnalyzer.Plugin
                         try
                         {
                             using var callbackScope = EnterPluginCallbackScope();
-                            using var registrationScope = KeyboardManager.RegisterScope(plugin);
+                            using var registrationScope = HotkeyManager.RegisterScope(plugin);
                             plugin.Dispose();
                         }
-                        catch (Exception ex) { LiveDisplayConsole.LogException("Plugin", ex); }
-                        KeyboardManager.UnregisterByOwner(plugin);
+                        catch (Exception ex) { TerminalUi.LogException("Plugin", ex); }
+                        HotkeyManager.UnregisterByOwner(plugin);
                     }
                     foreach (var context in contexts)
                     {
                         try { context.Unload(); }
-                        catch (Exception ex) { LiveDisplayConsole.LogException("Plugin", ex); }
+                        catch (Exception ex) { TerminalUi.LogException("Plugin", ex); }
                     }
                 }
 
@@ -1423,7 +1423,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                         }
                         catch (Exception ex)
                         {
-                            LiveDisplayConsole.LogException("Plugin", ex);
+                            TerminalUi.LogException("Plugin", ex);
 #if DEBUG
                             throw;
 #endif
@@ -1449,7 +1449,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 }
                 catch (Exception ex)
                 {
-                    LiveDisplayConsole.LogException("Plugin", ex);
+                    TerminalUi.LogException("Plugin", ex);
 #if DEBUG
                     throw;
 #endif
@@ -1487,7 +1487,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
 
                         if (!scanned.ContainsKey(name) && !Metadatas.ContainsKey(name))
                         {
-                            LiveDisplayConsole.Log("Plugin", $"插件 {rawName} 不存在，无法加载。", LiveDisplaySeverity.Warning);
+                            TerminalUi.Log("Plugin", $"插件 {rawName} 不存在，无法加载。", UiSeverity.Warning);
                             outcomes[rawName] = false;
                             continue;
                         }
@@ -1659,7 +1659,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
             // 约束1：已加载且为 LoadInHost → 进了 Default ALC，永不可卸载
             if (existing is { LoadInHost: true })
             {
-                LiveDisplayConsole.Log("Plugin", $"插件 {pluginName} 在宿主上下文加载，不支持热重载，请重启。", LiveDisplaySeverity.Warning);
+                TerminalUi.Log("Plugin", $"插件 {pluginName} 在宿主上下文加载，不支持热重载，请重启。", UiSeverity.Warning);
                 return outcomes[pluginName] = false;
             }
 
@@ -1669,7 +1669,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
 
             if (affectedNames.Any(name => scanned.TryGetValue(name, out var m) && m.LoadInHost))
             {
-                LiveDisplayConsole.Log("Plugin", $"插件 {pluginName} 在宿主上下文加载，不支持热重载，请重启。", LiveDisplaySeverity.Warning);
+                TerminalUi.Log("Plugin", $"插件 {pluginName} 在宿主上下文加载，不支持热重载，请重启。", UiSeverity.Warning);
                 foreach (var name in affectedNames)
                     outcomes[name] = false;
                 return false;
@@ -1693,7 +1693,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
             if (!Metadatas.ContainsKey(pluginName))
             {
                 // 文件已被删除：卸载即完成
-                LiveDisplayConsole.Log("Plugin", $"插件 {pluginName} 的文件已不存在，已卸载。", LiveDisplaySeverity.Warning);
+                TerminalUi.Log("Plugin", $"插件 {pluginName} 的文件已不存在，已卸载。", UiSeverity.Warning);
                 BuildGroups();
                 LoadAffectedGroups(affectedNames, outcomes, startedPluginBatches);
                 return outcomes[pluginName] = true;
@@ -1702,7 +1702,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
             // 新元数据若为 LoadInHost（如刚加上该特性），不走热重载路径
             if (Metadatas[pluginName].LoadInHost)
             {
-                LiveDisplayConsole.Log("Plugin", $"插件 {pluginName} 在宿主上下文加载，不支持热重载，请重启。", LiveDisplaySeverity.Warning);
+                TerminalUi.Log("Plugin", $"插件 {pluginName} 在宿主上下文加载，不支持热重载，请重启。", UiSeverity.Warning);
                 return outcomes[pluginName] = false;
             }
 
@@ -1711,7 +1711,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
 
             var loaded = IsPluginLoaded(pluginName);
             if (loaded)
-                LiveDisplayConsole.Log("Plugin", $"插件 {pluginName} 已重载。", LiveDisplaySeverity.Success);
+                TerminalUi.Log("Plugin", $"插件 {pluginName} 已重载。", UiSeverity.Success);
             return outcomes[pluginName] = loaded;
         }
 
@@ -1725,7 +1725,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
             var existing = GetValueIgnoreCase(Metadatas, pluginName);
             if (existing is { LoadInHost: true })
             {
-                LiveDisplayConsole.Log("Plugin", $"插件 {pluginName} 在宿主上下文加载，不支持卸载，请重启。", LiveDisplaySeverity.Warning);
+                TerminalUi.Log("Plugin", $"插件 {pluginName} 在宿主上下文加载，不支持卸载，请重启。", UiSeverity.Warning);
                 return outcomes[pluginName] = false;
             }
 
@@ -1735,13 +1735,13 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 if (existing is not null)
                     Metadatas.Remove(existing.PluginName);
 
-                LiveDisplayConsole.Log("Plugin", $"插件 {pluginName} 未加载。", LiveDisplaySeverity.Warning);
+                TerminalUi.Log("Plugin", $"插件 {pluginName} 未加载。", UiSeverity.Warning);
                 return outcomes[pluginName] = true;
             }
 
             if (group.Any(n => GetValueIgnoreCase(Metadatas, n) is { LoadInHost: true }))
             {
-                LiveDisplayConsole.Log("Plugin", $"插件 {string.Join("、", group)} 在宿主上下文加载，不支持卸载，请重启。", LiveDisplaySeverity.Warning);
+                TerminalUi.Log("Plugin", $"插件 {string.Join("、", group)} 在宿主上下文加载，不支持卸载，请重启。", UiSeverity.Warning);
                 foreach (var name in group) outcomes[name] = false;
                 return outcomes[pluginName] = false;
             }
@@ -1766,7 +1766,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
             foreach (var name in group)
                 outcomes[name] = true;
 
-            LiveDisplayConsole.Log("Plugin", $"插件 {pluginName} 已卸载。", LiveDisplaySeverity.Success);
+            TerminalUi.Log("Plugin", $"插件 {pluginName} 已卸载。", UiSeverity.Success);
             return outcomes[pluginName] = true;
         }
 
@@ -1836,7 +1836,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 foreach (var name in group)
                     if (Metadatas.TryGetValue(name, out var present))
                     {
-                        LiveDisplayConsole.Log("Plugin", $"插件 {name} 加载失败: 依赖的共享上下文插件 {string.Join("、", missing)} 未安装。", LiveDisplaySeverity.Error);
+                        TerminalUi.Log("Plugin", $"插件 {name} 加载失败: 依赖的共享上下文插件 {string.Join("、", missing)} 未安装。", UiSeverity.Error);
                         if (!FailedPlugins.Contains(present.FilePath)) FailedPlugins.Add(present.FilePath);
                     }
                 return null;
@@ -1876,7 +1876,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 var type = assembly.GetExportedTypes().FirstOrDefault(x => typeof(IPlugin).IsAssignableFrom(x));
                 if (type is null)
                 {
-                    LiveDisplayConsole.Log("Plugin", $"插件 {metadata.PluginName} 加载失败: 未找到实现 {nameof(IPlugin)} 的公开类型。", LiveDisplaySeverity.Error);
+                    TerminalUi.Log("Plugin", $"插件 {metadata.PluginName} 加载失败: 未找到实现 {nameof(IPlugin)} 的公开类型。", UiSeverity.Error);
                     FailedPlugins.Add(metadata.FilePath);
                     return false;
                 }
@@ -1884,7 +1884,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 phase = "创建插件实例";
                 if (Activator.CreateInstance(type) is not IPlugin createdPlugin)
                 {
-                    LiveDisplayConsole.Log("Plugin", $"插件 {metadata.PluginName} 加载失败: 无法创建插件实例。type={type.FullName ?? type.Name}", LiveDisplaySeverity.Error);
+                    TerminalUi.Log("Plugin", $"插件 {metadata.PluginName} 加载失败: 无法创建插件实例。type={type.FullName ?? type.Name}", UiSeverity.Error);
                     FailedPlugins.Add(metadata.FilePath);
                     return false;
                 }
@@ -1902,10 +1902,10 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 if (plugin is not null)
                 {
                     try { plugin.Dispose(); }
-                    catch (Exception disposeEx) { LiveDisplayConsole.LogException("Plugin", disposeEx); }
+                    catch (Exception disposeEx) { TerminalUi.LogException("Plugin", disposeEx); }
                 }
 
-                LiveDisplayConsole.LogException("Plugin", PluginLoadException(metadata, phase, ex));
+                TerminalUi.LogException("Plugin", PluginLoadException(metadata, phase, ex));
                 FailedPlugins.Add(metadata.FilePath);
                 return false;
             }
@@ -1950,7 +1950,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                     RemoveAnalyzerMethods(plugin.Plugin);
                     RemoveRoutes(plugin.Plugin);
                     DisposeHostEventSubscriptions(plugin.Plugin);
-                    KeyboardManager.UnregisterByOwner(plugin.Plugin);
+                    HotkeyManager.UnregisterByOwner(plugin.Plugin);
                 }
 
                 foreach (var assembly in staged.Assemblies)
@@ -1969,9 +1969,9 @@ namespace UmamusumeResponseAnalyzer.Plugin
             {
                 RemoveAnalyzerMethods(plugin.Plugin);
                 DisposeHostEventSubscriptions(plugin.Plugin);
-                KeyboardManager.UnregisterByOwner(plugin.Plugin);
+                HotkeyManager.UnregisterByOwner(plugin.Plugin);
                 try { plugin.Plugin.Dispose(); }
-                catch (Exception ex) { LiveDisplayConsole.LogException("Plugin", ex); }
+                catch (Exception ex) { TerminalUi.LogException("Plugin", ex); }
             }
 
             staged.Context.Unload();
@@ -2023,7 +2023,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
             // 约束1：组内任一插件 LoadInHost → 整组进了 Default ALC，永不可卸载
             if (group.Any(n => Metadatas.TryGetValue(n, out var m) && m.LoadInHost))
             {
-                LiveDisplayConsole.Log("Plugin", $"插件 {string.Join("、", group)} 在宿主上下文加载，不支持热重载，请重启。", LiveDisplaySeverity.Warning);
+                TerminalUi.Log("Plugin", $"插件 {string.Join("、", group)} 在宿主上下文加载，不支持热重载，请重启。", UiSeverity.Warning);
                 return false;
             }
 
@@ -2089,9 +2089,9 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 foreach (var plugin in unload.Plugins)
                 {
                     try { plugin.Dispose(); }
-                    catch (Exception ex) { LiveDisplayConsole.LogException("Plugin", ex); }
+                    catch (Exception ex) { TerminalUi.LogException("Plugin", ex); }
 
-                    KeyboardManager.UnregisterByOwner(plugin);
+                    HotkeyManager.UnregisterByOwner(plugin);
                 }
                 unload.Context.Unload();
             }

@@ -8,7 +8,7 @@ using Terminal.Gui.Text;
 using Terminal.Gui.ViewBase;
 using Terminal.Gui.Views;
 
-namespace UmamusumeResponseAnalyzer.LiveDisplay;
+namespace UmamusumeResponseAnalyzer.TerminalGui;
 
 internal sealed class WorkspaceTaskbarView : View
 {
@@ -29,20 +29,20 @@ internal sealed class WorkspaceTaskbarView : View
     };
 
     readonly Func<bool> commandModeIsOpen;
-    readonly Action<LiveDisplayWorkspace> switchWorkspace;
+    readonly Action<Workspace> switchWorkspace;
     readonly Action<IReadOnlyList<string>> saveTitleOrder;
     readonly View bottomEdgeTrigger;
     readonly View popup;
-    readonly List<(Shortcut Item, LiveDisplayWorkspace Workspace)> items = [];
+    readonly List<(Shortcut Item, Workspace Workspace)> items = [];
     readonly List<string> savedTitleOrder;
 
     int[] fullTitleWidths = [];
     int[] itemMargins = [];
     int[] titleBudgets = [];
-    LiveDisplayWorkspace? activeWorkspace;
-    LiveDisplayWorkspace? hoveredWorkspace;
-    LiveDisplayWorkspace? laidOutActiveWorkspace;
-    LiveDisplayWorkspace? laidOutHoveredWorkspace;
+    Workspace? activeWorkspace;
+    Workspace? hoveredWorkspace;
+    Workspace? laidOutActiveWorkspace;
+    Workspace? laidOutHoveredWorkspace;
     int laidOutViewportWidth;
     bool titleLayoutValid;
     Shortcut? pressedItem;
@@ -53,7 +53,7 @@ internal sealed class WorkspaceTaskbarView : View
 
     public WorkspaceTaskbarView(
         Func<bool> commandModeIsOpen,
-        Action<LiveDisplayWorkspace> switchWorkspace,
+        Action<Workspace> switchWorkspace,
         IReadOnlyList<string> savedTitleOrder,
         Action<IReadOnlyList<string>> saveTitleOrder)
     {
@@ -101,7 +101,7 @@ internal sealed class WorkspaceTaskbarView : View
 
     internal View BottomEdgeTrigger => bottomEdgeTrigger;
 
-    internal void Refresh(IEnumerable<LiveDisplayWorkspace> workspaces, LiveDisplayWorkspace? activeWorkspace)
+    internal void Refresh(IEnumerable<Workspace> workspaces, Workspace? activeWorkspace)
     {
         var current = OrderWorkspaces(workspaces);
         if (items.Count != current.Length ||
@@ -205,7 +205,7 @@ internal sealed class WorkspaceTaskbarView : View
             ApplyTitleLayout();
     }
 
-    void RebuildItems(IReadOnlyList<LiveDisplayWorkspace> workspaces)
+    void RebuildItems(IReadOnlyList<Workspace> workspaces)
     {
         hoveredWorkspace = null;
         foreach (var (item, _) in items)
@@ -244,13 +244,13 @@ internal sealed class WorkspaceTaskbarView : View
         titleLayoutValid = false;
     }
 
-    LiveDisplayWorkspace[] OrderWorkspaces(IEnumerable<LiveDisplayWorkspace> workspaces)
+    Workspace[] OrderWorkspaces(IEnumerable<Workspace> workspaces)
     {
         var registered = workspaces.ToArray();
         var remaining = registered.ToDictionary(
             workspace => workspace.Title,
             StringComparer.OrdinalIgnoreCase);
-        var ordered = new List<LiveDisplayWorkspace>(registered.Length);
+        var ordered = new List<Workspace>(registered.Length);
 
         foreach (var title in savedTitleOrder)
         {
@@ -510,7 +510,7 @@ internal sealed class WorkspaceTaskbarView : View
         return index;
     }
 
-    void PersistOrder(IReadOnlyList<LiveDisplayWorkspace> reordered)
+    void PersistOrder(IReadOnlyList<Workspace> reordered)
     {
         var titles = reordered.Select(workspace => workspace.Title).ToArray();
         var visible = titles.ToHashSet(StringComparer.OrdinalIgnoreCase);

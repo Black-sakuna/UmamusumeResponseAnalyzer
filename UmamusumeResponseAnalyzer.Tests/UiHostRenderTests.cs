@@ -8,14 +8,14 @@ using Terminal.Gui.Testing;
 using Terminal.Gui.Text;
 using Terminal.Gui.ViewBase;
 using Terminal.Gui.Views;
-using UmamusumeResponseAnalyzer.LiveDisplay;
+using UmamusumeResponseAnalyzer.TerminalGui;
 using UmamusumeResponseAnalyzer.Plugin;
 using Xunit;
 
 namespace UmamusumeResponseAnalyzer.Tests;
 
-[Collection("KeyboardManager")]
-public sealed class LiveDisplayRenderTests : IDisposable
+[Collection("HotkeyManager")]
+public sealed class UiHostRenderTests : IDisposable
 {
     static readonly string[] BootstrapFrameTitles =
         ["运行环境", "初始化结果", "插件摘要", "最近日志"];
@@ -27,7 +27,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
     ShutdownCommandTarget? shutdownTarget;
     int workspaceTaskbarSaveCount;
 
-    public LiveDisplayRenderTests()
+    public UiHostRenderTests()
     {
         terminal = new(width: 80, height: 18);
         host = CreateHost();
@@ -52,7 +52,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
                 terminal.RunOnOwnerThread(() =>
                 {
                     RemoveShutdownBinding();
-                    LiveDisplayConsole.Unbind(host);
+                    TerminalUi.Unbind(host);
                     ResetUi();
                 });
             }
@@ -64,10 +64,10 @@ public sealed class LiveDisplayRenderTests : IDisposable
     }
 
     [Fact]
-    public void LiveDisplayContent_CreatesFreshViewsAndRejectsNull()
+    public void WorkspaceContent_CreatesFreshViewsAndRejectsNull()
     {
         var created = 0;
-        var content = new LiveDisplayContent(() =>
+        var content = new WorkspaceContent(() =>
         {
             created++;
             return new Label { Text = $"view-{created}" };
@@ -81,7 +81,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
         Assert.NotSame(first, second);
         Assert.Equal(2, created);
         Assert.Throws<InvalidOperationException>(
-            new LiveDisplayContent(() => null!).CreateView);
+            new WorkspaceContent(() => null!).CreateView);
     }
 
     [Fact]
@@ -101,7 +101,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
         await StartAsync();
 
         const string title = "Concurrent plugin workspace";
-        LiveDisplayWorkspace? competingWorkspace = null;
+        Workspace? competingWorkspace = null;
         var armed = 0;
         EventHandler<Terminal.Gui.App.TimeoutEventArgs> added = (_, _) =>
         {
@@ -120,7 +120,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
         var timedEvents = terminal.Application.TimedEvents
             ?? throw new InvalidOperationException("Terminal.Gui timed events are unavailable.");
         timedEvents.Added += added;
-        LiveDisplayWorkspace workspace;
+        Workspace workspace;
         try
         {
             Volatile.Write(ref armed, 1);
@@ -143,7 +143,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
             workspace,
             "main",
             "main",
-            LiveDisplayContent.Text("Concurrent workspace ready"));
+            WorkspaceContent.Text("Concurrent workspace ready"));
         await terminal.WaitForScreenAsync("Concurrent workspace ready");
         var taskbar = await GetWorkspaceTaskbarAsync();
         var parts = await terminal.InvokeAsync(() => TaskbarParts(taskbar));
@@ -162,7 +162,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
         await StartAsync();
 
         const string title = "Delayed tombstone workspace";
-        LiveDisplayWorkspace? tombstonedWorkspace = null;
+        Workspace? tombstonedWorkspace = null;
         var armed = 0;
         EventHandler<Terminal.Gui.App.TimeoutEventArgs> added = (_, _) =>
         {
@@ -175,7 +175,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
         var timedEvents = terminal.Application.TimedEvents
             ?? throw new InvalidOperationException("Terminal.Gui timed events are unavailable.");
         timedEvents.Added += added;
-        LiveDisplayWorkspace first;
+        Workspace first;
         try
         {
             Volatile.Write(ref armed, 1);
@@ -200,7 +200,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
             replacement,
             "main",
             "main",
-            LiveDisplayContent.Text("Replacement workspace registered"));
+            WorkspaceContent.Text("Replacement workspace registered"));
         await terminal.WaitForScreenAsync("Replacement workspace registered");
 
         var taskbar = await GetWorkspaceTaskbarAsync();
@@ -237,7 +237,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
         var output = host.ForPlugin("Short");
         var workspace = output.CreateWorkspace("短内容");
         for (var i = 1; i <= panelCount; i++)
-            output.SetPanel(workspace, $"panel-{i}", $"Panel {i}", LiveDisplayContent.Text($"Body {i}"));
+            output.SetPanel(workspace, $"panel-{i}", $"Panel {i}", WorkspaceContent.Text($"Body {i}"));
 
         await StartAsync();
         await terminal.WaitForScreenAsync($"Body {panelCount}");
@@ -256,22 +256,22 @@ public sealed class LiveDisplayRenderTests : IDisposable
     [Fact]
     public void DeclarativeFixedHeight_ContributesToPanelContentHeight()
     {
-        var workspace = LiveDisplayWorkspace.Create("固定高度");
+        var workspace = Workspace.Create("固定高度");
         var panels = new[]
         {
-            new LiveDisplayPanel(
+            new WorkspacePanel(
                 workspace,
                 "Plugin",
                 "a",
                 "Tall",
-                LiveDisplayContent.Text("unused"),
+                WorkspaceContent.Text("unused"),
                 DateTimeOffset.Now),
-            new LiveDisplayPanel(
+            new WorkspacePanel(
                 workspace,
                 "Plugin",
                 "b",
                 "Short",
-                LiveDisplayContent.Text("unused"),
+                WorkspaceContent.Text("unused"),
                 DateTimeOffset.Now)
         };
         var tallView = new View { Height = 7 };
@@ -293,13 +293,13 @@ public sealed class LiveDisplayRenderTests : IDisposable
     [Fact]
     public void FullBleedFillHeight_IsOwnedByTheViewport()
     {
-        var workspace = LiveDisplayWorkspace.Create("viewport-owned");
-        var panel = new LiveDisplayPanel(
+        var workspace = Workspace.Create("viewport-owned");
+        var panel = new WorkspacePanel(
             workspace,
             "Host",
             "dashboard",
             "dashboard",
-            LiveDisplayContent.Text("unused"),
+            WorkspaceContent.Text("unused"),
             DateTimeOffset.Now,
             FullBleed: true);
         var dashboard = new View
@@ -333,18 +333,18 @@ public sealed class LiveDisplayRenderTests : IDisposable
     {
         var output = host.ForPlugin("Plugin");
         var workspace = output.CreateWorkspace("全屏");
-        output.SetPanel(workspace, "normal", "普通", LiveDisplayContent.Text("NormalBody"));
+        output.SetPanel(workspace, "normal", "普通", WorkspaceContent.Text("NormalBody"));
         output.Log(workspace, "HiddenLog");
         output.SetPanel(
             workspace,
             "full",
             "全屏",
-            LiveDisplayContent.Text("FullBody"),
+            WorkspaceContent.Text("FullBody"),
             fullBleed: true);
 
         await StartAsync();
         await terminal.WaitForScreenAsync("FullBody");
-        KeyboardManager.ShowPopup(new KeyboardHandlerContext().WriteLine("PopupOverFullBleed"));
+        HotkeyManager.ShowPopup(new HotkeyContext().AddLine("PopupOverFullBleed"));
         await terminal.WaitForScreenAsync("PopupOverFullBleed");
         var screen = await terminal.CaptureScreenAsync();
 
@@ -365,7 +365,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
             first,
             "main",
             "main",
-            new LiveDisplayContent(() =>
+            new WorkspaceContent(() =>
             {
                 var root = new View { Width = Dim.Fill(), Height = Dim.Fill() };
                 var background = new Label
@@ -383,7 +383,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
             second,
             "main",
             "main",
-            LiveDisplayContent.Text("Second workspace body"),
+            WorkspaceContent.Text("Second workspace body"),
             fullBleed: true);
         host.SwitchWorkspace(first);
 
@@ -546,7 +546,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
             workspace,
             "main",
             "main",
-            new LiveDisplayContent(() =>
+            new WorkspaceContent(() =>
             {
                 var root = new View { Width = Dim.Fill(), Height = Dim.Fill() };
                 bottomButton = new Button
@@ -601,7 +601,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
             workspace,
             "main",
             "Long panel",
-            new LiveDisplayContent(() =>
+            new WorkspaceContent(() =>
             {
                 content = new ListView { Width = Dim.Fill(), Height = 30 };
                 content.SetSource(new ObservableCollection<string>(
@@ -715,7 +715,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
             workspace,
             "main",
             "main",
-            LiveDisplayContent.Text("Late workspace body"),
+            WorkspaceContent.Text("Late workspace body"),
             switchToWorkspace: false);
         Assert.False(await terminal.InvokeAsync(() => parts.Popup.Visible));
 
@@ -1176,7 +1176,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
             active,
             "main",
             "main",
-            new LiveDisplayContent(() =>
+            new WorkspaceContent(() =>
             {
                 content = new ListView { Width = Dim.Fill(), Height = Dim.Fill() };
                 content.SetSource(new ObservableCollection<string>(["zero", "one", "two"]));
@@ -1470,8 +1470,8 @@ public sealed class LiveDisplayRenderTests : IDisposable
         var outputB = host.ForPlugin("Plugin-B");
         var outputA = host.ForPlugin("Plugin-A");
         var workspace = outputB.CreateWorkspace("普通");
-        outputB.SetPanel(workspace, "b", "B", LiveDisplayContent.Text(Lines(1, 30)));
-        outputA.SetPanel(workspace, "a", "A", LiveDisplayContent.Text("Body-A 中文🐎"));
+        outputB.SetPanel(workspace, "b", "B", WorkspaceContent.Text(Lines(1, 30)));
+        outputA.SetPanel(workspace, "a", "A", WorkspaceContent.Text("Body-A 中文🐎"));
 
         await StartAsync();
         await terminal.WaitForScreenAsync("line-30");
@@ -1483,7 +1483,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
         Assert.Equal(before.ContentSize.Height, before.PanelFrames[^1].Bottom);
         Assert.Equal("╰", before.BottomLeft.Grapheme.ToString());
 
-        host.Log(new LiveDisplayLogLine(null, "Host", "GlobalLogMustStayHidden", LiveDisplaySeverity.Info));
+        host.Log(new UiLogLine(null, "Host", "GlobalLogMustStayHidden", UiSeverity.Info));
         outputA.Log(workspace, "ScopedLogMustStayHidden");
         await terminal.WaitForAsync(async () =>
             (await terminal.InvokeAsync(() => host.GetLogsForTests(null))).Count == 1 &&
@@ -1535,7 +1535,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
         var workspace = output.CreateWorkspace("Log storage");
         for (var i = 0; i < 302; i++)
         {
-            host.Log(new LiveDisplayLogLine(null, "Host", $"global-{i:000}", LiveDisplaySeverity.Info));
+            host.Log(new UiLogLine(null, "Host", $"global-{i:000}", UiSeverity.Info));
             output.Log(workspace, $"scoped-{i:000}");
         }
 
@@ -1565,7 +1565,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
             workspace,
             "main",
             "长页面",
-            new LiveDisplayContent(() =>
+            new WorkspaceContent(() =>
                 content = new Label { Text = Lines(1, 50) }),
             fullBleed: true);
 
@@ -1637,18 +1637,18 @@ public sealed class LiveDisplayRenderTests : IDisposable
     {
         var output = host.ForPlugin("Routing");
         var workspace = output.CreateWorkspace("Routing");
-        output.SetPanel(workspace, "main", "Live", LiveDisplayContent.Text("LiveState"));
+        output.SetPanel(workspace, "main", "Live", WorkspaceContent.Text("LiveState"));
         var leftHandled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var rightHandled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var leftCalls = 0;
         var rightCalls = 0;
-        KeyboardManager.Register(ConsoleKey.LeftArrow, "left", () =>
+        HotkeyManager.Register(ConsoleKey.LeftArrow, "left", () =>
         {
             Interlocked.Increment(ref leftCalls);
             leftHandled.TrySetResult();
             return Task.CompletedTask;
         });
-        KeyboardManager.Register(ConsoleKey.RightArrow, "right", () =>
+        HotkeyManager.Register(ConsoleKey.RightArrow, "right", () =>
         {
             Interlocked.Increment(ref rightCalls);
             rightHandled.TrySetResult();
@@ -1689,7 +1689,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
         output.RemoveWorkspace(workspace);
         await terminal.WaitForAsync(() => disposed == 2);
 
-        LiveDisplayContent Content(string text)
+        WorkspaceContent Content(string text)
             => new(() =>
             {
                 created++;
@@ -1716,7 +1716,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
         var hiddenDisposed = 0;
         output.SetPanel(second, "normal", "normal", Tracked("Hidden-v1", () => hiddenCreated++, () => hiddenDisposed++));
         await terminal.WaitForScreenAsync("Hidden-v1");
-        output.SetPanel(second, "cover", "cover", LiveDisplayContent.Text("FullBleedCover"), fullBleed: true);
+        output.SetPanel(second, "cover", "cover", WorkspaceContent.Text("FullBleedCover"), fullBleed: true);
         await terminal.WaitForScreenAsync("FullBleedCover");
 
         output.SetPanel(
@@ -1754,7 +1754,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
 
         Assert.Equal((1, 1), (firstCreated, firstDisposed));
 
-        static LiveDisplayContent Tracked(string text, Action created, Action disposed)
+        static WorkspaceContent Tracked(string text, Action created, Action disposed)
             => new(() =>
             {
                 created();
@@ -1770,17 +1770,17 @@ public sealed class LiveDisplayRenderTests : IDisposable
         var output = host.ForPlugin("Scopes");
         var first = output.CreateWorkspace("第一");
         var second = output.CreateWorkspace("第二");
-        output.SetPanel(first, "main", "第一", LiveDisplayContent.Text("FirstBody"));
-        output.SetPanel(second, "main", "第二", LiveDisplayContent.Text("SecondBody"));
+        output.SetPanel(first, "main", "第一", WorkspaceContent.Text("FirstBody"));
+        output.SetPanel(second, "main", "第二", WorkspaceContent.Text("SecondBody"));
         output.SwitchWorkspace(first);
         output.Log(second, "SecondLog");
         output.Notify(second, "SecondNotify", ttl: TimeSpan.FromMinutes(1));
-        host.Log(new LiveDisplayLogLine(null, "Host", "GlobalLog", LiveDisplaySeverity.Info));
-        host.Notify(new LiveDisplayNotification(
+        host.Log(new UiLogLine(null, "Host", "GlobalLog", UiSeverity.Info));
+        host.Notify(new UiNotification(
             null,
             "Host",
             "GlobalNotify",
-            LiveDisplaySeverity.Info,
+            UiSeverity.Info,
             DateTimeOffset.Now.AddMinutes(1),
             []));
 
@@ -1809,7 +1809,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
     {
         var output = host.ForPlugin("Ttl");
         var workspace = output.CreateWorkspace("TTL");
-        output.SetPanel(workspace, "main", "main", LiveDisplayContent.Text("TtlBody"), fullBleed: true);
+        output.SetPanel(workspace, "main", "main", WorkspaceContent.Text("TtlBody"), fullBleed: true);
         output.Notify(workspace, "ExpiringNotification", ttl: TimeSpan.FromMilliseconds(20));
 
         await StartAsync();
@@ -1828,8 +1828,8 @@ public sealed class LiveDisplayRenderTests : IDisposable
         var output = host.ForPlugin("Removal");
         var first = output.CreateWorkspace("第一");
         var second = output.CreateWorkspace("第二");
-        output.SetPanel(first, "main", "第一", LiveDisplayContent.Text("FirstBody"));
-        output.SetPanel(second, "main", "第二", LiveDisplayContent.Text("SecondBody"));
+        output.SetPanel(first, "main", "第一", WorkspaceContent.Text("FirstBody"));
+        output.SetPanel(second, "main", "第二", WorkspaceContent.Text("SecondBody"));
 
         await StartAsync();
         await terminal.WaitForScreenAsync("SecondBody");
@@ -1840,9 +1840,9 @@ public sealed class LiveDisplayRenderTests : IDisposable
 
         output.RemoveWorkspace(first);
         output.RemoveWorkspace(first);
-        output.SetPanel(first, "late", "late", LiveDisplayContent.Text("LateBody"));
+        output.SetPanel(first, "late", "late", WorkspaceContent.Text("LateBody"));
         var recreated = output.CreateWorkspace("第一");
-        output.SetPanel(recreated, "main", "recreated", LiveDisplayContent.Text("RecreatedBody"));
+        output.SetPanel(recreated, "main", "recreated", WorkspaceContent.Text("RecreatedBody"));
 
         await terminal.WaitForScreenAsync("RecreatedBody");
         var screen = await terminal.CaptureScreenAsync();
@@ -1865,7 +1865,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
             removed,
             "main",
             "main",
-            new LiveDisplayContent(() =>
+            new WorkspaceContent(() =>
             {
                 var view = new Label { Text = "Concurrent removal target" };
                 view.Disposing += (_, _) => disposed++;
@@ -1875,13 +1875,13 @@ public sealed class LiveDisplayRenderTests : IDisposable
             replacement,
             "main",
             "main",
-            LiveDisplayContent.Text("Replacement remains"),
+            WorkspaceContent.Text("Replacement remains"),
             switchToWorkspace: false);
         output.Notify(
             removed,
             "Removal shortcut",
             ttl: TimeSpan.FromMinutes(1),
-            shortcuts: new LiveDisplayShortcut(ConsoleKey.F8, () =>
+            shortcuts: new UiShortcut(ConsoleKey.F8, () =>
             {
                 Interlocked.Increment(ref shortcutCalls);
                 return Task.CompletedTask;
@@ -1890,9 +1890,9 @@ public sealed class LiveDisplayRenderTests : IDisposable
         await StartAsync();
         await terminal.WaitForScreenAsync("Concurrent removal target");
         await terminal.WaitForScreenAsync("Removal shortcut");
-        Assert.Equal(1, KeyboardManager.TransientShortcutCountForTests);
+        Assert.Equal(1, HotkeyManager.TransientShortcutCountForTests);
 
-        LiveDisplayWorkspace? competingWorkspace = null;
+        Workspace? competingWorkspace = null;
         var armed = 0;
         EventHandler<Terminal.Gui.App.TimeoutEventArgs> added = (_, _) =>
         {
@@ -1935,7 +1935,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
         Assert.Same(replacement, host.CurrentWorkspace);
         Assert.Equal(1, disposed);
         Assert.Equal(0, shortcutCalls);
-        Assert.Equal(0, KeyboardManager.TransientShortcutCountForTests);
+        Assert.Equal(0, HotkeyManager.TransientShortcutCountForTests);
 
         var taskbar = await GetWorkspaceTaskbarAsync();
         var parts = await terminal.InvokeAsync(() => TaskbarParts(taskbar));
@@ -1951,14 +1951,14 @@ public sealed class LiveDisplayRenderTests : IDisposable
     {
         var output = host.ForPlugin("Canonical");
         var canonical = output.CreateWorkspace("Case Sensitive Title");
-        var alias = LiveDisplayWorkspace.Create("case sensitive title");
-        var secondAlias = LiveDisplayWorkspace.Create("CASE SENSITIVE TITLE");
+        var alias = Workspace.Create("case sensitive title");
+        var secondAlias = Workspace.Create("CASE SENSITIVE TITLE");
         var disposed = 0;
         output.SetPanel(
             alias,
             "main",
             "alias",
-            new LiveDisplayContent(() =>
+            new WorkspaceContent(() =>
             {
                 var view = new Label { Text = "AliasBody" };
                 view.Disposing += (_, _) => disposed++;
@@ -1973,9 +1973,9 @@ public sealed class LiveDisplayRenderTests : IDisposable
         output.RemoveWorkspace(alias);
         await terminal.WaitForAsync(() => disposed == 1);
         output.RemoveWorkspace(canonical);
-        output.SetPanel(canonical, "late", "late", LiveDisplayContent.Text("LateCanonicalBody"));
+        output.SetPanel(canonical, "late", "late", WorkspaceContent.Text("LateCanonicalBody"));
         output.Log(alias, "LateAliasLog");
-        output.SetPanel(secondAlias, "late-second", "late", LiveDisplayContent.Text("LateSecondAliasBody"));
+        output.SetPanel(secondAlias, "late-second", "late", WorkspaceContent.Text("LateSecondAliasBody"));
         output.Log(secondAlias, "LateSecondAliasLog");
         var screen = await terminal.CaptureScreenAsync();
 
@@ -2018,7 +2018,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
             workspace,
             "main",
             "main",
-            new LiveDisplayContent(() =>
+            new WorkspaceContent(() =>
             {
                 control = new View
                 {
@@ -2062,7 +2062,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
         await terminal.WaitForAsync(() => !commandMode.IsOpen);
 
         var enterHotkeyInvocations = 0;
-        KeyboardManager.Register(ConsoleKey.Enter, "Enter hotkey", () =>
+        HotkeyManager.Register(ConsoleKey.Enter, "Enter hotkey", () =>
         {
             enterHotkeyInvocations++;
             return Task.CompletedTask;
@@ -2070,7 +2070,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
         await terminal.InjectAsync(Key.Enter);
         await terminal.WaitForAsync(() => enterHotkeyInvocations == 1);
         Assert.False(commandMode.IsOpen);
-        Assert.True(KeyboardManager.Unregister(ConsoleKey.Enter));
+        Assert.True(HotkeyManager.Unregister(ConsoleKey.Enter));
 
         await terminal.InjectAsync(Key.Enter);
         await terminal.WaitForAsync(() => commandMode.IsOpen);
@@ -2088,7 +2088,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
             first,
             "main",
             "main",
-            new LiveDisplayContent(() =>
+            new WorkspaceContent(() =>
             {
                 focusTarget = new View
                 {
@@ -2100,7 +2100,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
                 return focusTarget;
             }),
             fullBleed: true);
-        output.SetPanel(second, "main", "main", LiveDisplayContent.Text("Other"), fullBleed: true);
+        output.SetPanel(second, "main", "main", WorkspaceContent.Text("Other"), fullBleed: true);
         host.SwitchWorkspace(first);
 
         await StartAsync();
@@ -2246,7 +2246,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
             workspace,
             "main",
             "main",
-            new LiveDisplayContent(() =>
+            new WorkspaceContent(() =>
             {
                 control = new View
                 {
@@ -2291,7 +2291,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
     {
         var output = host.ForPlugin("CommandEditing");
         var workspace = output.CreateWorkspace("Command editing");
-        output.SetPanel(workspace, "main", "main", LiveDisplayContent.Text("CommandEditingBody"), fullBleed: true);
+        output.SetPanel(workspace, "main", "main", WorkspaceContent.Text("CommandEditingBody"), fullBleed: true);
 
         await StartAsync();
         var commandMode = await GetCommandModeAsync();
@@ -2309,7 +2309,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
             workspace,
             "main",
             "main",
-            LiveDisplayContent.Text("BackgroundUpdatedBody"),
+            WorkspaceContent.Text("BackgroundUpdatedBody"),
             fullBleed: true,
             switchToWorkspace: false);
         await terminal.WaitForScreenAsync("BackgroundUpdatedBody");
@@ -2467,7 +2467,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
             workspace,
             "main",
             "main",
-            LiveDisplayContent.Text("CommandShutdownBody"),
+            WorkspaceContent.Text("CommandShutdownBody"),
             fullBleed: true);
 
         await StartAsync();
@@ -2492,7 +2492,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
             workspace,
             "controls",
             "Controls",
-            new LiveDisplayContent(() =>
+            new WorkspaceContent(() =>
             {
                 var root = new View { Width = Dim.Fill(), Height = 7 };
                 input = new TextField { X = 1, Y = 0, Width = 12, Text = string.Empty };
@@ -2547,7 +2547,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
             workspace,
             "main",
             "main",
-            new LiveDisplayContent(() =>
+            new WorkspaceContent(() =>
             {
                 control = new View
                 {
@@ -2591,7 +2591,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
             workspace,
             "main",
             "main",
-            new LiveDisplayContent(() =>
+            new WorkspaceContent(() =>
             {
                 var root = new View { Width = Dim.Fill(), Height = Dim.Fill() };
                 top = new Button { Text = "TopTarget", X = Pos.AnchorEnd(16), Y = 2 };
@@ -2615,7 +2615,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
         await terminal.ClickAsync(new Point(topFrame.X + topFrame.Width / 2, topFrame.Y));
         Assert.Equal(1, topHits);
 
-        KeyboardManager.ShowPopup(new KeyboardHandlerContext().WriteLine("KeyboardOverlay"));
+        HotkeyManager.ShowPopup(new HotkeyContext().AddLine("KeyboardOverlay"));
         await terminal.WaitForScreenAsync("KeyboardOverlay");
         var bottomFrame = await terminal.InvokeAsync(() => bottom!.FrameToScreen());
         var bottomPoint = new Point(bottomFrame.X + bottomFrame.Width / 2, bottomFrame.Y);
@@ -2639,7 +2639,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
             workspace,
             "main",
             "main",
-            new LiveDisplayContent(() =>
+            new WorkspaceContent(() =>
             {
                 button = new Button { Text = "Underlying" };
                 button.Accepting += (_, _) => accepted++;
@@ -2651,7 +2651,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
         await terminal.InvokeAsync(() => button!.SetFocus());
 
         var confirm = Task.Run(
-            () => TerminalGuiDialogs.Confirm(terminal.Application, "Nested confirm"),
+            () => ModalDialogs.Confirm(terminal.Application, "Nested confirm"),
             TestContext.Current.CancellationToken);
         await terminal.WaitForScreenAsync("Nested confirm");
         await terminal.InjectAsync(Key.Esc);
@@ -2661,7 +2661,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
         Assert.Equal(1, accepted);
 
         var nestedAtShutdown = Task.Run(
-            () => TerminalGuiDialogs.Confirm(terminal.Application, "Stop nested"),
+            () => ModalDialogs.Confirm(terminal.Application, "Stop nested"),
             TestContext.Current.CancellationToken);
         await terminal.WaitForScreenAsync("Stop nested");
         await terminal.InjectAsync(Key.C.WithCtrl);
@@ -2676,11 +2676,11 @@ public sealed class LiveDisplayRenderTests : IDisposable
     {
         var output = host.ForPlugin("NestedShutdown");
         var workspace = output.CreateWorkspace("Nested shutdown");
-        output.SetPanel(workspace, "main", "main", LiveDisplayContent.Text("NestedShutdownBody"), fullBleed: true);
+        output.SetPanel(workspace, "main", "main", WorkspaceContent.Text("NestedShutdownBody"), fullBleed: true);
         await StartAsync();
 
         var confirm = Task.Run(
-            () => TerminalGuiDialogs.Confirm(terminal.Application, "Background shutdown modal"),
+            () => ModalDialogs.Confirm(terminal.Application, "Background shutdown modal"),
             TestContext.Current.CancellationToken);
         await terminal.WaitForScreenAsync("Background shutdown modal");
         await Task.Run(host.RequestShutdown, TestContext.Current.CancellationToken);
@@ -2701,13 +2701,13 @@ public sealed class LiveDisplayRenderTests : IDisposable
             workspace,
             "main",
             "main",
-            LiveDisplayContent.Text("ModalCancellationBody"),
+            WorkspaceContent.Text("ModalCancellationBody"),
             fullBleed: true);
         run = await terminal.StartAsync(host, cancellation.Token);
         await terminal.WaitForScreenAsync("ModalCancellationBody");
 
         var confirm = Task.Run(
-            () => LiveDisplayConsole.Confirm("Cancelled plugin modal"),
+            () => TerminalUi.Confirm("Cancelled plugin modal"),
             TestContext.Current.CancellationToken);
         await terminal.WaitForScreenAsync("Cancelled plugin modal");
         await Task.Run(cancellation.Cancel, TestContext.Current.CancellationToken);
@@ -2723,7 +2723,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
     {
         var output = host.ForPlugin("Background");
         var workspace = output.CreateWorkspace("Background");
-        output.SetPanel(workspace, "main", "main", LiveDisplayContent.Text("Before"), fullBleed: true);
+        output.SetPanel(workspace, "main", "main", WorkspaceContent.Text("Before"), fullBleed: true);
 
         var starting = terminal.StartAsync(host);
         await Task.Run(
@@ -2731,7 +2731,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
                 workspace,
                 "main",
                 "main",
-                LiveDisplayContent.Text("After"),
+                WorkspaceContent.Text("After"),
                 fullBleed: true),
             TestContext.Current.CancellationToken);
         run = await starting;
@@ -2776,7 +2776,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
                 () => bootstrap.SetPhase(
                     "config",
                     "替换项",
-                    LiveDisplaySeverity.Success,
+                    UiSeverity.Success,
                     "R1"),
                 TestContext.Current.CancellationToken);
             await terminal.WaitForAsync(() => frames.Count > drawCount);
@@ -2863,8 +2863,8 @@ public sealed class LiveDisplayRenderTests : IDisposable
         var otherOutput = host.ForPlugin("Other");
         var otherWorkspace = otherOutput.CreateWorkspace("Other");
 
-        dmm.Log(bootstrap.Workspace, "DMM bootstrap status", LiveDisplaySeverity.Success);
-        otherOutput.Log(otherWorkspace, "Other workspace status", LiveDisplaySeverity.Error);
+        dmm.Log(bootstrap.Workspace, "DMM bootstrap status", UiSeverity.Success);
+        otherOutput.Log(otherWorkspace, "Other workspace status", UiSeverity.Error);
 
         await StartAsync();
         await terminal.WaitForScreenAsync("DMM bootstrap status");
@@ -2910,7 +2910,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
             ("训练员性别", "男"),
             ("更新源", "https://example.invalid/assets")
         ]);
-        bootstrap.SetPhase("database", "数据文件", LiveDisplaySeverity.Info, "旧初始化结果");
+        bootstrap.SetPhase("database", "数据文件", UiSeverity.Info, "旧初始化结果");
         bootstrap.SetPluginSummary(
         [
             new(
@@ -2943,7 +2943,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
 
         await Task.Run(() =>
         {
-            bootstrap.SetPhase("database", "数据文件", LiveDisplaySeverity.Success, "后台更新完成");
+            bootstrap.SetPhase("database", "数据文件", UiSeverity.Success, "后台更新完成");
             bootstrap.SetPluginSummary(
             [
                 new(
@@ -2959,7 +2959,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
                     initialized: true,
                     failed: true)
             ]);
-            bootstrap.Log("Worker", "后台关键日志", LiveDisplaySeverity.Warning);
+            bootstrap.Log("Worker", "后台关键日志", UiSeverity.Warning);
         }, TestContext.Current.CancellationToken);
         await terminal.WaitForScreenAsync("后台更新完成");
         await terminal.WaitForScreenAsync("后台关键日志");
@@ -3005,13 +3005,13 @@ public sealed class LiveDisplayRenderTests : IDisposable
     public async Task BootstrapUpdates_ReleaseStateGateBeforeTimedEventsDrain()
     {
         var bootstrap = new BootstrapWorkspace(host);
-        bootstrap.SetPhase("database", "数据文件", LiveDisplaySeverity.Info, "旧数据文件状态");
+        bootstrap.SetPhase("database", "数据文件", UiSeverity.Info, "旧数据文件状态");
         await StartAsync();
         await terminal.ResizeAsync(120, 36);
         await terminal.WaitForScreenAsync("旧数据文件状态");
 
         var pluginOutput = host.ForPlugin("ConcurrentInit");
-        LiveDisplayWorkspace? pluginWorkspace = null;
+        Workspace? pluginWorkspace = null;
         var armed = 0;
         EventHandler<Terminal.Gui.App.TimeoutEventArgs> added = (_, _) =>
         {
@@ -3026,12 +3026,12 @@ public sealed class LiveDisplayRenderTests : IDisposable
                         workspace,
                         "main",
                         "main",
-                        LiveDisplayContent.Text("Concurrent plugin ready"),
+                        WorkspaceContent.Text("Concurrent plugin ready"),
                         switchToWorkspace: false);
                     bootstrap.SetPhase(
                         "database",
                         "数据文件",
-                        LiveDisplaySeverity.Success,
+                        UiSeverity.Success,
                         "后台初始化完成");
                     return workspace;
                 },
@@ -3077,7 +3077,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
     public async Task PluginInitializationAndTaskbarInput_CompleteConcurrently()
     {
         var bootstrap = new BootstrapWorkspace(host);
-        bootstrap.SetPhase("database", "数据文件", LiveDisplaySeverity.Info, "等待后台初始化");
+        bootstrap.SetPhase("database", "数据文件", UiSeverity.Info, "等待后台初始化");
         await StartAsync();
         await terminal.ResizeAsync(120, 36);
         await terminal.WaitForScreenAsync("等待后台初始化");
@@ -3097,12 +3097,12 @@ public sealed class LiveDisplayRenderTests : IDisposable
                         workspace,
                         "main",
                         "main",
-                        LiveDisplayContent.Text("Taskbar concurrent plugin ready"),
+                        WorkspaceContent.Text("Taskbar concurrent plugin ready"),
                         switchToWorkspace: false);
                     bootstrap.SetPhase(
                         "database",
                         "数据文件",
-                        LiveDisplaySeverity.Success,
+                        UiSeverity.Success,
                         "taskbar 操作期间初始化完成");
                     return workspace;
                 },
@@ -3505,7 +3505,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
             other,
             "main",
             "main",
-            LiveDisplayContent.Text("QuietOther"),
+            WorkspaceContent.Text("QuietOther"),
             switchToWorkspace: false);
 
         await StartAsync();
@@ -3517,9 +3517,9 @@ public sealed class LiveDisplayRenderTests : IDisposable
         await terminal.WaitForScreenAsync("运行环境");
         Assert.Same(bootstrap.Workspace, host.CurrentWorkspace);
 
-        output.SetPanel(other, "main", "main", LiveDisplayContent.Text("ActivatedOther"));
+        output.SetPanel(other, "main", "main", WorkspaceContent.Text("ActivatedOther"));
         await terminal.WaitForScreenAsync("ActivatedOther");
-        bootstrap.SetPhase("host", "宿主", LiveDisplaySeverity.Warning, "后台状态已更新");
+        bootstrap.SetPhase("host", "宿主", UiSeverity.Warning, "后台状态已更新");
         await terminal.RedrawAsync();
 
         Assert.Same(other, host.CurrentWorkspace);
@@ -3543,14 +3543,14 @@ public sealed class LiveDisplayRenderTests : IDisposable
     }
 
     [Fact]
-    public void BootstrapDefaultLogWorkspaceSurvivesProductionBindingOrder()
+    public void BootstrapDefaultExceptionWorkspaceSurvivesProductionBindingOrder()
     {
-        terminal.RunOnOwnerThread(() => LiveDisplayConsole.Unbind(host));
+        terminal.RunOnOwnerThread(() => TerminalUi.Unbind(host));
         using var bootstrap = new BootstrapWorkspace(host);
 
-        Assert.Same(bootstrap.Workspace, LiveDisplayConsole.DefaultLogWorkspace);
-        terminal.RunOnOwnerThread(() => LiveDisplayConsole.Bind(host, terminal.Application));
-        Assert.Same(bootstrap.Workspace, LiveDisplayConsole.DefaultLogWorkspace);
+        Assert.Same(bootstrap.Workspace, TerminalUi.DefaultExceptionWorkspace);
+        terminal.RunOnOwnerThread(() => TerminalUi.Bind(host, terminal.Application));
+        Assert.Same(bootstrap.Workspace, TerminalUi.DefaultExceptionWorkspace);
     }
 
     [Fact]
@@ -3563,7 +3563,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
             other,
             "main",
             "main",
-            LiveDisplayContent.Text("ActivePluginWorkspace"),
+            WorkspaceContent.Text("ActivePluginWorkspace"),
             switchToWorkspace: false);
 
         await StartAsync();
@@ -3571,8 +3571,8 @@ public sealed class LiveDisplayRenderTests : IDisposable
         host.SwitchWorkspace(other);
         await terminal.WaitForScreenAsync("ActivePluginWorkspace");
 
-        LiveDisplayConsole.WriteException(new InvalidOperationException("write-exception-sentinel"));
-        LiveDisplayConsole.LogException("Analyzer", new ApplicationException("log-exception-sentinel"));
+        TerminalUi.LogException("URA", new InvalidOperationException("write-exception-sentinel"));
+        TerminalUi.LogException("Analyzer", new ApplicationException("log-exception-sentinel"));
         await host.HandleCommandAsync("/workspace switch \"unterminated");
         output.Log(other, "ordinary-plugin-log");
         await terminal.WaitForAsync(async () =>
@@ -3586,7 +3586,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
                    pluginLogs.Count(x => x.Text == "ordinary-plugin-log") == 1;
         });
 
-        Assert.Same(bootstrap.Workspace, LiveDisplayConsole.DefaultLogWorkspace);
+        Assert.Same(bootstrap.Workspace, TerminalUi.DefaultExceptionWorkspace);
         Assert.Same(other, host.CurrentWorkspace);
         var pluginScreen = await terminal.CaptureScreenAsync();
         Assert.Contains("ActivePluginWorkspace", pluginScreen);
@@ -3621,14 +3621,14 @@ public sealed class LiveDisplayRenderTests : IDisposable
     public async Task BootstrapExceptionContextMenu_CopiesExactBacktraceThroughNativeInput()
     {
         using var bootstrap = new BootstrapWorkspace(host);
-        bootstrap.Log("Worker", "ordinary-log", LiveDisplaySeverity.Error);
+        bootstrap.Log("Worker", "ordinary-log", UiSeverity.Error);
         var exception = CaptureBacktraceException();
         var expectedBacktrace = exception.ToString();
         Assert.Contains(typeof(AggregateException).FullName!, expectedBacktrace);
         Assert.Contains(typeof(ApplicationException).FullName!, expectedBacktrace);
         Assert.Contains(typeof(InvalidOperationException).FullName!, expectedBacktrace);
         Assert.Contains(nameof(CaptureBacktraceException), expectedBacktrace);
-        LiveDisplayConsole.LogException("Analyzer", exception);
+        TerminalUi.LogException("Analyzer", exception);
         var clipboard = new CountingFakeClipboard();
 
         await StartAsync();
@@ -3774,7 +3774,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
     public async Task BootstrapExceptionContextMenu_ClipboardExceptionIsReportedWithoutEndingSession()
     {
         using var bootstrap = new BootstrapWorkspace(host);
-        LiveDisplayConsole.LogException("Analyzer", CaptureBacktraceException());
+        TerminalUi.LogException("Analyzer", CaptureBacktraceException());
         var clipboardException = new InvalidOperationException(
             "clipboard-write-failure-sentinel");
 
@@ -3823,7 +3823,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
     public async Task BootstrapExceptionContextMenu_ReleasesPopoverOnReplacementAndShutdown()
     {
         using var bootstrap = new BootstrapWorkspace(host);
-        LiveDisplayConsole.LogException("Analyzer", CaptureBacktraceException());
+        TerminalUi.LogException("Analyzer", CaptureBacktraceException());
         await StartAsync();
         await terminal.ResizeAsync(120, 36);
         await terminal.WaitForScreenAsync("compact-exception-sentinel");
@@ -3852,7 +3852,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
         await terminal.InvokeAsync(() =>
             firstMenu.Disposing += (_, _) => firstMenuDisposed++);
 
-        bootstrap.SetPhase("host", "宿主", LiveDisplaySeverity.Success, "context menu refresh");
+        bootstrap.SetPhase("host", "宿主", UiSeverity.Success, "context menu refresh");
         await terminal.WaitForScreenAsync("context menu refresh");
         await terminal.WaitForAsync(() => firstMenuDisposed == 1);
         Assert.DoesNotContain(firstMenu, terminal.Application.Popovers!.Popovers);
@@ -3915,12 +3915,12 @@ public sealed class LiveDisplayRenderTests : IDisposable
                 .Disposing += (_, _) => dashboardDisposed++);
 
         bootstrap.Dispose();
-        Assert.Null(LiveDisplayConsole.DefaultLogWorkspace);
-        host.Log(new LiveDisplayLogLine(
+        Assert.Null(TerminalUi.DefaultExceptionWorkspace);
+        host.Log(new UiLogLine(
             bootstrap.Workspace,
             "Late",
             "log-after-bootstrap-dispose",
-            LiveDisplaySeverity.Error));
+            UiSeverity.Error));
         await terminal.WaitForAsync(async () =>
             (await terminal.InvokeAsync(() => host.GetLogsForTests(bootstrap.Workspace)))
             .Any(x => x.Text == "log-after-bootstrap-dispose"));
@@ -3983,7 +3983,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
         Assert.Equal(1, disposedTaskbars);
         Assert.Equal(1, disposedTaskbarTriggers);
         firstBootstrap.Dispose();
-        Assert.Null(LiveDisplayConsole.DefaultLogWorkspace);
+        Assert.Null(TerminalUi.DefaultExceptionWorkspace);
 
         var second = CreateHost();
         host = second;
@@ -4022,7 +4022,7 @@ public sealed class LiveDisplayRenderTests : IDisposable
         await terminal.InjectAsync(Key.Esc);
         Assert.False((await GetCommandModeAsync()).IsOpen);
         secondBootstrap.Dispose();
-        Assert.Null(LiveDisplayConsole.DefaultLogWorkspace);
+        Assert.Null(TerminalUi.DefaultExceptionWorkspace);
     }
 
     [Fact]
@@ -4030,16 +4030,16 @@ public sealed class LiveDisplayRenderTests : IDisposable
     {
         var now = DateTimeOffset.Now;
         var notifications = Enumerable.Range(1, 6)
-            .Select(i => new LiveDisplayNotification(
+            .Select(i => new UiNotification(
                 null,
                 $"Plugin-{i}",
                 $"Notification-{i}",
-                LiveDisplaySeverity.Info,
+                UiSeverity.Info,
                 now.AddSeconds(10),
                 []))
             .ToArray();
 
-        var lines = new NotificationPopupRenderer().BuildLines(
+        var lines = new NotificationPopupFormatter().BuildLines(
             notifications,
             popupWidth: 40,
             maxHeight: 23,
@@ -4057,23 +4057,23 @@ public sealed class LiveDisplayRenderTests : IDisposable
         var now = DateTimeOffset.Now;
         var notifications = new[]
         {
-            new LiveDisplayNotification(
+            new UiNotification(
                 null,
                 "First",
                 $"first-line{Environment.NewLine}second-line",
-                LiveDisplaySeverity.Info,
+                UiSeverity.Info,
                 now.AddMinutes(1),
                 []),
-            new LiveDisplayNotification(
+            new UiNotification(
                 null,
                 "Second",
                 "SecondCard",
-                LiveDisplaySeverity.Info,
+                UiSeverity.Info,
                 now.AddMinutes(1),
                 [])
         };
 
-        var lines = new NotificationPopupRenderer().BuildLines(
+        var lines = new NotificationPopupFormatter().BuildLines(
             notifications,
             popupWidth: 40,
             maxHeight: 12,
@@ -4117,9 +4117,9 @@ public sealed class LiveDisplayRenderTests : IDisposable
         => terminal.RunOnOwnerThread(() =>
         {
             if (unbindFirst)
-                LiveDisplayConsole.Unbind(value);
-            LiveDisplayConsole.Bind(value, terminal.Application, cancellationToken);
-            KeyboardManager.OverlaySink = value;
+                TerminalUi.Unbind(value);
+            TerminalUi.Bind(value, terminal.Application, cancellationToken);
+            HotkeyManager.OverlaySink = value;
             RemoveShutdownBinding();
             shutdownTarget = new ShutdownCommandTarget(() =>
             {
@@ -4307,10 +4307,10 @@ public sealed class LiveDisplayRenderTests : IDisposable
 
     static void ResetUi()
     {
-        KeyboardManager.UnregisterAll();
-        KeyboardManager.OverlaySink = null;
-        KeyboardManager.PopupAutoCloseDelay = TimeSpan.FromSeconds(3);
-        LiveDisplayConsole.UnbindForTests();
+        HotkeyManager.UnregisterAll();
+        HotkeyManager.OverlaySink = null;
+        HotkeyManager.PopupAutoCloseDelay = TimeSpan.FromSeconds(3);
+        TerminalUi.UnbindForTests();
     }
 
     sealed class ShutdownCommandTarget : View

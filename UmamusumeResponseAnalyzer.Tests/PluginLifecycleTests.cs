@@ -3,7 +3,7 @@ using System.Reflection;
 using Gallop;
 using Gallop.Endpoints;
 using Terminal.Gui.App;
-using UmamusumeResponseAnalyzer.LiveDisplay;
+using UmamusumeResponseAnalyzer.TerminalGui;
 using UmamusumeResponseAnalyzer.Plugin;
 using WatsonWebserver.Core;
 using WatsonHttpMethod = WatsonWebserver.Core.HttpMethod;
@@ -21,7 +21,7 @@ namespace UmamusumeResponseAnalyzer.Tests
             application = Application.Create();
             SeedConfig();
             ResetPluginState();
-            PluginManager.BindLiveDisplay(application, _ => new FakeLiveDisplayOutput());
+            PluginManager.BindWorkspaceOutput(application, _ => new FakeWorkspaceOutput());
         }
 
         public void Dispose()
@@ -67,15 +67,15 @@ namespace UmamusumeResponseAnalyzer.Tests
         public void InitializePlugin_CallsContextInitializeEntrypoint()
         {
             var context = new ContextInitializePlugin();
-            var liveDisplay = new FakeLiveDisplayOutput();
-            PluginManager.BindLiveDisplay(application, _ => liveDisplay);
+            var workspaceOutput = new FakeWorkspaceOutput();
+            PluginManager.BindWorkspaceOutput(application, _ => workspaceOutput);
 
             PluginManager.InitializePlugin(context);
 
             Assert.True(context.Initialized);
             Assert.NotNull(context.Context);
             Assert.Same(application, context.Context.Application);
-            Assert.Same(liveDisplay, context.Context.LiveDisplay);
+            Assert.Same(workspaceOutput, context.Context.WorkspaceOutput);
             Assert.Same(context.Context, context.Context.Events);
         }
 
@@ -337,7 +337,7 @@ namespace UmamusumeResponseAnalyzer.Tests
             PluginManager.Assemblies.Clear();
             foreach (var plugin in PluginManager.LoadedPlugins.ToList())
             {
-                KeyboardManager.UnregisterByOwner(plugin);
+                HotkeyManager.UnregisterByOwner(plugin);
             }
             PluginManager.LoadedPlugins.Clear();
             RemoveRouteIfExists("/PartiallyInvalidPlugin/valid");
@@ -603,18 +603,18 @@ namespace UmamusumeResponseAnalyzer.Tests
             public void Initialize(IPluginContext context) { }
         }
 
-        sealed class FakeLiveDisplayOutput : ILiveDisplayOutput
+        sealed class FakeWorkspaceOutput : IWorkspaceOutput
         {
-            public LiveDisplayWorkspace? CurrentWorkspace => null;
-            public LiveDisplayWorkspace CreateWorkspace(string title) => LiveDisplayWorkspace.Create(title);
-            public void RemoveWorkspace(LiveDisplayWorkspace workspace) { }
-            public void SwitchWorkspace(LiveDisplayWorkspace workspace) { }
-            public void BindWorkspaceHotkey(LiveDisplayWorkspace workspace, ConsoleKey key, ConsoleModifiers modifiers = 0, string? description = null) { }
-            public void SetPanel(LiveDisplayWorkspace workspace, string key, string title, LiveDisplayContent content, bool fullBleed = false, bool switchToWorkspace = true) { }
-            public void Log(string text, LiveDisplaySeverity severity = LiveDisplaySeverity.Info) { }
-            public void Log(LiveDisplayWorkspace workspace, string text, LiveDisplaySeverity severity = LiveDisplaySeverity.Info) { }
-            public void Notify(string text, LiveDisplaySeverity severity = LiveDisplaySeverity.Info, TimeSpan? ttl = null, params LiveDisplayShortcut[] shortcuts) { }
-            public void Notify(LiveDisplayWorkspace workspace, string text, LiveDisplaySeverity severity = LiveDisplaySeverity.Info, TimeSpan? ttl = null, params LiveDisplayShortcut[] shortcuts) { }
+            public Workspace? CurrentWorkspace => null;
+            public Workspace CreateWorkspace(string title) => Workspace.Create(title);
+            public void RemoveWorkspace(Workspace workspace) { }
+            public void SwitchWorkspace(Workspace workspace) { }
+            public void BindWorkspaceHotkey(Workspace workspace, ConsoleKey key, ConsoleModifiers modifiers = 0, string? description = null) { }
+            public void SetPanel(Workspace workspace, string key, string title, WorkspaceContent content, bool fullBleed = false, bool switchToWorkspace = true) { }
+            public void Log(string text, UiSeverity severity = UiSeverity.Info) { }
+            public void Log(Workspace workspace, string text, UiSeverity severity = UiSeverity.Info) { }
+            public void Notify(string text, UiSeverity severity = UiSeverity.Info, TimeSpan? ttl = null, params UiShortcut[] shortcuts) { }
+            public void Notify(Workspace workspace, string text, UiSeverity severity = UiSeverity.Info, TimeSpan? ttl = null, params UiShortcut[] shortcuts) { }
         }
 
     }

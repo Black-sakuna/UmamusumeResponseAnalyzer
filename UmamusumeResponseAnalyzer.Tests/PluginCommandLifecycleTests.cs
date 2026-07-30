@@ -1,5 +1,5 @@
 using System.Reflection;
-using UmamusumeResponseAnalyzer.LiveDisplay;
+using UmamusumeResponseAnalyzer.TerminalGui;
 using UmamusumeResponseAnalyzer.Plugin;
 using Xunit;
 
@@ -16,7 +16,7 @@ public sealed class PluginCommandLifecycleTests : IDisposable
 
     public PluginCommandLifecycleTests()
     {
-        ResetKeyboardManager();
+        ResetHotkeyManager();
         SeedConfig();
         ResetPluginState();
 
@@ -27,9 +27,9 @@ public sealed class PluginCommandLifecycleTests : IDisposable
 
         terminal = new(width: 120, height: 35);
         host = new(terminal.Application, static () => [], static _ => { });
-        terminal.RunOnOwnerThread(() => LiveDisplayConsole.Bind(host, terminal.Application));
-        KeyboardManager.OverlaySink = host;
-        PluginManager.BindLiveDisplay(terminal.Application, plugin => host.ForPlugin(plugin.Name));
+        terminal.RunOnOwnerThread(() => TerminalUi.Bind(host, terminal.Application));
+        HotkeyManager.OverlaySink = host;
+        PluginManager.BindWorkspaceOutput(terminal.Application, plugin => host.ForPlugin(plugin.Name));
     }
 
     public void Dispose()
@@ -47,12 +47,12 @@ public sealed class PluginCommandLifecycleTests : IDisposable
         {
             try
             {
-                terminal.RunOnOwnerThread(() => LiveDisplayConsole.Unbind(host));
+                terminal.RunOnOwnerThread(() => TerminalUi.Unbind(host));
                 terminal.Dispose();
             }
             finally
             {
-                ResetKeyboardManager();
+                ResetHotkeyManager();
                 ResetPluginState();
                 Directory.SetCurrentDirectory(originalCwd);
                 try { Directory.Delete(tempDir, recursive: true); } catch { }
@@ -67,19 +67,19 @@ public sealed class PluginCommandLifecycleTests : IDisposable
         PluginCompiler.Compile(PluginSource("CommandPopup"), "CommandPopup", pluginPath);
         PluginManager.Init();
         var workspace = host.CreateWorkspace("插件");
-        host.SetPanel(new LiveDisplayPanel(
+        host.SetPanel(new WorkspacePanel(
             workspace,
             "Plugin",
             "main",
             "插件",
-            LiveDisplayContent.Text("PluginBody"),
+            WorkspaceContent.Text("PluginBody"),
             DateTimeOffset.Now));
         run = await terminal.StartAsync(host);
 
         await host.HandleCommandAsync("/plugin reload CommandPopup");
         await terminal.WaitForScreenAsync("CommandPopup 已重载");
         var screen = await terminal.CaptureScreenAsync();
-        var popup = await terminal.InvokeAsync(host.GetKeyboardPopupForTests);
+        var popup = await terminal.InvokeAsync(host.GetHotkeyPopupForTests);
 
         Assert.NotNull(popup);
         Assert.Contains(popup.Lines, line => line.Text == "Plugin command");
@@ -119,10 +119,10 @@ public sealed class PluginCommandLifecycleTests : IDisposable
     static string PluginSource(string pluginName, bool writesConsoleOutput = false)
     {
         var initialize = writesConsoleOutput
-            ? "LiveDisplayConsole.WriteLine(\"PLUGIN_INIT_OUTPUT\");"
+            ? "TerminalUi.Log(\"URA\", \"PLUGIN_INIT_OUTPUT\");"
             : string.Empty;
         return $$"""
-            using UmamusumeResponseAnalyzer.LiveDisplay;
+            using UmamusumeResponseAnalyzer.TerminalGui;
             using UmamusumeResponseAnalyzer.Plugin;
 
             public sealed class {{pluginName}} : IPlugin
@@ -136,12 +136,12 @@ public sealed class PluginCommandLifecycleTests : IDisposable
             """;
     }
 
-    static void ResetKeyboardManager()
+    static void ResetHotkeyManager()
     {
-        KeyboardManager.UnregisterAll();
-        KeyboardManager.OverlaySink = null;
-        KeyboardManager.PopupAutoCloseDelay = TimeSpan.FromSeconds(3);
-        LiveDisplayConsole.UnbindForTests();
+        HotkeyManager.UnregisterAll();
+        HotkeyManager.OverlaySink = null;
+        HotkeyManager.PopupAutoCloseDelay = TimeSpan.FromSeconds(3);
+        TerminalUi.UnbindForTests();
     }
 
     static void ResetPluginState()
@@ -159,7 +159,7 @@ public sealed class PluginCommandLifecycleTests : IDisposable
         PluginManager.AssemblyMap.Clear();
         PluginManager.Assemblies.Clear();
         foreach (var plugin in PluginManager.LoadedPlugins.ToList())
-            KeyboardManager.UnregisterByOwner(plugin);
+            HotkeyManager.UnregisterByOwner(plugin);
         PluginManager.LoadedPlugins.Clear();
     }
 

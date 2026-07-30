@@ -7,7 +7,7 @@ using System.Reflection;
 using System.Runtime.ExceptionServices;
 using System.Text;
 using Terminal.Gui.App;
-using UmamusumeResponseAnalyzer.LiveDisplay;
+using UmamusumeResponseAnalyzer.TerminalGui;
 using UmamusumeResponseAnalyzer.Plugin;
 using static UmamusumeResponseAnalyzer.Localization.LaunchMenu;
 
@@ -130,7 +130,7 @@ namespace UmamusumeResponseAnalyzer
             var pluginInitialization = Task.CompletedTask;
             var pluginUpdateCheck = Task.CompletedTask;
             var shutdownBindingAdded = false;
-            var liveDisplayBound = false;
+            var terminalUiBound = false;
             ExceptionDispatchInfo? workflowFailure = null;
             try
             {
@@ -155,10 +155,10 @@ namespace UmamusumeResponseAnalyzer
                     shutdownTarget,
                     Terminal.Gui.Input.Command.Quit);
                 shutdownBindingAdded = true;
-                LiveDisplayConsole.Bind(uiHost, application, lifetimeCts.Token);
-                liveDisplayBound = true;
-                KeyboardManager.OverlaySink = uiHost;
-                PluginManager.BindLiveDisplay(application, plugin => uiHost.ForPlugin(plugin.Name));
+                TerminalUi.Bind(uiHost, application, lifetimeCts.Token);
+                terminalUiBound = true;
+                HotkeyManager.OverlaySink = uiHost;
+                PluginManager.BindWorkspaceOutput(application, plugin => uiHost.ForPlugin(plugin.Name));
 
                 Config.Initialize();
                 await ResourceUpdater.TryUpdateProgram(cancellationToken: lifetimeCts.Token);
@@ -193,7 +193,7 @@ namespace UmamusumeResponseAnalyzer
                 bootstrap.SetPhase(
                     "config",
                     "配置",
-                    LiveDisplaySeverity.Success,
+                    UiSeverity.Success,
                     $"已读取 {Config.CONFIG_FILEPATH}");
 
                 _plugin_initialize_task = pluginInitialization = StartPluginInitializationAsync(bootstrap);
@@ -214,13 +214,13 @@ namespace UmamusumeResponseAnalyzer
                     {
                         var serverStarted = await Task.Run(async () =>
                         {
-                            bootstrap.SetPhase("database", "数据文件", LiveDisplaySeverity.Info, "正在加载事件、技能、名称等数据。");
+                            bootstrap.SetPhase("database", "数据文件", UiSeverity.Info, "正在加载事件、技能、名称等数据。");
                             _database_initialize_task = Database.Initialize();
                             await Task.WhenAll(_database_initialize_task, _plugin_initialize_task);
-                            bootstrap.SetPhase("database", "数据文件", LiveDisplaySeverity.Success, "加载完成；缺失或损坏项见日志。");
+                            bootstrap.SetPhase("database", "数据文件", UiSeverity.Success, "加载完成；缺失或损坏项见日志。");
 
                             lifetimeCts.Token.ThrowIfCancellationRequested();
-                            bootstrap.SetPhase("plugin-init", "插件初始化", LiveDisplaySeverity.Info, "正在调用插件 Initialize。");
+                            bootstrap.SetPhase("plugin-init", "插件初始化", UiSeverity.Info, "正在调用插件 Initialize。");
                             PluginManager.InitializeLoadedPlugins();
                             bootstrap.SetPluginSummary(BuildBootstrapPluginSummary(initialized: true));
                             var loadedPluginCount = PluginManager.LoadedPlugins.Count;
@@ -228,21 +228,21 @@ namespace UmamusumeResponseAnalyzer
                             bootstrap.SetPhase(
                                 "plugin-init",
                                 "插件初始化",
-                                failedPluginCount == 0 ? LiveDisplaySeverity.Success : LiveDisplaySeverity.Warning,
+                                failedPluginCount == 0 ? UiSeverity.Success : UiSeverity.Warning,
                                 failedPluginCount == 0
                                     ? $"已初始化 {loadedPluginCount} 个插件。"
                                     : $"已初始化 {loadedPluginCount} 个插件，{failedPluginCount} 个插件失败。");
 
                             lifetimeCts.Token.ThrowIfCancellationRequested();
-                            bootstrap.SetPhase("server", "HTTP server", LiveDisplaySeverity.Info, "正在启动监听。");
+                            bootstrap.SetPhase("server", "HTTP server", UiSeverity.Info, "正在启动监听。");
                             try
                             {
                                 Server.Start(lifetimeCts.Token); //启动HTTP服务器
-                                bootstrap.SetPhase("server", "HTTP server", LiveDisplaySeverity.Success, $"监听 http://{Config.Core.ListenAddress}:{Config.Core.ListenPort}");
+                                bootstrap.SetPhase("server", "HTTP server", UiSeverity.Success, $"监听 http://{Config.Core.ListenAddress}:{Config.Core.ListenPort}");
                             }
                             catch (Exception ex)
                             {
-                                bootstrap.SetPhase("server", "HTTP server", LiveDisplaySeverity.Error, ex.Message);
+                                bootstrap.SetPhase("server", "HTTP server", UiSeverity.Error, ex.Message);
                                 throw;
                             }
 
@@ -251,14 +251,14 @@ namespace UmamusumeResponseAnalyzer
                                 loadedPluginCount == 0
                                     ? "没有加载任何插件。可从插件仓库安装插件。"
                                     : $"已加载 {loadedPluginCount} 个插件。按 P 查看插件列表。",
-                                loadedPluginCount == 0 ? LiveDisplaySeverity.Warning : LiveDisplaySeverity.Success);
+                                loadedPluginCount == 0 ? UiSeverity.Warning : UiSeverity.Success);
                             foreach (var plugin in PluginManager.FailedPlugins)
                             {
                                 var message = $"插件 {Path.GetFileName(plugin)} 加载失败";
-                                bootstrap.Log("Plugin", message, LiveDisplaySeverity.Warning);
+                                bootstrap.Log("Plugin", message, UiSeverity.Warning);
                             }
 
-                            bootstrap.Log("Server", $"监听 http://{Config.Core.ListenAddress}:{Config.Core.ListenPort}", LiveDisplaySeverity.Success);
+                            bootstrap.Log("Server", $"监听 http://{Config.Core.ListenAddress}:{Config.Core.ListenPort}", UiSeverity.Success);
                             if (Config.Core.ListenAddress == "0.0.0.0")
                             {
                                 var interfaces = NetworkInterface.GetAllNetworkInterfaces()
@@ -279,28 +279,28 @@ namespace UmamusumeResponseAnalyzer
                             }
                             if (!Server.IsRunning)
                             {
-                                bootstrap.SetPhase("server", "HTTP server", LiveDisplaySeverity.Error, I18N_LaunchFail);
+                                bootstrap.SetPhase("server", "HTTP server", UiSeverity.Error, I18N_LaunchFail);
                                 Console.Error.WriteLine(I18N_LaunchFail);
                                 Environment.ExitCode = 1;
                                 return false;
                             }
 
                             var startedMessage = I18N_Start_Started;
-                            bootstrap.Log("URA", startedMessage, LiveDisplaySeverity.Success);
-                            bootstrap.SetPhase("host", "宿主", LiveDisplaySeverity.Success, startedMessage);
+                            bootstrap.Log("URA", startedMessage, UiSeverity.Success);
+                            bootstrap.SetPhase("host", "宿主", UiSeverity.Success, startedMessage);
                             return true;
                         }, lifetimeCts.Token);
 
                         if (!serverStarted)
                             return;
 
-                        KeyboardManager.Register(ConsoleKey.P, "插件列表", ctx =>
+                        HotkeyManager.Register(ConsoleKey.P, "插件列表", ctx =>
                         {
                             var plugins = PluginManager.SnapshotLoadedPlugins();
                             foreach (var i in plugins)
-                                ctx.WriteLine($"{i.Name} v{i.Version}  by {i.Author}");
+                                ctx.AddLine($"{i.Name} v{i.Version}  by {i.Author}");
                             if (plugins.Count == 0)
-                                ctx.WriteLine("（没有加载任何插件）", ConsoleColor.DarkGray);
+                                ctx.AddLine("（没有加载任何插件）");
                             return Task.CompletedTask;
                         });
                         await PluginManager.TriggerStartedAsync(lifetimeCts.Token);
@@ -312,8 +312,8 @@ namespace UmamusumeResponseAnalyzer
                     }
                     catch (Exception ex)
                     {
-                        bootstrap.SetPhase("host", "宿主", LiveDisplaySeverity.Error, ex.Message);
-                        LiveDisplayConsole.LogException("URA", ex);
+                        bootstrap.SetPhase("host", "宿主", UiSeverity.Error, ex.Message);
+                        TerminalUi.LogException("URA", ex);
                         throw;
                     }
                 }
@@ -385,12 +385,12 @@ namespace UmamusumeResponseAnalyzer
                         },
                         () =>
                         {
-                            KeyboardManager.UnregisterAll();
+                            HotkeyManager.UnregisterAll();
                             return ValueTask.CompletedTask;
                         },
                         () =>
                         {
-                            KeyboardManager.OverlaySink = null;
+                            HotkeyManager.OverlaySink = null;
                             return ValueTask.CompletedTask;
                         },
                         () =>
@@ -400,8 +400,8 @@ namespace UmamusumeResponseAnalyzer
                         },
                         () =>
                         {
-                            if (liveDisplayBound)
-                                LiveDisplayConsole.Unbind(uiHost!);
+                            if (terminalUiBound)
+                                TerminalUi.Unbind(uiHost!);
                             return ValueTask.CompletedTask;
                         },
                         () =>
@@ -464,15 +464,15 @@ namespace UmamusumeResponseAnalyzer
         {
             return Task.Run(() =>
             {
-                bootstrap.SetPhase("plugin-scan", "插件扫描", LiveDisplaySeverity.Info, "正在扫描 Plugins/。");
+                bootstrap.SetPhase("plugin-scan", "插件扫描", UiSeverity.Info, "正在扫描 Plugins/。");
                 try
                 {
                     PluginManager.Init();
                 }
                 catch (Exception ex)
                 {
-                    bootstrap.SetPhase("plugin-scan", "插件扫描", LiveDisplaySeverity.Error, ex.Message);
-                    LiveDisplayConsole.LogException("Plugin", ex);
+                    bootstrap.SetPhase("plugin-scan", "插件扫描", UiSeverity.Error, ex.Message);
+                    TerminalUi.LogException("Plugin", ex);
                     throw;
                 }
 
@@ -481,7 +481,7 @@ namespace UmamusumeResponseAnalyzer
                 bootstrap.SetPhase(
                     "plugin-scan",
                     "插件扫描",
-                    failedPluginCount == 0 ? LiveDisplaySeverity.Success : LiveDisplaySeverity.Warning,
+                    failedPluginCount == 0 ? UiSeverity.Success : UiSeverity.Warning,
                     failedPluginCount == 0
                         ? $"发现 {loadedPluginCount} 个可用插件。"
                         : $"发现 {loadedPluginCount} 个可用插件，{failedPluginCount} 个插件失败。");
@@ -540,33 +540,33 @@ namespace UmamusumeResponseAnalyzer
                 if (updates.Count == 0)
                     return;
 
-                uiHost.Notify(new LiveDisplayNotification(
+                uiHost.Notify(new UiNotification(
                     Workspace: null,
                     "URA",
                     FormatPluginUpdateNotification(updates),
-                    LiveDisplaySeverity.Info,
+                    UiSeverity.Info,
                     DateTimeOffset.Now.AddSeconds(12),
                     []));
 
                 foreach (var update in updates)
                 {
-                    uiHost.Log(new LiveDisplayLogLine(
+                    uiHost.Log(new UiLogLine(
                         Workspace: null,
                         "URA",
                         $"插件 {update.DisplayName} 有新版本可用: {update.CurrentVersion} -> {update.LatestVersion}",
-                        LiveDisplaySeverity.Info));
+                        UiSeverity.Info));
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
             catch (Exception ex)
             {
-                LiveDisplayConsole.LogException("URA", ex, LiveDisplaySeverity.Warning);
-                uiHost.Notify(new LiveDisplayNotification(
+                TerminalUi.LogException("URA", ex, UiSeverity.Warning);
+                uiHost.Notify(new UiNotification(
                     Workspace: null,
                     "URA",
                     $"插件更新检查失败: {ex.Message}",
-                    LiveDisplaySeverity.Warning,
-                    LiveDisplayNotification.ExpiresAtFromNow(LiveDisplaySeverity.Warning),
+                    UiSeverity.Warning,
+                    UiNotification.ExpiresAtFromNow(UiSeverity.Warning),
                     []));
             }
         }
@@ -586,7 +586,7 @@ namespace UmamusumeResponseAnalyzer
 
         static void ShowFirstLaunchPrompt(CancellationToken cancellationToken)
         {
-            var mobileOrPc = LiveDisplayConsole.Select(
+            var mobileOrPc = TerminalUi.Select(
                 "首次设置：请选择运行 UM:PD 的设备。推荐使用 Windows Terminal，并将启动大小设置为 120 列、35 行。",
                 new[] { "手机/模拟器以及此计算机", "此计算机" },
                 cancellationToken: cancellationToken);
@@ -601,7 +601,7 @@ namespace UmamusumeResponseAnalyzer
                 networkNotice = "URA 将仅接受本机请求；模拟器接入时需在「选项 → 核心」改为 0.0.0.0 并放行防火墙。";
             }
 
-            var targets = LiveDisplayConsole.MultiSelect(
+            var targets = TerminalUi.MultiSelect(
                 $"{networkNotice} 请选择所使用的 UM:PD 版本。",
                 new[] { "日服(Cygames)", "繁中服(Komoe)" },
                 cancellationToken: cancellationToken);
@@ -618,19 +618,19 @@ namespace UmamusumeResponseAnalyzer
                 }
             }
 
-            var dbLang = LiveDisplayConsole.Select(
+            var dbLang = TerminalUi.Select(
                 "请选择事件数据语言，选择繁中等将会使用对应客户端已实装的内容翻译。不会影响实际效果及数据库总大小。",
                 new[] { "日文", "繁中" },
                 cancellationToken: cancellationToken);
             Config.Updater.DatabaseLanguage = dbLang == "繁中" ? "zh-TW" : "ja-JP";
 
-            var trainerGender = LiveDisplayConsole.Select(
+            var trainerGender = TerminalUi.Select(
                 "请选择训练员性别，用于精确显示事件选项。",
                 new[] { "男", "女" },
                 cancellationToken: cancellationToken);
             Config.Updater.TrainerIsMale = trainerGender == "男";
 
-            LiveDisplayConsole.Acknowledge(
+            TerminalUi.Acknowledge(
                 "首次设置完成。启动前请更新数据文件，并从「插件仓库」安装所需插件。",
                 cancellationToken);
         }
@@ -652,7 +652,7 @@ namespace UmamusumeResponseAnalyzer
                 if (OperatingSystem.IsWindows())
                     selections.Add(I18N_InstallUraCore);
 
-                var selected = LiveDisplayConsole.Menu(
+                var selected = TerminalUi.Menu(
                     I18N_Instruction,
                     selections,
                     cancellationToken: cancellationToken);
@@ -681,13 +681,13 @@ namespace UmamusumeResponseAnalyzer
                     {
                         if (UraCoreHelper.GamePaths.Count == 0)
                         {
-                            LiveDisplayConsole.Acknowledge(
+                            TerminalUi.Acknowledge(
                                 "没有找到可安装 Mod 的游戏目录。",
                                 cancellationToken);
                             continue;
                         }
 
-                        var target = LiveDisplayConsole.Menu(
+                        var target = TerminalUi.Menu(
                             "请选择想要安装的 Mod",
                             new[] { "Hachimi", "umamusume-localify" },
                             cancellationToken: cancellationToken);
@@ -700,7 +700,7 @@ namespace UmamusumeResponseAnalyzer
                             FileName = "https://qm.qq.com/q/4z6xHQ908w",
                             UseShellExecute = true
                         });
-                        LiveDisplayConsole.Acknowledge(
+                        TerminalUi.Acknowledge(
                             "已打开 QQ 群链接：https://qm.qq.com/q/4z6xHQ908w",
                             cancellationToken);
                     }
@@ -718,7 +718,7 @@ namespace UmamusumeResponseAnalyzer
         {
             if (UraCoreHelper.GamePaths.Count == 0)
             {
-                LiveDisplayConsole.Acknowledge(
+                TerminalUi.Acknowledge(
                     "没有找到可安装 Mod 的游戏目录。",
                     cancellationToken);
                 return;
@@ -727,7 +727,7 @@ namespace UmamusumeResponseAnalyzer
             var results = new List<string>();
             foreach (var path in UraCoreHelper.GamePaths)
             {
-                var confirm = LiveDisplayConsole.Confirm(
+                var confirm = TerminalUi.Confirm(
                     $"是否将 {target} 安装到 {path}，并把注册表 " +
                     @"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\DevOverrideEnable " +
                     "设为 1？该操作需要管理员权限并会影响系统 DLL redirection。",
@@ -764,7 +764,7 @@ namespace UmamusumeResponseAnalyzer
                 results.Add(string.Format(I18N_UraCoreHelper_InstallSuccess, path));
             }
 
-            LiveDisplayConsole.Acknowledge(
+            TerminalUi.Acknowledge(
                 results.Count == 0 ? "未安装 Mod。" : string.Join(Environment.NewLine, results),
                 cancellationToken);
         }

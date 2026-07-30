@@ -1,4 +1,4 @@
-namespace UmamusumeResponseAnalyzer.LiveDisplay
+namespace UmamusumeResponseAnalyzer.TerminalGui
 {
     static class PopupCountdown
     {

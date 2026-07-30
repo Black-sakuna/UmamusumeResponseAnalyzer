@@ -1,10 +1,10 @@
-namespace UmamusumeResponseAnalyzer.LiveDisplay
+namespace UmamusumeResponseAnalyzer.TerminalGui
 {
     // 右上角 notification popup 的文本行构建 + 倒计时刷新节流。
     //
-    // 无可变 state 所有权——notifications/keyboardPopup 由 UiHost 持有，每次渲染时以参数传入。
-    // 仅 lastPopupCountdownSecond 是 renderer 自己的"上次刷新秒"追踪，避免每帧重画秒级倒计时。
-    internal sealed class NotificationPopupRenderer
+    // 无可变 state 所有权——notifications/hotkeyPopup 由 UiHost 持有，每次渲染时以参数传入。
+    // 仅 lastPopupCountdownSecond 是 formatter 自己的“上次刷新秒”追踪，避免每帧重建秒级倒计时文本。
+    internal sealed class NotificationPopupFormatter
     {
         const int MaxPopupNotifications = 4;
 
@@ -18,14 +18,14 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             return Math.Clamp(windowWidth / 3, 34, 46);
         }
 
-        // 是否需要因倒计时秒数变化而触发一次重绘。notifications/keyboardPopup 为只读参数。
+        // 是否需要因倒计时秒数变化而触发一次重绘。notifications/hotkeyPopup 为只读参数。
         public bool ShouldRefreshPopupCountdown(
-            IReadOnlyList<LiveDisplayNotification> notifications,
-            KeyboardPopup? keyboardPopup,
+            IReadOnlyList<UiNotification> notifications,
+            HotkeyPopup? hotkeyPopup,
             DateTimeOffset now)
         {
-            var hasKeyboardCountdown = keyboardPopup?.ExpiresAt > now;
-            if (notifications.Count == 0 && !hasKeyboardCountdown)
+            var hasHotkeyCountdown = hotkeyPopup?.ExpiresAt > now;
+            if (notifications.Count == 0 && !hasHotkeyCountdown)
             {
                 lastPopupCountdownSecond = -1;
                 return false;
@@ -41,11 +41,11 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
 
         // 构建 notification popup 的所有文本行。labelResolver 把 workspace 转成显示标签。
         public List<string> BuildLines(
-            IReadOnlyList<LiveDisplayNotification> activeNotifications,
+            IReadOnlyList<UiNotification> activeNotifications,
             int popupWidth,
             int maxHeight,
             DateTimeOffset now,
-            Func<LiveDisplayWorkspace, string> labelResolver)
+            Func<Workspace, string> labelResolver)
         {
             const int CompactHeight = 3;
             var lines = new List<string>();
@@ -75,10 +75,10 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         }
 
         static List<string> BuildCardLines(
-            LiveDisplayNotification notification,
+            UiNotification notification,
             int popupWidth,
             DateTimeOffset now,
-            Func<LiveDisplayWorkspace, string> labelResolver)
+            Func<Workspace, string> labelResolver)
         {
             var lines = new List<string>
             {
@@ -111,13 +111,13 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             return "│ " + CellText.FitToCellWidth(text, popupWidth - 4) + " │";
         }
 
-        static string SeverityText(LiveDisplaySeverity severity) => severity switch
+        static string SeverityText(UiSeverity severity) => severity switch
         {
-            LiveDisplaySeverity.Trace => "TRACE",
-            LiveDisplaySeverity.Info => "INFO ",
-            LiveDisplaySeverity.Success => "OK   ",
-            LiveDisplaySeverity.Warning => "WARN ",
-            LiveDisplaySeverity.Error => "ERR  ",
+            UiSeverity.Trace => "TRACE",
+            UiSeverity.Info => "INFO ",
+            UiSeverity.Success => "OK   ",
+            UiSeverity.Warning => "WARN ",
+            UiSeverity.Error => "ERR  ",
             _ => "INFO "
         };
     }

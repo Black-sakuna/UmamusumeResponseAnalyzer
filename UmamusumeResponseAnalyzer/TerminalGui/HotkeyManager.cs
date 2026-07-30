@@ -1,12 +1,11 @@
 using System.Collections.Concurrent;
 using Terminal.Gui.Drivers;
 using Terminal.Gui.Input;
-using UmamusumeResponseAnalyzer.LiveDisplay;
 using UmamusumeResponseAnalyzer.Plugin;
 
-namespace UmamusumeResponseAnalyzer
+namespace UmamusumeResponseAnalyzer.TerminalGui
 {
-    public static class KeyboardManager
+    public static class HotkeyManager
     {
         public sealed class HotkeyEntry(
             string description,
@@ -24,7 +23,7 @@ namespace UmamusumeResponseAnalyzer
         static readonly object notificationShortcutSync = new();
         static readonly Dictionary<long, NotificationShortcutRegistration> notificationShortcutRegistrations = [];
 
-        static KeyboardPopup? activePopup;
+        static HotkeyPopup? activePopup;
         static IReadOnlyList<TransientShortcutEntry> popupShortcuts = [];
         static CancellationTokenSource? popupAutoCloseCts;
         static int popupGeneration;
@@ -32,7 +31,7 @@ namespace UmamusumeResponseAnalyzer
         static readonly AsyncLocal<object?> registrationOwner = new();
 
         public static TimeSpan PopupAutoCloseDelay { get; set; } = TimeSpan.FromSeconds(3);
-        internal static IKeyboardOverlaySink? OverlaySink { get; set; }
+        internal static IUiInputSink? OverlaySink { get; set; }
         internal static bool HasPriorityPopup => HasActivePopup();
 
         public static void Register(
@@ -48,7 +47,7 @@ namespace UmamusumeResponseAnalyzer
             ConsoleKey key,
             ConsoleModifiers modifiers,
             string description,
-            Func<KeyboardHandlerContext, Task> handler)
+            Func<HotkeyContext, Task> handler)
         {
             RegisterCore(
                 key,
@@ -56,7 +55,7 @@ namespace UmamusumeResponseAnalyzer
                 description,
                 async () =>
                 {
-                    var context = new KeyboardHandlerContext();
+                    var context = new HotkeyContext();
                     await handler(context);
                     ShowPopup(context.ToPopup());
                 });
@@ -67,7 +66,7 @@ namespace UmamusumeResponseAnalyzer
             Register(key, 0, description, handler);
         }
 
-        public static void Register(ConsoleKey key, string description, Func<KeyboardHandlerContext, Task> handler)
+        public static void Register(ConsoleKey key, string description, Func<HotkeyContext, Task> handler)
         {
             Register(key, 0, description, handler);
         }
@@ -450,18 +449,18 @@ namespace UmamusumeResponseAnalyzer
                 return activePopup?.Selection?.LineIndexes.Count > 0;
         }
 
-        internal static void ShowPopup(KeyboardHandlerContext context)
+        internal static void ShowPopup(HotkeyContext context)
         {
             ShowPopup(context.ToPopup());
         }
 
-        internal static void ShowPopup(KeyboardPopup popup)
+        internal static void ShowPopup(HotkeyPopup popup)
         {
             if (popup.Lines.Count == 0)
                 return;
 
-            var overlaySink = OverlaySink ?? throw new InvalidOperationException("Keyboard popup 需要先绑定 LiveDisplay overlay sink。");
-            KeyboardPopup shownPopup;
+            var overlaySink = OverlaySink ?? throw new InvalidOperationException("Hotkey popup 需要先绑定 UI input sink。");
+            HotkeyPopup shownPopup;
             int generation;
             var shortcuts = CreateTransientShortcutEntries(popup.Shortcuts ?? []);
             lock (popupSync)
@@ -486,7 +485,7 @@ namespace UmamusumeResponseAnalyzer
 
         static void HidePopup(int? generation)
         {
-            IKeyboardOverlaySink? overlaySink;
+            IUiInputSink? overlaySink;
             int hiddenGeneration;
             lock (popupSync)
             {
@@ -523,7 +522,7 @@ namespace UmamusumeResponseAnalyzer
 
         static void SetPopupScroll(int scrollOffset)
         {
-            KeyboardPopup popup;
+            HotkeyPopup popup;
             int generation;
             lock (popupSync)
             {
@@ -541,7 +540,7 @@ namespace UmamusumeResponseAnalyzer
 
         static void MovePopupSelection(int delta)
         {
-            KeyboardPopupSelection? selection;
+            HotkeyPopupSelection? selection;
             lock (popupSync)
                 selection = activePopup?.Selection;
 
@@ -553,7 +552,7 @@ namespace UmamusumeResponseAnalyzer
 
         static void SetPopupSelection(int selectedIndex)
         {
-            KeyboardPopup popup;
+            HotkeyPopup popup;
             int generation;
             lock (popupSync)
             {
@@ -587,7 +586,7 @@ namespace UmamusumeResponseAnalyzer
 
         static async Task ConfirmPopupSelectionAsync()
         {
-            KeyboardPopupSelection? selection;
+            HotkeyPopupSelection? selection;
             int selectedLineIndex;
             lock (popupSync)
             {
@@ -602,7 +601,7 @@ namespace UmamusumeResponseAnalyzer
             await InvokeSafely(() => selection.ConfirmAsync(selectedLineIndex));
         }
 
-        static KeyboardPopup NormalizePopupForDisplay(KeyboardPopup popup, int scrollOffset, bool refreshExpiresAt)
+        static HotkeyPopup NormalizePopupForDisplay(HotkeyPopup popup, int scrollOffset, bool refreshExpiresAt)
         {
             var selection = popup.Selection?.LineIndexes.Count > 0 ? popup.Selection.Normalize() : null;
             var visibleCount = Math.Min(popup.Lines.Count, EstimateVisiblePopupLines());
@@ -690,9 +689,9 @@ namespace UmamusumeResponseAnalyzer
         }
 
         internal static long RegisterNotificationShortcuts(
-            LiveDisplayWorkspace? workspace,
+            Workspace? workspace,
             DateTimeOffset expiresAt,
-            IReadOnlyList<LiveDisplayShortcut> shortcuts)
+            IReadOnlyList<UiShortcut> shortcuts)
         {
             ArgumentNullException.ThrowIfNull(shortcuts);
             if (shortcuts.Count == 0)
@@ -717,7 +716,7 @@ namespace UmamusumeResponseAnalyzer
                 notificationShortcutRegistrations.Remove(registrationId);
         }
 
-        internal static void RemoveNotificationShortcuts(LiveDisplayWorkspace workspace)
+        internal static void RemoveNotificationShortcuts(Workspace workspace)
         {
             lock (notificationShortcutSync)
             {
@@ -731,7 +730,7 @@ namespace UmamusumeResponseAnalyzer
             }
         }
 
-        static TransientShortcutEntry[] CreateTransientShortcutEntries(IReadOnlyList<LiveDisplayShortcut> shortcuts)
+        static TransientShortcutEntry[] CreateTransientShortcutEntries(IReadOnlyList<UiShortcut> shortcuts)
         {
             var owner = registrationOwner.Value;
             var entries = new TransientShortcutEntry[shortcuts.Count];
@@ -806,8 +805,8 @@ namespace UmamusumeResponseAnalyzer
             }
             catch (Exception ex)
             {
-                LiveDisplayConsole.Notify("Keyboard", $"热键处理失败: {ex.Message}", LiveDisplaySeverity.Error);
-                LiveDisplayConsole.LogException("Keyboard", ex);
+                TerminalUi.Notify("Keyboard", $"热键处理失败: {ex.Message}", UiSeverity.Error);
+                TerminalUi.LogException("Keyboard", ex);
             }
         }
 
@@ -839,7 +838,7 @@ namespace UmamusumeResponseAnalyzer
 
         sealed record NotificationShortcutRegistration(
             long Id,
-            LiveDisplayWorkspace? Workspace,
+            Workspace? Workspace,
             DateTimeOffset ExpiresAt,
             IReadOnlyList<TransientShortcutEntry> Shortcuts);
     }

@@ -1,6 +1,7 @@
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using UmamusumeResponseAnalyzer.Plugin;
+using UmamusumeResponseAnalyzer.TerminalGui;
 using Xunit;
 
 namespace UmamusumeResponseAnalyzer.Tests;
@@ -18,7 +19,7 @@ public sealed class PluginDispatchReloadTests : IDisposable
     {
         SeedConfig();
         ResetPluginState();
-        KeyboardManager.UnregisterAll();
+        HotkeyManager.UnregisterAll();
 
         Directory.CreateDirectory(Path.Combine(tempDir, "Plugins"));
         Directory.SetCurrentDirectory(tempDir);
@@ -28,8 +29,8 @@ public sealed class PluginDispatchReloadTests : IDisposable
     public void Dispose()
     {
         ResetPluginState();
-        KeyboardManager.UnregisterAll();
-        KeyboardManager.OverlaySink = null;
+        HotkeyManager.UnregisterAll();
+        HotkeyManager.OverlaySink = null;
         Directory.SetCurrentDirectory(originalCwd);
         try { Directory.Delete(tempDir, recursive: true); }
         catch { }
@@ -165,7 +166,7 @@ public sealed class PluginDispatchReloadTests : IDisposable
         PluginManager.AssemblyMap.Clear();
         PluginManager.Assemblies.Clear();
         foreach (var plugin in PluginManager.LoadedPlugins.ToList())
-            KeyboardManager.UnregisterByOwner(plugin);
+            HotkeyManager.UnregisterByOwner(plugin);
         PluginManager.LoadedPlugins.Clear();
     }
 }

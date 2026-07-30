@@ -5,7 +5,7 @@ using System.Globalization;
 using System.Net;
 using System.Reflection;
 using System.Security.Cryptography;
-using UmamusumeResponseAnalyzer.LiveDisplay;
+using UmamusumeResponseAnalyzer.TerminalGui;
 using UmamusumeResponseAnalyzer.Plugin;
 using static UmamusumeResponseAnalyzer.Localization.ResourceUpdater;
 
@@ -32,12 +32,12 @@ namespace UmamusumeResponseAnalyzer
         {
             if (!await NeedUpdate(cancellationToken))
             {
-                LiveDisplayConsole.Acknowledge(I18N_AlreadyLatestInstruction, cancellationToken);
+                TerminalUi.Acknowledge(I18N_AlreadyLatestInstruction, cancellationToken);
                 return;
             }
 
             var path = Path.Combine(Path.GetTempPath(), "latest-UmamusumeResponseAnalyzer.exe");
-            await LiveDisplayConsole.RunProgressAsync(
+            await TerminalUi.RunProgressAsync(
                 (progress, token) => Download(
                     progress,
                     I18N_DownloadProgramInstruction,
@@ -45,7 +45,7 @@ namespace UmamusumeResponseAnalyzer
                     token),
                 cancellationToken);
 
-            if (!LiveDisplayConsole.Acknowledge(
+            if (!TerminalUi.Acknowledge(
                     I18N_BeginUpdateProgramInstruction,
                     cancellationToken))
                 return;
@@ -78,7 +78,7 @@ namespace UmamusumeResponseAnalyzer
                 }
                 if (string.IsNullOrEmpty(output))
                 {
-                LiveDisplayConsole.WriteLine(I18N_UpdatedFileCorrupted);
+                    TerminalUi.Log("URA", I18N_UpdatedFileCorrupted);
                     File.Delete(Path.Combine(Path.GetTempPath(), "latest-UmamusumeResponseAnalyzer.exe"));
                     return;
                 }
@@ -132,7 +132,7 @@ namespace UmamusumeResponseAnalyzer
         }
         public static async Task UpdateAssets(CancellationToken cancellationToken = default)
         {
-            await LiveDisplayConsole.RunProgressAsync((progress, token) => Task.WhenAll(
+            await TerminalUi.RunProgressAsync((progress, token) => Task.WhenAll(
                 [
                     Download(progress, I18N_DownloadEventsInstruction, Database.EVENT_NAME_FILEPATH, token),
                     Download(progress, I18N_DownloadNamesInstruction, Database.NAMES_FILEPATH, token),
@@ -145,7 +145,7 @@ namespace UmamusumeResponseAnalyzer
                 ]),
                 cancellationToken);
 
-            LiveDisplayConsole.Acknowledge(I18N_DownloadedInstruction, cancellationToken);
+            TerminalUi.Acknowledge(I18N_DownloadedInstruction, cancellationToken);
         }
         static string GetDownloadUrl(string filepath)
         {
@@ -214,12 +214,12 @@ namespace UmamusumeResponseAnalyzer
             }
             catch (Exception) when (new Uri(downloadURL).Host == "raw.githubusercontent.com")
             {
-                LiveDisplayConsole.WriteLine(I18N_AccessGithubFail, downloadURL);
+                TerminalUi.Log("URA", string.Format(I18N_AccessGithubFail, downloadURL));
                 throw;
             }
             catch
             {
-                LiveDisplayConsole.WriteLine(I18N_AccessMirrorFail, downloadURL);
+                TerminalUi.Log("URA", string.Format(I18N_AccessMirrorFail, downloadURL));
                 throw;
             }
             finally

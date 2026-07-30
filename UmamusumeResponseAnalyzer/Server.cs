@@ -3,7 +3,7 @@ using Gallop.Endpoints;
 using Newtonsoft.Json.Linq;
 using System.Reflection;
 using System.Runtime.ExceptionServices;
-using UmamusumeResponseAnalyzer.LiveDisplay;
+using UmamusumeResponseAnalyzer.TerminalGui;
 using UmamusumeResponseAnalyzer.Plugin;
 using WatsonWebserver.Core;
 using WatsonWebserver.Lite;
@@ -183,7 +183,7 @@ namespace UmamusumeResponseAnalyzer
                 requests.Wrap(async (ctx, cancellationToken) =>
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    LiveDisplayConsole.Log("Server", I18N_PingReceived, LiveDisplaySeverity.Trace);
+                    TerminalUi.Log("Server", I18N_PingReceived, UiSeverity.Trace);
                     await ctx.Response.Send("pong");
                 }));
             WebInstallApi.Register(Instance, requests);
@@ -375,7 +375,7 @@ namespace UmamusumeResponseAnalyzer
                         }
                         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                         {
-                            LiveDisplayConsole.Log("Server", $"debug packet 旧文件清理失败，已跳过 {Path.GetFileName(i)}: {ex.Message}", LiveDisplaySeverity.Warning);
+                            TerminalUi.Log("Server", $"debug packet 旧文件清理失败，已跳过 {Path.GetFileName(i)}: {ex.Message}", UiSeverity.Warning);
                         }
                     }
                 }
@@ -412,16 +412,16 @@ namespace UmamusumeResponseAnalyzer
             {
                 var root = e is TargetInvocationException { InnerException: { } inner } ? inner : e;
                 var label = kind == AnalyzerKind.Request ? "请求" : "响应";
-                LiveDisplayConsole.Notify("Plugin", $"{label}分析插件处理失败: {root.Message}", LiveDisplaySeverity.Error);
-                LiveDisplayConsole.LogException(registration.Method?.DeclaringType?.Name ?? registration.Source, root);
+                TerminalUi.Notify("Plugin", $"{label}分析插件处理失败: {root.Message}", UiSeverity.Error);
+                TerminalUi.LogException(registration.Method?.DeclaringType?.Name ?? registration.Source, root);
             }
         }
 
         static void ReportDispatchError(AnalyzerKind kind, Exception ex)
         {
             var label = kind == AnalyzerKind.Request ? "请求分析失败" : I18N_ResponseAnalyzeFail;
-            LiveDisplayConsole.Notify("Server", $"{label}: {ex.Message}", LiveDisplaySeverity.Error);
-            LiveDisplayConsole.LogException("Server", ex);
+            TerminalUi.Notify("Server", $"{label}: {ex.Message}", UiSeverity.Error);
+            TerminalUi.LogException("Server", ex);
         }
     }
 

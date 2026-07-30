@@ -5,9 +5,9 @@ using Terminal.Gui.Drawing;
 using Terminal.Gui.ViewBase;
 using Terminal.Gui.Views;
 
-namespace UmamusumeResponseAnalyzer.LiveDisplay;
+namespace UmamusumeResponseAnalyzer.TerminalGui;
 
-static class TerminalGuiDialogs
+static class ModalDialogs
 {
     const int PromptHeight = 3;
     static readonly object ownerGate = new();

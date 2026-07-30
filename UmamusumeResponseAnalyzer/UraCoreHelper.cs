@@ -1,5 +1,5 @@
 ﻿using Microsoft.Win32;
-using UmamusumeResponseAnalyzer.LiveDisplay;
+using UmamusumeResponseAnalyzer.TerminalGui;
 
 namespace UmamusumeResponseAnalyzer
 {

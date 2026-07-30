@@ -2,7 +2,7 @@ using Newtonsoft.Json;
 using System.Globalization;
 using System.Net;
 using System.Reflection;
-using UmamusumeResponseAnalyzer.LiveDisplay;
+using UmamusumeResponseAnalyzer.TerminalGui;
 using UmamusumeResponseAnalyzer.Plugin;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
@@ -68,7 +68,7 @@ namespace UmamusumeResponseAnalyzer
             {
                 while (true)
                 {
-                    var selected = LiveDisplayConsole.Menu(
+                    var selected = TerminalUi.Menu(
                         i18n.Settings_Title,
                         new[]
                         {
@@ -134,7 +134,7 @@ namespace UmamusumeResponseAnalyzer
                 var addressItem = $"{i18n.Tabs_Core_ListenAddress}: {ListenAddress}";
                 var portItem = $"{i18n.Tabs_Core_ListenPort}: {ListenPort}";
                 var firstRunItem = $"{firstRunTitle}: {ShowFirstRunPrompt}";
-                var selected = LiveDisplayConsole.Menu(
+                var selected = TerminalUi.Menu(
                     i18n.Tabs_Core_Title,
                     new[] { addressItem, portItem, firstRunItem, i18n.Return },
                     cancellationToken: cancellationToken);
@@ -145,7 +145,7 @@ namespace UmamusumeResponseAnalyzer
                 {
                     while (true)
                     {
-                        var address = LiveDisplayConsole.Ask(
+                        var address = TerminalUi.Ask(
                             i18n.Tabs_Core_ListenAddressPrompt,
                             ListenAddress,
                             cancellationToken: cancellationToken);
@@ -159,7 +159,7 @@ namespace UmamusumeResponseAnalyzer
                 {
                     while (true)
                     {
-                        var port = LiveDisplayConsole.Ask(
+                        var port = TerminalUi.Ask(
                             i18n.Tabs_Core_ListenPortPrompt,
                             ListenPort.ToString(),
                             cancellationToken: cancellationToken);
@@ -187,14 +187,14 @@ namespace UmamusumeResponseAnalyzer
             while (true)
             {
                 var targetsItem = $"{i18n.Tabs_Repository_Targets}: {string.Join(',', Targets)}";
-                var selected = LiveDisplayConsole.Menu(
+                var selected = TerminalUi.Menu(
                     i18n.Tabs_Repository_Title,
                     new[] { targetsItem, i18n.Return },
                     cancellationToken: cancellationToken);
                 if (selected == i18n.Return)
                     return;
 
-                var input = LiveDisplayConsole.Ask(
+                var input = TerminalUi.Ask(
                     i18n.Tabs_Repository_TargetsPrompt,
                     string.Join(',', Targets),
                     allowEmpty: true,
@@ -218,7 +218,7 @@ namespace UmamusumeResponseAnalyzer
                 .ToArray();
             while (true)
             {
-                var selected = LiveDisplayConsole.Menu(
+                var selected = TerminalUi.Menu(
                     i18n.Tabs_Plugin_Title,
                     choices,
                     x => x.Label,
@@ -277,7 +277,7 @@ namespace UmamusumeResponseAnalyzer
                     $"{Label(nameof(CustomDatabaseRepository))}: {CustomDatabaseRepository}";
                 var forceGithubItem =
                     $"{i18n.Tabs_Updater_ForceUseGithubToUpdate}: {ForceUseGithubToUpdate}";
-                var selected = LiveDisplayConsole.Menu(
+                var selected = TerminalUi.Menu(
                     i18n.Tabs_Updater_Title,
                     new[]
                     {
@@ -297,7 +297,7 @@ namespace UmamusumeResponseAnalyzer
                 }
                 else if (selected == languageItem)
                 {
-                    DatabaseLanguage = LiveDisplayConsole.Menu(
+                    DatabaseLanguage = TerminalUi.Menu(
                         nameof(DatabaseLanguage),
                         new[] { "ja-JP", "zh-TW", "zh-CN" },
                         cancellationToken: cancellationToken);
@@ -306,7 +306,7 @@ namespace UmamusumeResponseAnalyzer
                 {
                     while (true)
                     {
-                        var url = LiveDisplayConsole.Ask(
+                        var url = TerminalUi.Ask(
                             i18n.Tabs_Updater_CustomDatabaseRepositoryPrompt,
                             CustomDatabaseRepository,
                             allowEmpty: true,
@@ -339,7 +339,7 @@ namespace UmamusumeResponseAnalyzer
                             $"Tabs_Language_{language}",
                             i18n.Culture)
                         ?? language.ToString());
-            var selected = LiveDisplayConsole.Menu(
+            var selected = TerminalUi.Menu(
                 i18n.Tabs_Language_Title,
                 choices.Keys,
                 cancellationToken: cancellationToken);
@@ -391,7 +391,7 @@ namespace UmamusumeResponseAnalyzer
             var selected = _properties
                 .Where(x => (bool)x.GetValue(this)!)
                 .Select(x => translated[x.Name]);
-            var l3 = LiveDisplayConsole.MultiSelect(
+            var l3 = TerminalUi.MultiSelect(
                 i18n.Tabs_Debug_Title,
                 translated.Values,
                 selected,

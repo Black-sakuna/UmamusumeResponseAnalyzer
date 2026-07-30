@@ -6,9 +6,9 @@ using Terminal.Gui.ViewBase;
 using Terminal.Gui.Views;
 using UmamusumeResponseAnalyzer.Plugin;
 
-namespace UmamusumeResponseAnalyzer.LiveDisplay
+namespace UmamusumeResponseAnalyzer.TerminalGui
 {
-    internal sealed class UiHost : IKeyboardOverlaySink
+    internal sealed class UiHost : IUiInputSink
     {
         const int MaxLogLines = 300;
         const int RunStateRunning = 1;
@@ -28,29 +28,29 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         readonly Action<IReadOnlyList<string>> saveWorkspaceTaskbarOrder;
         readonly Channel<UiEvent> events = CreateUiChannel<UiEvent>();
         readonly TaskCompletionSource ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        readonly NotificationPopupRenderer popupRenderer = new();
+        readonly NotificationPopupFormatter popupFormatter = new();
 
-        readonly Dictionary<LiveDisplayWorkspace, WorkspaceState> workspaces = [];
-        readonly Dictionary<(LiveDisplayWorkspace Workspace, string PluginId, string Key), LiveDisplayPanel> panels = [];
+        readonly Dictionary<Workspace, WorkspaceState> workspaces = [];
+        readonly Dictionary<(Workspace Workspace, string PluginId, string Key), WorkspacePanel> panels = [];
         readonly object workspaceIdentityGate = new();
-        readonly Dictionary<string, LiveDisplayWorkspace> workspaceRegistrations = new(StringComparer.OrdinalIgnoreCase);
-        readonly Dictionary<LiveDisplayWorkspace, LiveDisplayWorkspace> workspaceAliases =
+        readonly Dictionary<string, Workspace> workspaceRegistrations = new(StringComparer.OrdinalIgnoreCase);
+        readonly Dictionary<Workspace, Workspace> workspaceAliases =
             new(ReferenceEqualityComparer.Instance);
         readonly object removedWorkspaceGate = new();
-        readonly HashSet<LiveDisplayWorkspace> removedWorkspaces = new(ReferenceEqualityComparer.Instance);
-        readonly List<LiveDisplayLogLine> globalLogs = [];
-        readonly Dictionary<LiveDisplayWorkspace, List<LiveDisplayLogLine>> workspaceLogs =
+        readonly HashSet<Workspace> removedWorkspaces = new(ReferenceEqualityComparer.Instance);
+        readonly List<UiLogLine> globalLogs = [];
+        readonly Dictionary<Workspace, List<UiLogLine>> workspaceLogs =
             new(ReferenceEqualityComparer.Instance);
-        readonly List<LiveDisplayNotification> notifications = [];
-        readonly Dictionary<(LiveDisplayWorkspace Workspace, string PluginId, string Key), CachedPanelView> panelViews = [];
+        readonly List<UiNotification> notifications = [];
+        readonly Dictionary<(Workspace Workspace, string PluginId, string Key), CachedPanelView> panelViews = [];
         readonly object inputTasksGate = new();
         readonly HashSet<Task> inputTasks = [];
 
-        LiveDisplayWorkspace? currentWorkspace;
-        LiveDisplayWorkspace? activeWorkspace;
+        Workspace? currentWorkspace;
+        Workspace? activeWorkspace;
         string[] workspaceCompletionTitles = [];
-        KeyboardPopup? keyboardPopup;
-        int keyboardPopupGeneration;
+        HotkeyPopup? hotkeyPopup;
+        int hotkeyPopupGeneration;
         int lastViewportWidth;
         int lastViewportHeight;
         int lastViewportMaxScroll;
@@ -62,7 +62,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         View? workspaceLayer;
         WorkspaceTaskbarView? workspaceTaskbarLayer;
         Label? notificationLayer;
-        Label? keyboardLayer;
+        Label? hotkeyLayer;
         CommandModeView? commandMode;
         WorkspaceLayoutBuilder.WorkspaceSurface? workspaceSurface;
         object? popupTimer;
@@ -79,12 +79,12 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             this.saveWorkspaceTaskbarOrder = saveWorkspaceTaskbarOrder;
         }
 
-        internal event Action<LiveDisplayLogLine>? LogAdded;
+        internal event Action<UiLogLine>? LogAdded;
 
-        public ILiveDisplayOutput ForPlugin(string pluginId) => new PluginLiveDisplayOutput(pluginId, this);
-        public LiveDisplayWorkspace? CurrentWorkspace => Volatile.Read(ref currentWorkspace);
+        public IWorkspaceOutput ForPlugin(string pluginId) => new PluginWorkspaceOutput(pluginId, this);
+        public Workspace? CurrentWorkspace => Volatile.Read(ref currentWorkspace);
         internal Task Ready => ready.Task;
-        internal IReadOnlyList<LiveDisplayLogLine> GetLogsForTests(LiveDisplayWorkspace? workspace)
+        internal IReadOnlyList<UiLogLine> GetLogsForTests(Workspace? workspace)
         {
             var source = workspace is null
                 ? globalLogs
@@ -92,27 +92,27 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             return source.ToArray();
         }
 
-        internal IReadOnlyList<LiveDisplayNotification> GetNotificationsForTests(LiveDisplayWorkspace? workspace)
+        internal IReadOnlyList<UiNotification> GetNotificationsForTests(Workspace? workspace)
         {
             return notifications
                 .Where(x => ReferenceEquals(x.Workspace, workspace))
                 .ToArray();
         }
 
-        internal KeyboardPopup? GetKeyboardPopupForTests()
+        internal HotkeyPopup? GetHotkeyPopupForTests()
         {
             DrainEvents();
-            return keyboardPopup;
+            return hotkeyPopup;
         }
 
         internal bool ShouldRefreshPopupCountdownForTests(DateTimeOffset now)
         {
-            return popupRenderer.ShouldRefreshPopupCountdown(VisibleNotifications(), keyboardPopup, now);
+            return popupFormatter.ShouldRefreshPopupCountdown(VisibleNotifications(), hotkeyPopup, now);
         }
 
-        public LiveDisplayWorkspace CreateWorkspace(string title)
+        public Workspace CreateWorkspace(string title)
         {
-            var workspace = LiveDisplayWorkspace.Create(title);
+            var workspace = Workspace.Create(title);
             lock (workspaceIdentityGate)
             {
                 if (workspaceRegistrations.TryGetValue(workspace.Title, out var existing))
@@ -127,7 +127,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             return workspace;
         }
 
-        public void RegisterWorkspace(LiveDisplayWorkspace workspace)
+        public void RegisterWorkspace(Workspace workspace)
         {
             ArgumentNullException.ThrowIfNull(workspace);
             workspace = CanonicalizeWorkspace(workspace) ?? workspace;
@@ -138,7 +138,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             Post(new UiEvent.RegisterWorkspace(workspace));
         }
 
-        public void RemoveWorkspace(LiveDisplayWorkspace workspace)
+        public void RemoveWorkspace(Workspace workspace)
         {
             ArgumentNullException.ThrowIfNull(workspace);
             workspace = CanonicalizeWorkspace(workspace, createIfMissing: false) ?? workspace;
@@ -146,17 +146,17 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 return;
 
             Post(new UiEvent.RemoveWorkspace(workspace, replacement));
-            KeyboardManager.RemoveNotificationShortcuts(workspace);
+            HotkeyManager.RemoveNotificationShortcuts(workspace);
         }
 
-        public void SetPanel(LiveDisplayPanel panel, bool switchToWorkspace = true)
+        public void SetPanel(WorkspacePanel panel, bool switchToWorkspace = true)
         {
             var workspace = CanonicalizeWorkspace(panel.Workspace);
             if (workspace is not null)
                 Post(new UiEvent.SetPanel(panel with { Workspace = workspace }, switchToWorkspace));
         }
 
-        public void Log(LiveDisplayLogLine line)
+        public void Log(UiLogLine line)
         {
             if (line.Workspace is null)
             {
@@ -169,7 +169,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 Post(new UiEvent.Log(line with { Workspace = workspace }));
         }
 
-        public void Notify(LiveDisplayNotification notification)
+        public void Notify(UiNotification notification)
         {
             if (notification.Workspace is not null)
             {
@@ -179,13 +179,13 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 notification = notification with { Workspace = workspace };
             }
 
-            var registrationId = KeyboardManager.RegisterNotificationShortcuts(
+            var registrationId = HotkeyManager.RegisterNotificationShortcuts(
                 notification.Workspace,
                 notification.ExpiresAt,
                 notification.Shortcuts);
             if (notification.Workspace is not null && IsRemovedWorkspace(notification.Workspace))
             {
-                KeyboardManager.UnregisterNotificationShortcuts(registrationId);
+                HotkeyManager.UnregisterNotificationShortcuts(registrationId);
                 return;
             }
 
@@ -195,10 +195,10 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 ShortcutRegistrationId = registrationId
             })))
             {
-                KeyboardManager.UnregisterNotificationShortcuts(registrationId);
+                HotkeyManager.UnregisterNotificationShortcuts(registrationId);
             }
         }
-        public void SwitchWorkspace(LiveDisplayWorkspace workspace)
+        public void SwitchWorkspace(Workspace workspace)
         {
             ArgumentNullException.ThrowIfNull(workspace);
             workspace = CanonicalizeWorkspace(workspace) ?? workspace;
@@ -209,7 +209,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             Post(new UiEvent.SwitchWorkspace(workspace));
         }
         public void BindWorkspaceHotkey(
-            LiveDisplayWorkspace workspace,
+            Workspace workspace,
             ConsoleKey key,
             ConsoleModifiers modifiers = 0,
             string? description = null)
@@ -219,8 +219,8 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             if (IsRemovedWorkspace(workspace))
                 return;
 
-            var shortcutText = KeyboardManager.FormatKeyCombo(key, modifiers);
-            var entry = KeyboardManager.RegisterTracked(
+            var shortcutText = HotkeyManager.FormatKeyCombo(key, modifiers);
+            var entry = HotkeyManager.RegisterTracked(
                 key,
                 modifiers,
                 description ?? $"切换到 {workspace.Title}",
@@ -248,7 +248,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             }
             catch (Exception ex)
             {
-                LiveDisplayConsole.LogException("Command", ex);
+                TerminalUi.LogException("Command", ex);
             }
         }
 
@@ -273,10 +273,10 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             };
         }
 
-        void IKeyboardOverlaySink.ShowPopup(KeyboardPopup popup, int generation) => Post(new UiEvent.ShowPopup(popup, generation));
-        void IKeyboardOverlaySink.HidePopup(int generation) => Post(new UiEvent.HidePopup(generation));
-        int IKeyboardOverlaySink.PopupVisibleLineCount => Volatile.Read(ref popupVisibleLineCount);
-        Task<bool> IKeyboardOverlaySink.TryHandleWorkspaceCommandAsync(Command command)
+        void IUiInputSink.ShowPopup(HotkeyPopup popup, int generation) => Post(new UiEvent.ShowPopup(popup, generation));
+        void IUiInputSink.HidePopup(int generation) => Post(new UiEvent.HidePopup(generation));
+        int IUiInputSink.PopupVisibleLineCount => Volatile.Read(ref popupVisibleLineCount);
+        Task<bool> IUiInputSink.TryHandleWorkspaceCommandAsync(Command command)
         {
             if (command is not (
                 Command.Up or Command.Down or Command.PageUp or Command.PageDown or
@@ -320,7 +320,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             };
             workspaceLayer = CreateLayer(transparent: false, canFocus: true);
             notificationLayer = CreateOverlayLabel();
-            keyboardLayer = CreateOverlayLabel();
+            hotkeyLayer = CreateOverlayLabel();
             commandMode = new(
                 command => TrackInputTask(HandleCommandAsync(command)),
                 CompleteCommand);
@@ -330,7 +330,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 loadWorkspaceTaskbarOrder(),
                 SaveWorkspaceTaskbarOrder);
             workspaceLayer.Add(workspaceTaskbarLayer.BottomEdgeTrigger);
-            window.Add(workspaceLayer, workspaceTaskbarLayer, notificationLayer, keyboardLayer, commandMode);
+            window.Add(workspaceLayer, workspaceTaskbarLayer, notificationLayer, hotkeyLayer, commandMode);
             window.Initialized += WindowInitialized;
             window.ViewportChanged += WindowViewportChanged;
             window.KeyDownNotHandled += WindowKeyDownNotHandled;
@@ -370,7 +370,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                     if (!completion.IsCompleted)
                     {
                         _ = completion.ContinueWith(
-                            task => LiveDisplayConsole.WriteException(task.Exception!),
+                            task => TerminalUi.LogException("URA", task.Exception!),
                             CancellationToken.None,
                             TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
                             TaskScheduler.Default);
@@ -382,7 +382,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 workspaceLayer = null;
                 workspaceTaskbarLayer = null;
                 notificationLayer = null;
-                keyboardLayer = null;
+                hotkeyLayer = null;
                 commandMode = null;
                 workspaceSurface = null;
             }
@@ -439,7 +439,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             }
             catch (Exception ex)
             {
-                LiveDisplayConsole.WriteException(ex);
+                TerminalUi.LogException("URA", ex);
             }
         }
 
@@ -452,7 +452,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
 
             if (window is null ||
                 !ReferenceEquals(application.TopRunnableView, window) ||
-                !KeyboardManager.HasPriorityPopup)
+                !HotkeyManager.HasPriorityPopup)
             {
                 return;
             }
@@ -555,11 +555,11 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         {
             try
             {
-                return await KeyboardManager.HandleKeyAsync(key);
+                return await HotkeyManager.HandleKeyAsync(key);
             }
             catch (Exception ex)
             {
-                LiveDisplayConsole.WriteException(ex);
+                TerminalUi.LogException("URA", ex);
                 return true;
             }
         }
@@ -571,11 +571,11 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         {
             try
             {
-                await KeyboardManager.HandleMouseWheelAsync(delta, hasModifiers, horizontal);
+                await HotkeyManager.HandleMouseWheelAsync(delta, hasModifiers, horizontal);
             }
             catch (Exception ex)
             {
-                LiveDisplayConsole.WriteException(ex);
+                TerminalUi.LogException("URA", ex);
             }
         }
 
@@ -593,7 +593,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 RebuildWorkspaceLayer();
             }
             if (RemoveExpiredNotifications(now) ||
-                popupRenderer.ShouldRefreshPopupCountdown(VisibleNotifications(), keyboardPopup, now))
+                popupFormatter.ShouldRefreshPopupCountdown(VisibleNotifications(), hotkeyPopup, now))
             {
                 RefreshOverlayLayers();
             }
@@ -673,13 +673,13 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         void ReleasePendingUiEvents()
         {
             foreach (var notification in notifications)
-                KeyboardManager.UnregisterNotificationShortcuts(notification.ShortcutRegistrationId);
+                HotkeyManager.UnregisterNotificationShortcuts(notification.ShortcutRegistrationId);
             while (events.Reader.TryRead(out var uiEvent))
             {
                 switch (uiEvent)
                 {
                     case UiEvent.Notify notify:
-                        KeyboardManager.UnregisterNotificationShortcuts(notify.Notification.ShortcutRegistrationId);
+                        HotkeyManager.UnregisterNotificationShortcuts(notify.Notification.ShortcutRegistrationId);
                         break;
                     case UiEvent.NavigateWorkspace navigation:
                         navigation.Completion.TrySetResult(false);
@@ -774,7 +774,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 case UiEvent.Notify notify:
                     if (notify.Notification.Workspace is not null && IsRemovedWorkspace(notify.Notification.Workspace))
                     {
-                        KeyboardManager.UnregisterNotificationShortcuts(notify.Notification.ShortcutRegistrationId);
+                        HotkeyManager.UnregisterNotificationShortcuts(notify.Notification.ShortcutRegistrationId);
                         break;
                     }
 
@@ -797,17 +797,17 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                     TrackInputTask(HandleCommandAsync(runCommand.Command));
                     break;
                 case UiEvent.ShowPopup showPopup:
-                    if (showPopup.Generation >= keyboardPopupGeneration)
+                    if (showPopup.Generation >= hotkeyPopupGeneration)
                     {
-                        keyboardPopup = showPopup.Popup;
-                        keyboardPopupGeneration = showPopup.Generation;
+                        hotkeyPopup = showPopup.Popup;
+                        hotkeyPopupGeneration = showPopup.Generation;
                     }
                     break;
                 case UiEvent.HidePopup hidePopup:
-                    if (hidePopup.Generation >= keyboardPopupGeneration)
+                    if (hidePopup.Generation >= hotkeyPopupGeneration)
                     {
-                        keyboardPopup = null;
-                        keyboardPopupGeneration = hidePopup.Generation;
+                        hotkeyPopup = null;
+                        hotkeyPopupGeneration = hidePopup.Generation;
                     }
                     break;
                 case UiEvent.Shutdown:
@@ -848,7 +848,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 width,
                 height,
                 state?.ScrollOffset ?? 0,
-                GetLivePanelView);
+                GetPanelView);
             workspaceLayer.Add(workspaceSurface.View);
             lastViewportWidth = width;
             lastViewportHeight = height;
@@ -902,7 +902,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         {
             if (window is null ||
                 notificationLayer is null ||
-                keyboardLayer is null)
+                hotkeyLayer is null)
             {
                 return;
             }
@@ -913,16 +913,16 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 return;
 
             ResetOverlay(notificationLayer);
-            ResetOverlay(keyboardLayer);
+            ResetOverlay(hotkeyLayer);
 
-            var popupWidth = NotificationPopupRenderer.GetPopupWidth(width);
+            var popupWidth = NotificationPopupFormatter.GetPopupWidth(width);
             var now = DateTimeOffset.Now;
             if (popupWidth > 0)
             {
                 var activeNotifications = VisibleNotifications();
                 if (activeNotifications.Count > 0)
                 {
-                    var lines = popupRenderer.BuildLines(
+                    var lines = popupFormatter.BuildLines(
                         activeNotifications,
                         popupWidth,
                         Math.Max(0, height - 1),
@@ -937,26 +937,26 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 }
             }
 
-            if (keyboardPopup is not null)
+            if (hotkeyPopup is not null)
             {
-                var lines = keyboardPopup.Lines
-                    .Select((line, index) => keyboardPopup.Selection?.SelectedLineIndex == index ? $"> {line.Text}" : $"  {line.Text}")
-                    .Skip(keyboardPopup.ScrollOffset)
+                var lines = hotkeyPopup.Lines
+                    .Select((line, index) => hotkeyPopup.Selection?.SelectedLineIndex == index ? $"> {line.Text}" : $"  {line.Text}")
+                    .Skip(hotkeyPopup.ScrollOffset)
                     .Take(Math.Max(1, height - 2))
                     .ToArray();
-                keyboardLayer.Text = string.Join(Environment.NewLine, lines);
-                keyboardLayer.X = 0;
-                keyboardLayer.Y = Pos.AnchorEnd(Math.Max(1, lines.Length));
-                keyboardLayer.Width = Dim.Fill();
-                keyboardLayer.Height = Math.Max(1, lines.Length);
-                keyboardLayer.Visible = true;
+                hotkeyLayer.Text = string.Join(Environment.NewLine, lines);
+                hotkeyLayer.X = 0;
+                hotkeyLayer.Y = Pos.AnchorEnd(Math.Max(1, lines.Length));
+                hotkeyLayer.Width = Dim.Fill();
+                hotkeyLayer.Height = Math.Max(1, lines.Length);
+                hotkeyLayer.Visible = true;
             }
 
             notificationLayer.SetNeedsDraw();
-            keyboardLayer.SetNeedsDraw();
+            hotkeyLayer.SetNeedsDraw();
         }
 
-        View GetLivePanelView(LiveDisplayPanel panel)
+        View GetPanelView(WorkspacePanel panel)
         {
             var key = (panel.Workspace, panel.PluginId, panel.Key);
             if (panelViews.TryGetValue(key, out var cached))
@@ -985,7 +985,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             overlay.Text = string.Empty;
         }
 
-        void DisposePanelViews(LiveDisplayWorkspace? workspace = null)
+        void DisposePanelViews(Workspace? workspace = null)
         {
             foreach (var (key, cached) in panelViews
                 .Where(x => workspace is null || ReferenceEquals(x.Key.Workspace, workspace))
@@ -997,7 +997,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             }
         }
 
-        string WorkspaceLabel(LiveDisplayWorkspace workspace)
+        string WorkspaceLabel(Workspace workspace)
         {
             return workspaces.TryGetValue(workspace, out var state) && !string.IsNullOrEmpty(state.ShortcutText)
                 ? $"{state.ShortcutText} {workspace.Title}"
@@ -1068,7 +1068,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             if (string.Equals(subcommand, "list", StringComparison.OrdinalIgnoreCase))
             {
                 if (string.IsNullOrEmpty(rest))
-                    KeyboardManager.ShowPopup(BuildWorkspaceList().Context);
+                    HotkeyManager.ShowPopup(BuildWorkspaceList().Context);
                 else
                     LogWorkspaceUsage();
                 return;
@@ -1091,13 +1091,13 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             var list = BuildWorkspaceList();
             if (list.Entries.Count == 0)
             {
-                KeyboardManager.ShowPopup(list.Context);
+                HotkeyManager.ShowPopup(list.Context);
                 return;
             }
 
             var selectedIndex = Math.Max(0, list.Entries.FindIndex(x => x.Workspace == activeWorkspace));
             var workspacesByLine = list.Entries.ToDictionary(x => x.LineIndex, x => x.Workspace);
-            KeyboardManager.ShowPopup(list.Context.ToPopup(selection: new KeyboardPopupSelection(
+            HotkeyManager.ShowPopup(list.Context.ToPopup(selection: new HotkeyPopupSelection(
                 list.Entries.Select(x => x.LineIndex).ToArray(),
                 selectedIndex,
                 lineIndex =>
@@ -1110,11 +1110,11 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
 
         WorkspacePopupList BuildWorkspaceList()
         {
-            var context = new KeyboardHandlerContext().WriteLine("Workspaces");
+            var context = new HotkeyContext().AddLine("Workspaces");
             var entries = new List<WorkspacePopupEntry>();
             if (workspaces.Count == 0)
             {
-                context.WriteLine("（没有已注册 workspace）", ConsoleColor.DarkGray);
+                context.AddLine("（没有已注册 workspace）");
                 return new WorkspacePopupList(context, entries);
             }
 
@@ -1123,7 +1123,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 var lineIndex = context.LineCount;
                 var marker = workspace == activeWorkspace ? "*" : " ";
                 var shortcut = string.IsNullOrEmpty(state.ShortcutText) ? string.Empty : $" [{state.ShortcutText}]";
-                context.WriteLine($"{marker} {workspace.Title}{shortcut}");
+                context.AddLine($"{marker} {workspace.Title}{shortcut}");
                 entries.Add(new WorkspacePopupEntry(lineIndex, workspace));
             }
 
@@ -1187,12 +1187,12 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
 
         void ShowPluginList()
         {
-            var context = new KeyboardHandlerContext().WriteLine("Plugins");
+            var context = new HotkeyContext().AddLine("Plugins");
             var statuses = PluginManager.SnapshotPluginStatuses();
             if (statuses.Count == 0)
             {
-                context.WriteLine("（没有已知插件）", ConsoleColor.DarkGray);
-                KeyboardManager.ShowPopup(context);
+                context.AddLine("（没有已知插件）");
+                HotkeyManager.ShowPopup(context);
                 return;
             }
 
@@ -1203,10 +1203,10 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 var version = status.Version is null ? string.Empty : $" v{status.Version}";
                 var author = string.IsNullOrWhiteSpace(status.Author) ? string.Empty : $" by {status.Author}";
                 var host = status.LoadInHost ? " host" : string.Empty;
-                context.WriteLine($"{state} {status.InternalName}{displayName}{version}{author}{host}");
+                context.AddLine($"{state} {status.InternalName}{displayName}{version}{author}{host}");
             }
 
-            KeyboardManager.ShowPopup(context);
+            HotkeyManager.ShowPopup(context);
         }
 
         async Task RunPluginLifecycleCommandAsync(string subcommand, string pluginName)
@@ -1240,11 +1240,11 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 "reload" => "重载",
                 _ => subcommand
             };
-            var context = new KeyboardHandlerContext()
-                .WriteLine("Plugin command")
-                .WriteLine($"{status.InternalName} 已{action}。", ConsoleColor.Green);
-            KeyboardManager.ShowPopup(context);
-            LogCommand($"插件 {status.InternalName} 已{action}。", LiveDisplaySeverity.Success);
+            var context = new HotkeyContext()
+                .AddLine("Plugin command")
+                .AddLine($"{status.InternalName} 已{action}。");
+            HotkeyManager.ShowPopup(context);
+            LogCommand($"插件 {status.InternalName} 已{action}。", UiSeverity.Success);
         }
 
         void LogPluginUsage()
@@ -1254,12 +1254,12 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
 
         void LogCommandWarning(string text)
         {
-            LogCommand(text, LiveDisplaySeverity.Warning);
+            LogCommand(text, UiSeverity.Warning);
         }
 
-        void LogCommand(string text, LiveDisplaySeverity severity)
+        void LogCommand(string text, UiSeverity severity)
         {
-            AddLog(new LiveDisplayLogLine(null, "Command", text, severity));
+            AddLog(new UiLogLine(null, "Command", text, severity));
         }
 
         static (string Command, string Remainder) SplitCommand(string value)
@@ -1320,11 +1320,11 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         {
             var expired = notifications.Where(x => x.ExpiresAt <= now).ToArray();
             foreach (var notification in expired)
-                KeyboardManager.UnregisterNotificationShortcuts(notification.ShortcutRegistrationId);
+                HotkeyManager.UnregisterNotificationShortcuts(notification.ShortcutRegistrationId);
             return notifications.RemoveAll(x => x.ExpiresAt <= now) > 0;
         }
 
-        void AddLog(LiveDisplayLogLine line)
+        void AddLog(UiLogLine line)
         {
             var bank = line.Workspace is null
                 ? globalLogs
@@ -1340,7 +1340,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 bank.RemoveRange(0, bank.Count - MaxLogLines);
         }
 
-        List<LiveDisplayNotification> VisibleNotifications()
+        List<UiNotification> VisibleNotifications()
         {
             return notifications
                 .Where(x => x.Workspace is null || ReferenceEquals(x.Workspace, activeWorkspace))
@@ -1348,7 +1348,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 .ToList();
         }
 
-        void RegisterKnownWorkspace(LiveDisplayWorkspace workspace)
+        void RegisterKnownWorkspace(Workspace workspace)
         {
             ArgumentNullException.ThrowIfNull(workspace);
 
@@ -1392,28 +1392,28 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             RefreshWorkspaceCompletionTitles();
         }
 
-        void SetCurrentWorkspaceIfEmpty(LiveDisplayWorkspace workspace)
+        void SetCurrentWorkspaceIfEmpty(Workspace workspace)
         {
             Interlocked.CompareExchange(ref currentWorkspace, workspace, null);
         }
 
         void SetWorkspaceShortcut(
-            LiveDisplayWorkspace workspace,
+            Workspace workspace,
             ConsoleKey key,
             ConsoleModifiers modifiers,
             string shortcutText,
-            KeyboardManager.HotkeyEntry entry)
+            HotkeyManager.HotkeyEntry entry)
         {
             if (IsRemovedWorkspace(workspace))
             {
-                KeyboardManager.Unregister(key, modifiers, entry);
+                HotkeyManager.Unregister(key, modifiers, entry);
                 return;
             }
 
             RegisterKnownWorkspace(workspace);
             var state = workspaces[workspace];
             if (state.Hotkey is { } previous)
-                KeyboardManager.Unregister(previous.Key, previous.Modifiers, previous.Entry);
+                HotkeyManager.Unregister(previous.Key, previous.Modifiers, previous.Entry);
             workspaces[workspace] = state with
             {
                 ShortcutText = shortcutText,
@@ -1421,7 +1421,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             };
         }
 
-        void RemoveWorkspaceState(LiveDisplayWorkspace workspace, LiveDisplayWorkspace? replacement)
+        void RemoveWorkspaceState(Workspace workspace, Workspace? replacement)
         {
             if (workspaces.TryGetValue(workspace, out var state) && ReferenceEquals(state.Workspace, workspace))
             {
@@ -1432,7 +1432,7 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 DisposePanelViews(workspace);
                 workspaceLogs.Remove(workspace);
                 foreach (var notification in notifications.Where(x => ReferenceEquals(x.Workspace, workspace)))
-                    KeyboardManager.UnregisterNotificationShortcuts(notification.ShortcutRegistrationId);
+                    HotkeyManager.UnregisterNotificationShortcuts(notification.ShortcutRegistrationId);
                 notifications.RemoveAll(x => ReferenceEquals(x.Workspace, workspace));
             }
 
@@ -1538,15 +1538,15 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
                 .ToArray();
         }
 
-        bool IsRemovedWorkspace(LiveDisplayWorkspace workspace)
+        bool IsRemovedWorkspace(Workspace workspace)
         {
             lock (removedWorkspaceGate)
                 return removedWorkspaces.Contains(workspace);
         }
 
         bool TryTombstoneWorkspace(
-            LiveDisplayWorkspace workspace,
-            out LiveDisplayWorkspace? replacement)
+            Workspace workspace,
+            out Workspace? replacement)
         {
             lock (workspaceIdentityGate)
             {
@@ -1588,11 +1588,11 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
             if (state.Hotkey is not { } hotkey)
                 return;
 
-            KeyboardManager.Unregister(hotkey.Key, hotkey.Modifiers, hotkey.Entry);
+            HotkeyManager.Unregister(hotkey.Key, hotkey.Modifiers, hotkey.Entry);
         }
 
-        LiveDisplayWorkspace? CanonicalizeWorkspace(
-            LiveDisplayWorkspace workspace,
+        Workspace? CanonicalizeWorkspace(
+            Workspace workspace,
             bool createIfMissing = true)
         {
             lock (workspaceIdentityGate)
@@ -1624,19 +1624,19 @@ namespace UmamusumeResponseAnalyzer.LiveDisplay
         sealed record WorkspaceHotkey(
             ConsoleKey Key,
             ConsoleModifiers Modifiers,
-            KeyboardManager.HotkeyEntry Entry);
+            HotkeyManager.HotkeyEntry Entry);
 
         sealed record WorkspaceState(
-            LiveDisplayWorkspace Workspace,
+            Workspace Workspace,
             int ScrollOffset,
             string? ShortcutText,
             WorkspaceHotkey? Hotkey);
 
-        sealed record WorkspacePopupEntry(int LineIndex, LiveDisplayWorkspace Workspace);
+        sealed record WorkspacePopupEntry(int LineIndex, Workspace Workspace);
 
-        sealed record WorkspacePopupList(KeyboardHandlerContext Context, List<WorkspacePopupEntry> Entries);
+        sealed record WorkspacePopupList(HotkeyContext Context, List<WorkspacePopupEntry> Entries);
 
-        sealed record CachedPanelView(LiveDisplayContent Content, View View);
+        sealed record CachedPanelView(WorkspaceContent Content, View View);
 
         sealed class MainWindow : Window
         {

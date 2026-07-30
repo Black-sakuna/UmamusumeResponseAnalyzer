@@ -1,4 +1,4 @@
-using UmamusumeResponseAnalyzer.LiveDisplay;
+using UmamusumeResponseAnalyzer.TerminalGui;
 
 namespace UmamusumeResponseAnalyzer.Plugin
 {

@@ -1,5 +1,5 @@
 using Newtonsoft.Json;
-using UmamusumeResponseAnalyzer.LiveDisplay;
+using UmamusumeResponseAnalyzer.TerminalGui;
 using UmamusumeResponseAnalyzer.Plugin;
 using WatsonWebserver.Core;
 using WatsonWebserver.Lite;
@@ -132,7 +132,7 @@ namespace UmamusumeResponseAnalyzer
                 // 核心安装路由由 Server barrier 跟踪；热重载会等待插件 callback 排空。
                 var needRestart = await PluginManager.ReloadPluginsAsync(req.InternalName);
                 cancellationToken.ThrowIfCancellationRequested();
-                LiveDisplayConsole.WriteLine($"URACloud 网页请求已安装插件 {req.InternalName} v{req.Version}");
+                TerminalUi.Log("URA", $"URACloud 网页请求已安装插件 {req.InternalName} v{req.Version}");
                 await SendJson(ctx, 200, new { ok = true, installed = req.InternalName, needsRestart = needRestart });
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -145,7 +145,7 @@ namespace UmamusumeResponseAnalyzer
             }
             catch (Exception ex)
             {
-                LiveDisplayConsole.WriteLine($"URACloud 网页安装失败: {ex.Message}");
+                TerminalUi.Log("URA", $"URACloud 网页安装失败: {ex.Message}");
                 await SendJson(ctx, 500, new { ok = false, error = ex.Message });
             }
         }
@@ -163,7 +163,7 @@ namespace UmamusumeResponseAnalyzer
             string version,
             CancellationToken cancellationToken)
         {
-            return LiveDisplayConsole.Confirm(
+            return TerminalUi.Confirm(
                 $"URACloud 请求安装插件 {author}/{internalName} v{version}，是否允许？",
                 cancellationToken: cancellationToken);
         }

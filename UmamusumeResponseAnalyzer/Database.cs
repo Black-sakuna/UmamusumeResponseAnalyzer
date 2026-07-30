@@ -3,7 +3,7 @@ using System.Collections.Frozen;
 using System.Text;
 using System.Text.RegularExpressions;
 using UmamusumeResponseAnalyzer.Entities;
-using UmamusumeResponseAnalyzer.LiveDisplay;
+using UmamusumeResponseAnalyzer.TerminalGui;
 using static UmamusumeResponseAnalyzer.Localization.Database;
 
 namespace UmamusumeResponseAnalyzer
@@ -95,7 +95,7 @@ namespace UmamusumeResponseAnalyzer
         {
             if (!File.Exists(filepath))
             {
-                LiveDisplayConsole.Log("Database", string.Format(I18N_NotExist, Path.GetFileName(filepath)), LiveDisplaySeverity.Warning);
+                TerminalUi.Log("Database", string.Format(I18N_NotExist, Path.GetFileName(filepath)), UiSeverity.Warning);
                 return default;
             }
 
@@ -110,15 +110,15 @@ namespace UmamusumeResponseAnalyzer
                 if (serializer.Deserialize<T>(jsonReader) is { } value)
                     return value;
 
-                LiveDisplayConsole.Log("Database", string.Format(I18N_LoadFail, Path.GetFileName(filepath)), LiveDisplaySeverity.Warning);
+                TerminalUi.Log("Database", string.Format(I18N_LoadFail, Path.GetFileName(filepath)), UiSeverity.Warning);
             }
             catch (InvalidDataException)
             {
-                LiveDisplayConsole.Log("Database", string.Format(I18N_DecompressError, Path.GetFileName(filepath)), LiveDisplaySeverity.Warning);
+                TerminalUi.Log("Database", string.Format(I18N_DecompressError, Path.GetFileName(filepath)), UiSeverity.Warning);
             }
             catch (Exception)
             {
-                LiveDisplayConsole.Log("Database", string.Format(I18N_LoadFail, Path.GetFileName(filepath)), LiveDisplaySeverity.Warning);
+                TerminalUi.Log("Database", string.Format(I18N_LoadFail, Path.GetFileName(filepath)), UiSeverity.Warning);
             }
             return default;
         }

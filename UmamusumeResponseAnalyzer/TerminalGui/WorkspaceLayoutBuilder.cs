@@ -4,7 +4,7 @@ using Terminal.Gui.Text;
 using Terminal.Gui.ViewBase;
 using Terminal.Gui.Views;
 
-namespace UmamusumeResponseAnalyzer.LiveDisplay;
+namespace UmamusumeResponseAnalyzer.TerminalGui;
 
 internal static class WorkspaceLayoutBuilder
 {
@@ -17,9 +17,9 @@ internal static class WorkspaceLayoutBuilder
         readonly View panelContainer;
 
         public WorkspaceSurface(
-            LiveDisplayWorkspace? workspace,
-            IReadOnlyList<(LiveDisplayPanel Panel, View View)> panelViews,
-            Func<LiveDisplayWorkspace, string> workspaceLabel)
+            Workspace? workspace,
+            IReadOnlyList<(WorkspacePanel Panel, View View)> panelViews,
+            Func<Workspace, string> workspaceLabel)
         {
             fullBleed = panelViews.Count == 1 && panelViews[0].Panel.FullBleed;
             View = new View
@@ -154,7 +154,7 @@ internal static class WorkspaceLayoutBuilder
         }
 
         sealed record PanelView(
-            LiveDisplayPanel Panel,
+            WorkspacePanel Panel,
             View View,
             int DeclaredHeight,
             bool FillsViewportHeight,
@@ -166,13 +166,13 @@ internal static class WorkspaceLayoutBuilder
         bool FillsViewportHeight);
 
     public static WorkspaceSurface BuildWorkspaceLayout(
-        LiveDisplayWorkspace? workspace,
-        IReadOnlyCollection<LiveDisplayPanel> panels,
-        Func<LiveDisplayWorkspace, string> workspaceLabel,
+        Workspace? workspace,
+        IReadOnlyCollection<WorkspacePanel> panels,
+        Func<Workspace, string> workspaceLabel,
         int width,
         int height,
         int scrollOffset,
-        Func<LiveDisplayPanel, View> createView)
+        Func<WorkspacePanel, View> createView)
     {
         var activePanels = SelectPanels(workspace, panels);
         var activePanelViews = activePanels
@@ -183,9 +183,9 @@ internal static class WorkspaceLayoutBuilder
         return surface;
     }
 
-    static LiveDisplayPanel[] SelectPanels(
-        LiveDisplayWorkspace? workspace,
-        IReadOnlyCollection<LiveDisplayPanel> panels)
+    static WorkspacePanel[] SelectPanels(
+        Workspace? workspace,
+        IReadOnlyCollection<WorkspacePanel> panels)
     {
         if (workspace is null)
             return [];
@@ -203,7 +203,7 @@ internal static class WorkspaceLayoutBuilder
 
     static int[] CalculatePanelHeights(
         IReadOnlyList<(
-            LiveDisplayPanel Panel,
+            WorkspacePanel Panel,
             View View,
             int DeclaredHeight,
             bool FillsViewportHeight)> panels,

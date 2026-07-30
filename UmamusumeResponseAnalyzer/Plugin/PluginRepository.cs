@@ -1,5 +1,5 @@
 using Newtonsoft.Json;
-using UmamusumeResponseAnalyzer.LiveDisplay;
+using UmamusumeResponseAnalyzer.TerminalGui;
 
 namespace UmamusumeResponseAnalyzer.Plugin
 {
@@ -30,8 +30,8 @@ namespace UmamusumeResponseAnalyzer.Plugin
             }
             catch (Exception ex)
             {
-                TerminalGuiDialogs.Acknowledge(
-                    LiveDisplayConsole.Application,
+                ModalDialogs.Acknowledge(
+                    TerminalUi.Application,
                     $"插件仓库操作失败：{ex.Message}",
                     cancellationToken);
             }
@@ -42,8 +42,8 @@ namespace UmamusumeResponseAnalyzer.Plugin
             var plugins = await FetchAllPluginsAsync(cancellationToken: cancellationToken);
             if (plugins.Count == 0)
             {
-                TerminalGuiDialogs.Acknowledge(
-                    LiveDisplayConsole.Application,
+                ModalDialogs.Acknowledge(
+                    TerminalUi.Application,
                     "插件仓库没有可用插件",
                     cancellationToken);
                 return;
@@ -54,7 +54,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 .ThenBy(p => string.IsNullOrWhiteSpace(p.Category) ? UncategorizedLabel : p.Category)
                 .ThenBy(DisplayLabel, StringComparer.OrdinalIgnoreCase)
                 .ToArray();
-            var selectedPlugins = LiveDisplayConsole.MultiSelect(
+            var selectedPlugins = TerminalUi.MultiSelect(
                 "选择要安装的插件",
                 pluginChoices,
                 converter: FormatChoice,
@@ -77,16 +77,16 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 cancellationToken.ThrowIfCancellationRequested();
                 if (needRestart.Count == 0)
                 {
-                    TerminalGuiDialogs.Acknowledge(
-                        LiveDisplayConsole.Application,
+                    ModalDialogs.Acknowledge(
+                        TerminalUi.Application,
                         $"插件已安装并生效：{string.Join("、", installed)}",
                         cancellationToken);
                 }
                 else
                 {
                     // 无法热重载的情形（如 [LoadInHostContext] 插件）通过重启完成应用。
-                    var restart = TerminalGuiDialogs.Acknowledge(
-                        LiveDisplayConsole.Application,
+                    var restart = ModalDialogs.Acknowledge(
+                        TerminalUi.Application,
                         $"需重启以应用插件：{string.Join("、", needRestart)}",
                         cancellationToken);
                     if (restart)
@@ -132,7 +132,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
 
         static async Task<List<PluginInformation>> FetchAllPluginsAsync(bool silent = false, CancellationToken cancellationToken = default)
         {
-            if (!silent) LiveDisplayConsole.WriteLine("正在从插件仓库获取插件信息");
+            if (!silent) TerminalUi.Log("URA", "正在从插件仓库获取插件信息");
             var list = await FetchAsync(PluginApiBase, cancellationToken);
             return BuildCatalog(list, Config.Repository.Targets);
         }
@@ -232,8 +232,8 @@ namespace UmamusumeResponseAnalyzer.Plugin
                     result.Add(forks[0]);
                     continue;
                 }
-                LiveDisplayConsole.WriteLine($"插件 {group.Key} 选中了多个来源，本地只能安装一个，请选择保留哪个：");
-                var pick = LiveDisplayConsole.Select(
+                TerminalUi.Log("URA", $"插件 {group.Key} 选中了多个来源，本地只能安装一个，请选择保留哪个：");
+                var pick = TerminalUi.Select(
                     $"为 {group.Key} 选择来源",
                     forks,
                     f => $"{DisplayLabel(f)} @{f.Author}",
@@ -274,7 +274,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 labelToVersion[$"{v.Version}{tag}{changelog}"] = v;
             }
 
-            var selection = LiveDisplayConsole.Select(
+            var selection = TerminalUi.Select(
                 $"选择 {DisplayLabel(plugin)} 要安装的版本",
                 labelToVersion.Keys.Append(CancelLabel),
                 cancellationToken: cancellationToken);
@@ -300,7 +300,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
             {
                 if (conflictingNames.Contains(plugin.InternalName))
                 {
-                    LiveDisplayConsole.WriteLine($"{Bracketed(plugin.InternalName)} 被多个作者同时选中，跳过；请一次只安装其中一个 fork");
+                    TerminalUi.Log("URA", $"{Bracketed(plugin.InternalName)} 被多个作者同时选中，跳过；请一次只安装其中一个 fork");
                     continue;
                 }
 
@@ -309,7 +309,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                         && !string.Equals(p.Author, plugin.Author, StringComparison.OrdinalIgnoreCase));
                 if (installedFork != null)
                 {
-                    LiveDisplayConsole.WriteLine($"{Bracketed(DisplayLabel(plugin))} 与已安装的 {installedFork.Author}/{plugin.InternalName} 冲突，跳过");
+                    TerminalUi.Log("URA", $"{Bracketed(DisplayLabel(plugin))} 与已安装的 {installedFork.Author}/{plugin.InternalName} 冲突，跳过");
                     continue;
                 }
 
@@ -318,21 +318,21 @@ namespace UmamusumeResponseAnalyzer.Plugin
                     var versionToInstall = await PromptVersionAsync(plugin, cancellationToken);
                     if (versionToInstall is null)
                     {
-                        LiveDisplayConsole.WriteLine($"{Bracketed(DisplayLabel(plugin))} 跳过");
+                        TerminalUi.Log("URA", $"{Bracketed(DisplayLabel(plugin))} 跳过");
                         continue;
                     }
 
-                    LiveDisplayConsole.WriteLine($"[{DisplayLabel(plugin)} v{versionToInstall.Version}] 正在下载");
+                    TerminalUi.Log("URA", $"[{DisplayLabel(plugin)} v{versionToInstall.Version}] 正在下载");
                     // 直接把下载的 zip 落成 Plugins/{InternalName}.zip,不解压(SDK 打的 zip 内容在根、无 Plugins/ 前缀;
                     // 宿主 ScanAll 扫的就是 Plugins/*.zip,与本地开发 deploy 一致,热重载重扫即可发现)。
                     await DownloadPluginZipAsync(versionToInstall.DownloadUrl, plugin.InternalName, cancellationToken);
-                    LiveDisplayConsole.WriteLine($"[{DisplayLabel(plugin)}] 安装完成");
+                    TerminalUi.Log("URA", $"[{DisplayLabel(plugin)}] 安装完成");
                     installed.Add(plugin.InternalName);
                 }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
                 {
-                    LiveDisplayConsole.WriteLine($"{Bracketed(DisplayLabel(plugin))} 安装失败: {ex.Message}");
+                    TerminalUi.Log("URA", $"{Bracketed(DisplayLabel(plugin))} 安装失败: {ex.Message}");
                 }
             }
             return installed;

@@ -1,14 +1,14 @@
 using Terminal.Gui.App;
 
-namespace UmamusumeResponseAnalyzer.LiveDisplay;
+namespace UmamusumeResponseAnalyzer.TerminalGui;
 
-public static class LiveDisplayConsole
+public static class TerminalUi
 {
     static IApplication? application;
     static UiHost? uiHost;
     static CancellationToken lifetimeCancellationToken;
 
-    internal static LiveDisplayWorkspace? DefaultLogWorkspace { get; set; }
+    internal static Workspace? DefaultExceptionWorkspace { get; set; }
     internal static IApplication Application
         => application ?? throw new InvalidOperationException("Terminal.Gui application 尚未绑定。");
 
@@ -20,7 +20,7 @@ public static class LiveDisplayConsole
         uiHost = host;
         application = app;
         lifetimeCancellationToken = cancellationToken;
-        TerminalGuiDialogs.BindOwner(
+        ModalDialogs.BindOwner(
             app,
             SynchronizationContext.Current
                 ?? throw new InvalidOperationException("Terminal.Gui owner SynchronizationContext 不存在。"));
@@ -35,9 +35,9 @@ public static class LiveDisplayConsole
         uiHost = null;
         application = null;
         lifetimeCancellationToken = default;
-        DefaultLogWorkspace = null;
+        DefaultExceptionWorkspace = null;
         if (app is not null)
-            TerminalGuiDialogs.UnbindOwner(app);
+            ModalDialogs.UnbindOwner(app);
     }
 
     public static T Select<T>(
@@ -47,7 +47,7 @@ public static class LiveDisplayConsole
         CancellationToken cancellationToken = default)
         => WithCancellation(
             cancellationToken,
-            token => TerminalGuiDialogs.Select(Application, title, choices, converter, token));
+            token => ModalDialogs.Select(Application, title, choices, converter, token));
 
     internal static T Menu<T>(
         string title,
@@ -56,7 +56,7 @@ public static class LiveDisplayConsole
         CancellationToken cancellationToken = default)
         => WithCancellation(
             cancellationToken,
-            token => TerminalGuiDialogs.Menu(Application, title, choices, converter, token));
+            token => ModalDialogs.Menu(Application, title, choices, converter, token));
 
     public static IReadOnlyList<T> MultiSelect<T>(
         string title,
@@ -66,7 +66,7 @@ public static class LiveDisplayConsole
         CancellationToken cancellationToken = default)
         => WithCancellation(
             cancellationToken,
-            token => TerminalGuiDialogs.MultiSelect(
+            token => ModalDialogs.MultiSelect(
                 Application,
                 title,
                 choices,
@@ -81,7 +81,7 @@ public static class LiveDisplayConsole
         CancellationToken cancellationToken = default)
         => WithCancellation(
             cancellationToken,
-            token => TerminalGuiDialogs.Ask(Application, title, value, allowEmpty, token));
+            token => ModalDialogs.Ask(Application, title, value, allowEmpty, token));
 
     public static bool Confirm(
         string title,
@@ -89,14 +89,14 @@ public static class LiveDisplayConsole
         CancellationToken cancellationToken = default)
         => WithCancellation(
             cancellationToken,
-            token => TerminalGuiDialogs.Confirm(Application, title, defaultValue, token));
+            token => ModalDialogs.Confirm(Application, title, defaultValue, token));
 
     public static bool Acknowledge(
         string title = "按 Enter 返回",
         CancellationToken cancellationToken = default)
         => WithCancellation(
             cancellationToken,
-            token => TerminalGuiDialogs.Acknowledge(Application, title, token));
+            token => ModalDialogs.Acknowledge(Application, title, token));
 
     internal static async Task RunProgressAsync(
         Func<IProgress<DownloadProgress>, CancellationToken, Task> action,
@@ -104,7 +104,7 @@ public static class LiveDisplayConsole
     {
         await WithCancellationAsync(
             cancellationToken,
-            token => TerminalGuiDialogs.RunProgressAsync(Application, action, token));
+            token => ModalDialogs.RunProgressAsync(Application, action, token));
     }
 
     internal static CancellationToken LifetimeCancellationToken => lifetimeCancellationToken;
@@ -145,28 +145,10 @@ public static class LiveDisplayConsole
         await action(linkedCts.Token);
     }
 
-    public static void WriteLine(string text) => Log("URA", text);
-
-    public static void WriteLine() => WriteLine(string.Empty);
-
-    public static void WriteLine(string format, params object[] args)
-        => WriteLine(string.Format(format, args));
-
-    public static void WriteException(Exception ex)
-    {
-        if (uiHost is null)
-        {
-            Console.Error.WriteLine(ex);
-            return;
-        }
-
-        LogException("URA", ex);
-    }
-
     internal static void LogException(
         string source,
         Exception ex,
-        LiveDisplaySeverity severity = LiveDisplaySeverity.Error)
+        UiSeverity severity = UiSeverity.Error)
     {
         var host = uiHost;
         if (host is null)
@@ -175,8 +157,8 @@ public static class LiveDisplayConsole
             return;
         }
 
-        host.Log(new LiveDisplayLogLine(
-            DefaultLogWorkspace,
+        host.Log(new UiLogLine(
+            DefaultExceptionWorkspace,
             source,
             FormatExceptionLogMessage(ex),
             severity,
@@ -281,7 +263,7 @@ public static class LiveDisplayConsole
     public static void Log(
         string source,
         string text,
-        LiveDisplaySeverity severity = LiveDisplaySeverity.Info)
+        UiSeverity severity = UiSeverity.Info)
     {
         var host = uiHost;
         if (host is null)
@@ -290,13 +272,13 @@ public static class LiveDisplayConsole
             return;
         }
 
-        host.Log(new LiveDisplayLogLine(null, source, text, severity));
+        host.Log(new UiLogLine(null, source, text, severity));
     }
 
     public static void Notify(
         string source,
         string text,
-        LiveDisplaySeverity severity = LiveDisplaySeverity.Info,
+        UiSeverity severity = UiSeverity.Info,
         TimeSpan? ttl = null)
     {
         var host = uiHost;
@@ -306,12 +288,12 @@ public static class LiveDisplayConsole
             return;
         }
 
-        host.Notify(new LiveDisplayNotification(
+        host.Notify(new UiNotification(
             null,
             source,
             text,
             severity,
-            LiveDisplayNotification.ExpiresAtFromNow(severity, ttl),
+            UiNotification.ExpiresAtFromNow(severity, ttl),
             []));
     }
 
@@ -321,8 +303,8 @@ public static class LiveDisplayConsole
         uiHost = null;
         application = null;
         lifetimeCancellationToken = default;
-        DefaultLogWorkspace = null;
+        DefaultExceptionWorkspace = null;
         if (app is not null)
-            TerminalGuiDialogs.UnbindOwner(app);
+            ModalDialogs.UnbindOwner(app);
     }
 }

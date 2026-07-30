@@ -1,16 +1,16 @@
 using Terminal.Gui.App;
-using UmamusumeResponseAnalyzer.LiveDisplay;
+using UmamusumeResponseAnalyzer.TerminalGui;
 
 namespace UmamusumeResponseAnalyzer.Plugin
 {
     internal sealed class PluginContext(
         IApplication application,
         IPlugin plugin,
-        ILiveDisplayOutput liveDisplay,
+        IWorkspaceOutput workspaceOutput,
         PluginHostEvents events) : IPluginContext, IPluginHostEvents
     {
         public IApplication Application { get; } = application;
-        public ILiveDisplayOutput LiveDisplay { get; } = liveDisplay;
+        public IWorkspaceOutput WorkspaceOutput { get; } = workspaceOutput;
         public IPluginHostEvents Events => this;
         public IPluginAnalyzerRegistry Analyzers { get; } = PluginManager.AnalyzersFor(plugin);
 
@@ -152,13 +152,13 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 try
                 {
                     using var callback = PluginManager.EnterPluginCallbackScope();
-                    using var scope = KeyboardManager.RegisterScope(Plugin);
+                    using var scope = HotkeyManager.RegisterScope(Plugin);
                     await handler(cancellationToken);
                 }
                 catch (Exception ex)
                 {
-                    LiveDisplayConsole.Notify("Plugin", $"插件事件处理错误: {ex.Message}", LiveDisplaySeverity.Error);
-                    LiveDisplayConsole.LogException("Plugin", ex);
+                    TerminalUi.Notify("Plugin", $"插件事件处理错误: {ex.Message}", UiSeverity.Error);
+                    TerminalUi.LogException("Plugin", ex);
                 }
                 finally
                 {

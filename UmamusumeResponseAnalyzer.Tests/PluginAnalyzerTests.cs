@@ -6,7 +6,7 @@ using MessagePack;
 using Newtonsoft.Json.Linq;
 using Terminal.Gui.App;
 using Terminal.Gui.ViewBase;
-using UmamusumeResponseAnalyzer.LiveDisplay;
+using UmamusumeResponseAnalyzer.TerminalGui;
 using UmamusumeResponseAnalyzer.Plugin;
 using Xunit;
 
@@ -37,7 +37,7 @@ namespace UmamusumeResponseAnalyzer.Tests
             application = Application.Create();
             SeedConfig();
             ResetAnalyzerState();
-            PluginManager.BindLiveDisplay(application, _ => new FakeLiveDisplayOutput());
+            PluginManager.BindWorkspaceOutput(application, _ => new FakeWorkspaceOutput());
         }
 
         public void Dispose()
@@ -675,14 +675,14 @@ namespace UmamusumeResponseAnalyzer.Tests
         public async Task InitializePlugin_PassesPluginContextAndDisposesStartedSubscription()
         {
             var plugin = new ContextPlugin();
-            var liveDisplay = new FakeLiveDisplayOutput();
-            PluginManager.BindLiveDisplay(application, _ => liveDisplay);
+            var workspaceOutput = new FakeWorkspaceOutput();
+            PluginManager.BindWorkspaceOutput(application, _ => workspaceOutput);
 
             PluginManager.InitializePlugin(plugin);
 
             Assert.NotNull(plugin.Context);
             Assert.Same(application, plugin.Context!.Application);
-            Assert.Same(liveDisplay, plugin.Context!.LiveDisplay);
+            Assert.Same(workspaceOutput, plugin.Context!.WorkspaceOutput);
             Assert.NotNull(plugin.Context.Events);
 
             await PluginManager.TriggerStartedForPluginsAsync([plugin]);
@@ -699,7 +699,7 @@ namespace UmamusumeResponseAnalyzer.Tests
             var ctx = new PluginManager.PluginLoadContext("shared-abi-test");
             using var terminal = new TerminalGuiTestApp();
             var uiHost = new UiHost(terminal.Application, static () => [], static _ => { });
-            terminal.RunOnOwnerThread(() => LiveDisplayConsole.Bind(uiHost, terminal.Application));
+            terminal.RunOnOwnerThread(() => TerminalUi.Bind(uiHost, terminal.Application));
             var run = await terminal.StartAsync(uiHost);
             try
             {
@@ -734,7 +734,7 @@ namespace UmamusumeResponseAnalyzer.Tests
             finally
             {
                 await terminal.StopAsync(uiHost, run);
-                terminal.RunOnOwnerThread(() => LiveDisplayConsole.Unbind(uiHost));
+                terminal.RunOnOwnerThread(() => TerminalUi.Unbind(uiHost));
                 ctx.Unload();
             }
         }
@@ -743,7 +743,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         {
             using var terminal = new TerminalGuiTestApp();
             var host = new UiHost(terminal.Application, static () => [], static _ => { });
-            terminal.RunOnOwnerThread(() => LiveDisplayConsole.Bind(host, terminal.Application));
+            terminal.RunOnOwnerThread(() => TerminalUi.Bind(host, terminal.Application));
             try
             {
                 var run = await terminal.StartAsync(host);
@@ -758,7 +758,7 @@ namespace UmamusumeResponseAnalyzer.Tests
             }
             finally
             {
-                terminal.RunOnOwnerThread(() => LiveDisplayConsole.Unbind(host));
+                terminal.RunOnOwnerThread(() => TerminalUi.Unbind(host));
             }
         }
 
@@ -1264,18 +1264,18 @@ namespace UmamusumeResponseAnalyzer.Tests
             }
         }
 
-        sealed class FakeLiveDisplayOutput : ILiveDisplayOutput
+        sealed class FakeWorkspaceOutput : IWorkspaceOutput
         {
-            public LiveDisplayWorkspace? CurrentWorkspace => null;
-            public LiveDisplayWorkspace CreateWorkspace(string title) => LiveDisplayWorkspace.Create(title);
-            public void RemoveWorkspace(LiveDisplayWorkspace workspace) { }
-            public void SwitchWorkspace(LiveDisplayWorkspace workspace) { }
-            public void BindWorkspaceHotkey(LiveDisplayWorkspace workspace, ConsoleKey key, ConsoleModifiers modifiers = 0, string? description = null) { }
-            public void SetPanel(LiveDisplayWorkspace workspace, string key, string title, LiveDisplayContent content, bool fullBleed = false, bool switchToWorkspace = true) { }
-            public void Log(string text, LiveDisplaySeverity severity = LiveDisplaySeverity.Info) { }
-            public void Log(LiveDisplayWorkspace workspace, string text, LiveDisplaySeverity severity = LiveDisplaySeverity.Info) { }
-            public void Notify(string text, LiveDisplaySeverity severity = LiveDisplaySeverity.Info, TimeSpan? ttl = null, params LiveDisplayShortcut[] shortcuts) { }
-            public void Notify(LiveDisplayWorkspace workspace, string text, LiveDisplaySeverity severity = LiveDisplaySeverity.Info, TimeSpan? ttl = null, params LiveDisplayShortcut[] shortcuts) { }
+            public Workspace? CurrentWorkspace => null;
+            public Workspace CreateWorkspace(string title) => Workspace.Create(title);
+            public void RemoveWorkspace(Workspace workspace) { }
+            public void SwitchWorkspace(Workspace workspace) { }
+            public void BindWorkspaceHotkey(Workspace workspace, ConsoleKey key, ConsoleModifiers modifiers = 0, string? description = null) { }
+            public void SetPanel(Workspace workspace, string key, string title, WorkspaceContent content, bool fullBleed = false, bool switchToWorkspace = true) { }
+            public void Log(string text, UiSeverity severity = UiSeverity.Info) { }
+            public void Log(Workspace workspace, string text, UiSeverity severity = UiSeverity.Info) { }
+            public void Notify(string text, UiSeverity severity = UiSeverity.Info, TimeSpan? ttl = null, params UiShortcut[] shortcuts) { }
+            public void Notify(Workspace workspace, string text, UiSeverity severity = UiSeverity.Info, TimeSpan? ttl = null, params UiShortcut[] shortcuts) { }
         }
     }
 }

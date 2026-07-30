@@ -7,7 +7,7 @@ using Terminal.Gui.ViewBase;
 using Terminal.Gui.Views;
 using UmamusumeResponseAnalyzer.Plugin;
 
-namespace UmamusumeResponseAnalyzer.LiveDisplay;
+namespace UmamusumeResponseAnalyzer.TerminalGui;
 
 internal sealed class BootstrapWorkspace : IDisposable
 {
@@ -19,12 +19,12 @@ internal sealed class BootstrapWorkspace : IDisposable
     readonly List<(string Label, string Value)> settings = [];
     readonly Dictionary<string, BootstrapPhase> phases = new()
     {
-        ["config"] = new("配置", LiveDisplaySeverity.Info, "等待"),
-        ["plugin-scan"] = new("插件扫描", LiveDisplaySeverity.Info, "等待"),
-        ["database"] = new("数据文件", LiveDisplaySeverity.Info, "等待"),
-        ["plugin-init"] = new("插件初始化", LiveDisplaySeverity.Info, "等待"),
-        ["server"] = new("HTTP server", LiveDisplaySeverity.Info, "等待"),
-        ["host"] = new("宿主", LiveDisplaySeverity.Info, "等待")
+        ["config"] = new("配置", UiSeverity.Info, "等待"),
+        ["plugin-scan"] = new("插件扫描", UiSeverity.Info, "等待"),
+        ["database"] = new("数据文件", UiSeverity.Info, "等待"),
+        ["plugin-init"] = new("插件初始化", UiSeverity.Info, "等待"),
+        ["server"] = new("HTTP server", UiSeverity.Info, "等待"),
+        ["host"] = new("宿主", UiSeverity.Info, "等待")
     };
     readonly List<BootstrapPluginRow> plugins = [];
     readonly List<BootstrapLogRow> logs = [];
@@ -36,11 +36,11 @@ internal sealed class BootstrapWorkspace : IDisposable
         Workspace = uiHost.CreateWorkspace("启动");
         uiHost.BindWorkspaceHotkey(Workspace, ConsoleKey.B, ConsoleModifiers.Control, "启动信息");
         uiHost.LogAdded += OnLogAdded;
-        LiveDisplayConsole.DefaultLogWorkspace = Workspace;
+        TerminalUi.DefaultExceptionWorkspace = Workspace;
         Refresh();
     }
 
-    public LiveDisplayWorkspace Workspace { get; }
+    public Workspace Workspace { get; }
 
     public void SetSettings(IReadOnlyList<(string Label, string Value)> values)
     {
@@ -52,7 +52,7 @@ internal sealed class BootstrapWorkspace : IDisposable
         Refresh();
     }
 
-    public void SetPhase(string key, string label, LiveDisplaySeverity severity, string detail)
+    public void SetPhase(string key, string label, UiSeverity severity, string detail)
     {
         lock (gate)
             phases[key] = new(label, severity, detail);
@@ -69,10 +69,10 @@ internal sealed class BootstrapWorkspace : IDisposable
         Refresh();
     }
 
-    public void Log(string source, string text, LiveDisplaySeverity severity = LiveDisplaySeverity.Info)
-        => uiHost.Log(new LiveDisplayLogLine(Workspace, source, text, severity));
+    public void Log(string source, string text, UiSeverity severity = UiSeverity.Info)
+        => uiHost.Log(new UiLogLine(Workspace, source, text, severity));
 
-    void OnLogAdded(LiveDisplayLogLine line)
+    void OnLogAdded(UiLogLine line)
     {
         if (!ReferenceEquals(line.Workspace, Workspace))
             return;
@@ -92,12 +92,12 @@ internal sealed class BootstrapWorkspace : IDisposable
 
     void Refresh()
     {
-        uiHost.SetPanel(new LiveDisplayPanel(
+        uiHost.SetPanel(new WorkspacePanel(
             Workspace,
             HostSource,
             "status",
             "启动状态",
-            new LiveDisplayContent(() =>
+            new WorkspaceContent(() =>
             {
                 (string Label, string Value)[] settingsSnapshot;
                 BootstrapPhase[] phaseSnapshot;
@@ -129,24 +129,24 @@ internal sealed class BootstrapWorkspace : IDisposable
 
         disposed = true;
         uiHost.LogAdded -= OnLogAdded;
-        if (ReferenceEquals(LiveDisplayConsole.DefaultLogWorkspace, Workspace))
-            LiveDisplayConsole.DefaultLogWorkspace = null;
+        if (ReferenceEquals(TerminalUi.DefaultExceptionWorkspace, Workspace))
+            TerminalUi.DefaultExceptionWorkspace = null;
     }
 
-    internal static string SeverityLabel(LiveDisplaySeverity severity) => severity switch
+    internal static string SeverityLabel(UiSeverity severity) => severity switch
     {
-        LiveDisplaySeverity.Trace => "INFO",
-        LiveDisplaySeverity.Info => "INFO",
-        LiveDisplaySeverity.Success => "OK",
-        LiveDisplaySeverity.Warning => "WARN",
-        LiveDisplaySeverity.Error => "ERR",
+        UiSeverity.Trace => "INFO",
+        UiSeverity.Info => "INFO",
+        UiSeverity.Success => "OK",
+        UiSeverity.Warning => "WARN",
+        UiSeverity.Error => "ERR",
         _ => "INFO"
     };
 }
 
 internal sealed record BootstrapPhase(
     string Label,
-    LiveDisplaySeverity Severity,
+    UiSeverity Severity,
     string Detail);
 
 internal sealed record BootstrapPluginRow(
@@ -354,13 +354,13 @@ internal sealed class BootstrapDashboardView : View
         }
         catch (Exception exception)
         {
-            LiveDisplayConsole.LogException("Clipboard", exception);
+            TerminalUi.LogException("Clipboard", exception);
         }
 
-        LiveDisplayConsole.Notify(
+        TerminalUi.Notify(
             "URA",
             "复制完整 backtrace 失败：系统 clipboard 不可用。",
-            LiveDisplaySeverity.Error);
+            UiSeverity.Error);
     }
 
     void ApplyLayout(bool useWideLayout)

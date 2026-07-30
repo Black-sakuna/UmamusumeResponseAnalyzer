@@ -1,6 +1,6 @@
 using Terminal.Gui.Text;
 
-namespace UmamusumeResponseAnalyzer.LiveDisplay;
+namespace UmamusumeResponseAnalyzer.TerminalGui;
 
 static class CellText
 {

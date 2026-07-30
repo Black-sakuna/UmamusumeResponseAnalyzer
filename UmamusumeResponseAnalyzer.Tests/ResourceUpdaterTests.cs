@@ -1,6 +1,6 @@
 using System.Net;
 using System.Text;
-using UmamusumeResponseAnalyzer.LiveDisplay;
+using UmamusumeResponseAnalyzer.TerminalGui;
 using Xunit;
 
 namespace UmamusumeResponseAnalyzer.Tests
@@ -27,7 +27,7 @@ namespace UmamusumeResponseAnalyzer.Tests
 
             Config.CONFIG_FILEPATH = originalConfigPath;
             ResourceUpdater.HttpClient = originalHttpClient;
-            LiveDisplayConsole.UnbindForTests();
+            TerminalUi.UnbindForTests();
         }
 
         [Fact]

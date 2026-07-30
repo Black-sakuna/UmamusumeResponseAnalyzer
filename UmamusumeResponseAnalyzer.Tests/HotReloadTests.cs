@@ -3,7 +3,7 @@ using System.Runtime.CompilerServices;
 using Terminal.Gui.App;
 using Terminal.Gui.Input;
 using UmamusumeResponseAnalyzer;
-using UmamusumeResponseAnalyzer.LiveDisplay;
+using UmamusumeResponseAnalyzer.TerminalGui;
 using UmamusumeResponseAnalyzer.Plugin;
 using Xunit;
 
@@ -35,7 +35,7 @@ namespace UmamusumeResponseAnalyzer.Tests
             _application = Application.Create();
             SeedConfig(); // 触碰 PluginManager/LoadIntoContext 会读 Config.Repository.Targets，先注入一个 YamlConfig
             ResetPluginState();
-            KeyboardManager.UnregisterAll();
+            HotkeyManager.UnregisterAll();
 
             _originalCwd = Directory.GetCurrentDirectory();
             _tempDir = Path.Combine(Path.GetTempPath(), "ura-hotreload-" + Guid.NewGuid().ToString("N"));
@@ -48,8 +48,8 @@ namespace UmamusumeResponseAnalyzer.Tests
         public void Dispose()
         {
             ResetPluginState();
-            KeyboardManager.UnregisterAll();
-            KeyboardManager.OverlaySink = null;
+            HotkeyManager.UnregisterAll();
+            HotkeyManager.OverlaySink = null;
             Directory.SetCurrentDirectory(_originalCwd);
             try { Directory.Delete(_tempDir, recursive: true); } catch { /* 进程仍持有内存中的程序集，文件残留无妨 */ }
             _application.Dispose();
@@ -351,10 +351,10 @@ namespace UmamusumeResponseAnalyzer.Tests
             var pluginPath = Path.Combine(_tempDir, "Plugins", $"{pluginName}.dll");
             var shortcutLog = Path.Combine(_tempDir, "shortcut-log.txt");
             var uiHost = new UiHost(_application, static () => [], static _ => { });
-            PluginManager.BindLiveDisplay(_application, _ => uiHost.ForPlugin(pluginName));
-            KeyboardManager.OverlaySink = uiHost;
+            PluginManager.BindWorkspaceOutput(_application, _ => uiHost.ForPlugin(pluginName));
+            HotkeyManager.OverlaySink = uiHost;
             var persistentInvocations = 0;
-            KeyboardManager.Register(ConsoleKey.F8, "host persistent", () =>
+            HotkeyManager.Register(ConsoleKey.F8, "host persistent", () =>
             {
                 persistentInvocations++;
                 return Task.CompletedTask;
@@ -364,33 +364,33 @@ namespace UmamusumeResponseAnalyzer.Tests
             PluginManager.Init();
             PluginManager.InitializeLoadedPlugins();
             var oldContext = new WeakReference(PluginManager.Contexts[pluginName]);
-            KeyboardManager.HandleKeyAsync(Key.F8).GetAwaiter().GetResult();
-            KeyboardManager.HandleKeyAsync(Key.F7).GetAwaiter().GetResult();
-            KeyboardManager.HandleKeyAsync(Key.F8).GetAwaiter().GetResult();
+            HotkeyManager.HandleKeyAsync(Key.F8).GetAwaiter().GetResult();
+            HotkeyManager.HandleKeyAsync(Key.F7).GetAwaiter().GetResult();
+            HotkeyManager.HandleKeyAsync(Key.F8).GetAwaiter().GetResult();
             Assert.Equal(["v1-notification", "v1-popup"], File.ReadAllLines(shortcutLog));
             Assert.Equal(0, persistentInvocations);
 
             PluginCompiler.Compile(TransientShortcutPluginSource(pluginName, "v2", shortcutLog), pluginName, pluginPath);
             Assert.Empty(await PluginManager.ReloadPluginsAsync(pluginName));
-            Assert.Equal(0, KeyboardManager.TransientShortcutCountForTests);
-            KeyboardManager.HandleKeyAsync(Key.F8).GetAwaiter().GetResult();
+            Assert.Equal(0, HotkeyManager.TransientShortcutCountForTests);
+            HotkeyManager.HandleKeyAsync(Key.F8).GetAwaiter().GetResult();
             Assert.Equal(1, persistentInvocations);
 
             PluginManager.InitializeLoadedPlugins();
-            KeyboardManager.HandleKeyAsync(Key.F8).GetAwaiter().GetResult();
-            KeyboardManager.HandleKeyAsync(Key.F7).GetAwaiter().GetResult();
-            KeyboardManager.HandleKeyAsync(Key.F8).GetAwaiter().GetResult();
+            HotkeyManager.HandleKeyAsync(Key.F8).GetAwaiter().GetResult();
+            HotkeyManager.HandleKeyAsync(Key.F7).GetAwaiter().GetResult();
+            HotkeyManager.HandleKeyAsync(Key.F8).GetAwaiter().GetResult();
             Assert.Equal(
                 ["v1-notification", "v1-popup", "v2-notification", "v2-popup"],
                 File.ReadAllLines(shortcutLog));
             Assert.Equal(1, persistentInvocations);
 
             Assert.Empty(await PluginManager.UnloadPluginsAsync(pluginName));
-            Assert.Equal(0, KeyboardManager.TransientShortcutCountForTests);
-            KeyboardManager.HandleKeyAsync(Key.F8).GetAwaiter().GetResult();
+            Assert.Equal(0, HotkeyManager.TransientShortcutCountForTests);
+            HotkeyManager.HandleKeyAsync(Key.F8).GetAwaiter().GetResult();
             Assert.Equal(2, persistentInvocations);
-            KeyboardManager.UnregisterAll();
-            KeyboardManager.OverlaySink = null;
+            HotkeyManager.UnregisterAll();
+            HotkeyManager.OverlaySink = null;
             return oldContext;
         }
 
@@ -450,7 +450,7 @@ namespace UmamusumeResponseAnalyzer.Tests
                 using System.IO;
                 using System.Threading.Tasks;
                 using UmamusumeResponseAnalyzer;
-                using UmamusumeResponseAnalyzer.LiveDisplay;
+                using UmamusumeResponseAnalyzer.TerminalGui;
                 using UmamusumeResponseAnalyzer.Plugin;
 
                 namespace {{pluginName}}Ns
@@ -462,16 +462,16 @@ namespace UmamusumeResponseAnalyzer.Tests
                         public string[] Targets => Array.Empty<string>();
                         public void Initialize(IPluginContext context)
                         {
-                            var workspace = context.LiveDisplay.CreateWorkspace("Transient shortcut");
-                            context.LiveDisplay.Notify(
+                            var workspace = context.WorkspaceOutput.CreateWorkspace("Transient shortcut");
+                            context.WorkspaceOutput.Notify(
                                 workspace,
                                 "{{marker}}",
                                 ttl: TimeSpan.FromMinutes(5),
-                                shortcuts: new LiveDisplayShortcut(ConsoleKey.F8, HandleNotificationAsync));
-                            KeyboardManager.Register(ConsoleKey.F7, "popup", popup =>
+                                shortcuts: new UiShortcut(ConsoleKey.F8, HandleNotificationAsync));
+                            HotkeyManager.Register(ConsoleKey.F7, "popup", popup =>
                             {
-                                popup.WriteLine("{{marker}}")
-                                    .BindShortcut(new LiveDisplayShortcut(ConsoleKey.F8, HandlePopupAsync));
+                                popup.AddLine("{{marker}}")
+                                    .BindShortcut(new UiShortcut(ConsoleKey.F8, HandlePopupAsync));
                                 return Task.CompletedTask;
                             });
                         }
@@ -523,7 +523,7 @@ namespace UmamusumeResponseAnalyzer.Tests
             PluginManager.AssemblyMap.Clear();
             PluginManager.Assemblies.Clear();
             foreach (var plugin in PluginManager.LoadedPlugins.ToList())
-                KeyboardManager.UnregisterByOwner(plugin);
+                HotkeyManager.UnregisterByOwner(plugin);
             PluginManager.LoadedPlugins.Clear();
         }
     }

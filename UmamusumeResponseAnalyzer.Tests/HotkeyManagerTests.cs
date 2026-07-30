@@ -1,35 +1,35 @@
 using Terminal.Gui.App;
 using Terminal.Gui.Drivers;
 using Terminal.Gui.Input;
-using UmamusumeResponseAnalyzer.LiveDisplay;
+using UmamusumeResponseAnalyzer.TerminalGui;
 using Xunit;
 
 namespace UmamusumeResponseAnalyzer.Tests;
 
-[CollectionDefinition("KeyboardManager", DisableParallelization = true)]
-public sealed class KeyboardManagerCollection;
+[CollectionDefinition("HotkeyManager", DisableParallelization = true)]
+public sealed class HotkeyManagerCollection;
 
-[Collection("KeyboardManager")]
-public sealed class KeyboardManagerTests : IDisposable
+[Collection("HotkeyManager")]
+public sealed class HotkeyManagerTests : IDisposable
 {
     readonly IApplication application = Application.Create();
 
-    public KeyboardManagerTests() => ResetKeyboardManager();
+    public HotkeyManagerTests() => ResetHotkeyManager();
 
     public void Dispose()
     {
-        ResetKeyboardManager();
+        ResetHotkeyManager();
         application.Dispose();
     }
 
     static Func<Task> NoopHandler => () => Task.CompletedTask;
 
-    static void ResetKeyboardManager()
+    static void ResetHotkeyManager()
     {
-        KeyboardManager.UnregisterAll();
-        KeyboardManager.OverlaySink = null;
-        KeyboardManager.PopupAutoCloseDelay = TimeSpan.FromSeconds(3);
-        LiveDisplayConsole.UnbindForTests();
+        HotkeyManager.UnregisterAll();
+        HotkeyManager.OverlaySink = null;
+        HotkeyManager.PopupAutoCloseDelay = TimeSpan.FromSeconds(3);
+        TerminalUi.UnbindForTests();
     }
 
     [Theory]
@@ -42,7 +42,7 @@ public sealed class KeyboardManagerTests : IDisposable
         ConsoleModifiers modifiers,
         string expected)
     {
-        Assert.Equal(expected, KeyboardManager.FormatKeyCombo(key, modifiers));
+        Assert.Equal(expected, HotkeyManager.FormatKeyCombo(key, modifiers));
     }
 
     [Theory]
@@ -52,8 +52,8 @@ public sealed class KeyboardManagerTests : IDisposable
     public void Register_RejectsCtrlTerminalFlowControlKeys(ConsoleKey key)
     {
         Assert.Throws<InvalidOperationException>(() =>
-            KeyboardManager.Register(key, ConsoleModifiers.Control, "reserved", NoopHandler));
-        Assert.Empty(KeyboardManager.Hotkeys);
+            HotkeyManager.Register(key, ConsoleModifiers.Control, "reserved", NoopHandler));
+        Assert.Empty(HotkeyManager.Hotkeys);
     }
 
     [Fact]
@@ -61,40 +61,40 @@ public sealed class KeyboardManagerTests : IDisposable
     {
         var owner = new object();
         var otherOwner = new object();
-        KeyboardManager.HotkeyEntry first;
-        using (KeyboardManager.RegisterScope(owner))
-            first = KeyboardManager.RegisterTracked(ConsoleKey.K, ConsoleModifiers.Control, "first", NoopHandler);
-        using (KeyboardManager.RegisterScope(otherOwner))
-            KeyboardManager.Register(ConsoleKey.A, "other", NoopHandler);
+        HotkeyManager.HotkeyEntry first;
+        using (HotkeyManager.RegisterScope(owner))
+            first = HotkeyManager.RegisterTracked(ConsoleKey.K, ConsoleModifiers.Control, "first", NoopHandler);
+        using (HotkeyManager.RegisterScope(otherOwner))
+            HotkeyManager.Register(ConsoleKey.A, "other", NoopHandler);
 
-        var replacement = KeyboardManager.RegisterTracked(
+        var replacement = HotkeyManager.RegisterTracked(
             ConsoleKey.K,
             ConsoleModifiers.Control,
             "replacement",
             NoopHandler);
 
-        Assert.False(KeyboardManager.Unregister(ConsoleKey.K, ConsoleModifiers.Control, first));
-        Assert.Same(replacement, KeyboardManager.Hotkeys[(ConsoleKey.K, ConsoleModifiers.Control)]);
-        Assert.Equal(1, KeyboardManager.UnregisterByOwner(otherOwner));
-        Assert.Single(KeyboardManager.Hotkeys);
-        Assert.True(KeyboardManager.Unregister(ConsoleKey.K, ConsoleModifiers.Control));
-        Assert.Empty(KeyboardManager.Hotkeys);
+        Assert.False(HotkeyManager.Unregister(ConsoleKey.K, ConsoleModifiers.Control, first));
+        Assert.Same(replacement, HotkeyManager.Hotkeys[(ConsoleKey.K, ConsoleModifiers.Control)]);
+        Assert.Equal(1, HotkeyManager.UnregisterByOwner(otherOwner));
+        Assert.Single(HotkeyManager.Hotkeys);
+        Assert.True(HotkeyManager.Unregister(ConsoleKey.K, ConsoleModifiers.Control));
+        Assert.Empty(HotkeyManager.Hotkeys);
     }
 
     [Fact]
     public async Task Popup_NavigatesClampsSelectsAndCloses()
     {
         var sink = new RecordingOverlaySink { PopupVisibleLineCount = 2 };
-        KeyboardManager.OverlaySink = sink;
-        KeyboardManager.PopupAutoCloseDelay = TimeSpan.Zero;
+        HotkeyManager.OverlaySink = sink;
+        HotkeyManager.PopupAutoCloseDelay = TimeSpan.Zero;
         var confirmedLine = -1;
-        KeyboardManager.ShowPopup(new KeyboardPopup(
+        HotkeyManager.ShowPopup(new HotkeyPopup(
             [
-                new("title", ConsoleColor.White),
-                new("first", ConsoleColor.White),
-                new("second", ConsoleColor.White)
+                new("title"),
+                new("first"),
+                new("second")
             ],
-            Selection: new KeyboardPopupSelection([1, 2], 0, line =>
+            Selection: new HotkeyPopupSelection([1, 2], 0, line =>
             {
                 confirmedLine = line;
                 return Task.CompletedTask;
@@ -119,32 +119,32 @@ public sealed class KeyboardManagerTests : IDisposable
         {
             HandleWorkspaceCommand = command => command == Command.Up
         };
-        KeyboardManager.OverlaySink = sink;
-        KeyboardManager.PopupAutoCloseDelay = TimeSpan.Zero;
+        HotkeyManager.OverlaySink = sink;
+        HotkeyManager.PopupAutoCloseDelay = TimeSpan.Zero;
         var calls = new List<string>();
 
-        KeyboardManager.Register(ConsoleKey.F8, "persistent", () =>
+        HotkeyManager.Register(ConsoleKey.F8, "persistent", () =>
         {
             calls.Add("persistent");
             return Task.CompletedTask;
         });
-        KeyboardManager.Register(ConsoleKey.UpArrow, "persistent-up", () =>
+        HotkeyManager.Register(ConsoleKey.UpArrow, "persistent-up", () =>
         {
             calls.Add("persistent-up");
             return Task.CompletedTask;
         });
-        var notification = KeyboardManager.RegisterNotificationShortcuts(
+        var notification = HotkeyManager.RegisterNotificationShortcuts(
             workspace: null,
             DateTimeOffset.Now.AddMinutes(1),
-            [new LiveDisplayShortcut(ConsoleKey.F8, () =>
+            [new UiShortcut(ConsoleKey.F8, () =>
             {
                 calls.Add("notification");
                 return Task.CompletedTask;
             })]);
 
-        KeyboardManager.ShowPopup(new KeyboardHandlerContext()
-            .WriteLine("popup")
-            .BindShortcut(new LiveDisplayShortcut(ConsoleKey.F8, () =>
+        HotkeyManager.ShowPopup(new HotkeyContext()
+            .AddLine("popup")
+            .BindShortcut(new UiShortcut(ConsoleKey.F8, () =>
             {
                 calls.Add("popup");
                 return Task.CompletedTask;
@@ -157,7 +157,7 @@ public sealed class KeyboardManagerTests : IDisposable
         await PressAsync(KeyCode.F8);
         Assert.Equal(["popup", "notification"], calls);
 
-        KeyboardManager.UnregisterNotificationShortcuts(notification);
+        HotkeyManager.UnregisterNotificationShortcuts(notification);
         await PressAsync(KeyCode.CursorUp);
         await PressAsync(KeyCode.F8);
 
@@ -169,24 +169,24 @@ public sealed class KeyboardManagerTests : IDisposable
     public async Task PopupBuiltInKey_PrecedesNotificationAndPersistentShortcut()
     {
         var sink = new RecordingOverlaySink();
-        KeyboardManager.OverlaySink = sink;
-        KeyboardManager.PopupAutoCloseDelay = TimeSpan.Zero;
+        HotkeyManager.OverlaySink = sink;
+        HotkeyManager.PopupAutoCloseDelay = TimeSpan.Zero;
         var notification = 0;
         var persistent = 0;
-        KeyboardManager.Register(ConsoleKey.Enter, "persistent", () =>
+        HotkeyManager.Register(ConsoleKey.Enter, "persistent", () =>
         {
             persistent++;
             return Task.CompletedTask;
         });
-        KeyboardManager.RegisterNotificationShortcuts(
+        HotkeyManager.RegisterNotificationShortcuts(
             workspace: null,
             DateTimeOffset.Now.AddMinutes(1),
-            [new LiveDisplayShortcut(ConsoleKey.Enter, () =>
+            [new UiShortcut(ConsoleKey.Enter, () =>
             {
                 notification++;
                 return Task.CompletedTask;
             })]);
-        KeyboardManager.ShowPopup(new KeyboardHandlerContext().WriteLine("popup"));
+        HotkeyManager.ShowPopup(new HotkeyContext().AddLine("popup"));
 
         await PressAsync(KeyCode.Enter);
 
@@ -198,18 +198,18 @@ public sealed class KeyboardManagerTests : IDisposable
     public async Task TransientShortcut_MatchesModifiersExactlyAndDoesNotClosePopup()
     {
         var sink = new RecordingOverlaySink();
-        KeyboardManager.OverlaySink = sink;
-        KeyboardManager.PopupAutoCloseDelay = TimeSpan.Zero;
+        HotkeyManager.OverlaySink = sink;
+        HotkeyManager.PopupAutoCloseDelay = TimeSpan.Zero;
         var transient = 0;
         var persistent = 0;
-        KeyboardManager.Register(ConsoleKey.K, "bare", () =>
+        HotkeyManager.Register(ConsoleKey.K, "bare", () =>
         {
             persistent++;
             return Task.CompletedTask;
         });
-        KeyboardManager.ShowPopup(new KeyboardHandlerContext()
-            .WriteLine("popup")
-            .BindShortcut(new LiveDisplayShortcut(
+        HotkeyManager.ShowPopup(new HotkeyContext()
+            .AddLine("popup")
+            .BindShortcut(new UiShortcut(
                 ConsoleKey.K,
                 () =>
                 {
@@ -233,18 +233,18 @@ public sealed class KeyboardManagerTests : IDisposable
     public async Task LatestUnexpiredNotificationShortcutWinsThenOlderResumes()
     {
         var calls = new List<string>();
-        KeyboardManager.RegisterNotificationShortcuts(
+        HotkeyManager.RegisterNotificationShortcuts(
             workspace: null,
             DateTimeOffset.Now.AddMinutes(1),
-            [new LiveDisplayShortcut(ConsoleKey.F9, () =>
+            [new UiShortcut(ConsoleKey.F9, () =>
             {
                 calls.Add("old");
                 return Task.CompletedTask;
             })]);
-        KeyboardManager.RegisterNotificationShortcuts(
+        HotkeyManager.RegisterNotificationShortcuts(
             workspace: null,
             DateTimeOffset.Now.AddMilliseconds(80),
-            [new LiveDisplayShortcut(ConsoleKey.F9, () =>
+            [new UiShortcut(ConsoleKey.F9, () =>
             {
                 calls.Add("new");
                 return Task.CompletedTask;
@@ -261,19 +261,19 @@ public sealed class KeyboardManagerTests : IDisposable
     public async Task MouseWheel_UsesTerminalGuiStepsAndSuppressesNonVerticalOrModifiedInput()
     {
         var sink = new RecordingOverlaySink { HandleWorkspaceCommand = _ => true };
-        KeyboardManager.OverlaySink = sink;
+        HotkeyManager.OverlaySink = sink;
 
-        await KeyboardManager.HandleMouseWheelAsync(2, hasModifiers: false);
-        await KeyboardManager.HandleMouseWheelAsync(-2, hasModifiers: false);
-        await KeyboardManager.HandleMouseWheelAsync(1, hasModifiers: true);
-        await KeyboardManager.HandleMouseWheelAsync(1, hasModifiers: false, isHorizontal: true);
+        await HotkeyManager.HandleMouseWheelAsync(2, hasModifiers: false);
+        await HotkeyManager.HandleMouseWheelAsync(-2, hasModifiers: false);
+        await HotkeyManager.HandleMouseWheelAsync(1, hasModifiers: true);
+        await HotkeyManager.HandleMouseWheelAsync(1, hasModifiers: false, isHorizontal: true);
 
         Assert.Equal(
             [Command.Up, Command.Up, Command.Down, Command.Down],
             sink.WorkspaceCommands);
 
-        KeyboardManager.ShowPopup(new KeyboardHandlerContext().WriteLine("popup"));
-        await KeyboardManager.HandleMouseWheelAsync(1, hasModifiers: false);
+        HotkeyManager.ShowPopup(new HotkeyContext().AddLine("popup"));
+        await HotkeyManager.HandleMouseWheelAsync(1, hasModifiers: false);
         Assert.Equal(4, sink.WorkspaceCommands.Count);
     }
 
@@ -281,7 +281,7 @@ public sealed class KeyboardManagerTests : IDisposable
     public async Task HandlerException_IsReportedWithoutBreakingLaterDispatch()
     {
         var attempts = 0;
-        KeyboardManager.Register(ConsoleKey.F10, "throws", () =>
+        HotkeyManager.Register(ConsoleKey.F10, "throws", () =>
         {
             attempts++;
             throw new InvalidOperationException("boom");
@@ -303,7 +303,7 @@ public sealed class KeyboardManagerTests : IDisposable
             removed,
             "removed",
             ttl: TimeSpan.FromMinutes(1),
-            shortcuts: new LiveDisplayShortcut(ConsoleKey.F7, () =>
+            shortcuts: new UiShortcut(ConsoleKey.F7, () =>
             {
                 calls.Add("removed");
                 return Task.CompletedTask;
@@ -312,7 +312,7 @@ public sealed class KeyboardManagerTests : IDisposable
             kept,
             "kept",
             ttl: TimeSpan.FromMinutes(1),
-            shortcuts: new LiveDisplayShortcut(ConsoleKey.F8, () =>
+            shortcuts: new UiShortcut(ConsoleKey.F8, () =>
             {
                 calls.Add("kept");
                 return Task.CompletedTask;
@@ -325,16 +325,16 @@ public sealed class KeyboardManagerTests : IDisposable
         Assert.Equal(["kept"], calls);
     }
 
-    static Task PressAsync(KeyCode keyCode) => KeyboardManager.HandleKeyAsync(new Key(keyCode));
+    static Task PressAsync(KeyCode keyCode) => HotkeyManager.HandleKeyAsync(new Key(keyCode));
 
-    sealed class RecordingOverlaySink : IKeyboardOverlaySink
+    sealed class RecordingOverlaySink : IUiInputSink
     {
         readonly List<Command> workspaceCommands = [];
 
         public int PopupVisibleLineCount { get; init; } = 10;
         public Func<Command, bool>? HandleWorkspaceCommand { get; init; }
         public IReadOnlyList<Command> WorkspaceCommands => workspaceCommands;
-        public KeyboardPopup? Popup { get; private set; }
+        public HotkeyPopup? Popup { get; private set; }
 
         public Task<bool> TryHandleWorkspaceCommandAsync(Command command)
         {
@@ -345,7 +345,7 @@ public sealed class KeyboardManagerTests : IDisposable
             return Task.FromResult(true);
         }
 
-        public void ShowPopup(KeyboardPopup popup, int generation) => Popup = popup;
+        public void ShowPopup(HotkeyPopup popup, int generation) => Popup = popup;
         public void HidePopup(int generation) => Popup = null;
     }
 }

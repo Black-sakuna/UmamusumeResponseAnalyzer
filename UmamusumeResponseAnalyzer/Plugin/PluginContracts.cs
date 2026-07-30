@@ -1,6 +1,6 @@
 using Gallop.Endpoints;
 using Terminal.Gui.App;
-using UmamusumeResponseAnalyzer.LiveDisplay;
+using UmamusumeResponseAnalyzer.TerminalGui;
 using HttpMethod = WatsonWebserver.Core.HttpMethod;
 
 namespace UmamusumeResponseAnalyzer.Plugin;
@@ -8,7 +8,7 @@ namespace UmamusumeResponseAnalyzer.Plugin;
 public interface IPluginContext
 {
     IApplication Application { get; }
-    ILiveDisplayOutput LiveDisplay { get; }
+    IWorkspaceOutput WorkspaceOutput { get; }
     IPluginHostEvents Events { get; }
     IPluginAnalyzerRegistry Analyzers { get; }
 }
