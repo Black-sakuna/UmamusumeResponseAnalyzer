@@ -10,40 +10,32 @@ namespace UmamusumeResponseAnalyzer.TerminalGui;
 static class ModalDialogs
 {
     const int PromptHeight = 3;
-    static readonly object ownerGate = new();
-    static IApplication? ownerApplication;
-    static SynchronizationContext? ownerContext;
-
-    internal static void BindOwner(IApplication app, SynchronizationContext context)
-    {
-        lock (ownerGate)
-        {
-            ownerApplication = app;
-            ownerContext = context;
-        }
-    }
-
-    internal static void UnbindOwner(IApplication app)
-    {
-        lock (ownerGate)
-        {
-            if (!ReferenceEquals(ownerApplication, app))
-                return;
-            ownerApplication = null;
-            ownerContext = null;
-        }
-    }
 
     public static async Task RunProgressAsync(
-        IApplication app,
         Func<IProgress<DownloadProgress>, CancellationToken, Task> action,
         CancellationToken cancellationToken = default)
+    {
+        var host = TerminalUi.RequireHost();
+        var app = host.Application;
+        var context = host.OwnerContext;
+        var lifetimeToken = host.LifetimeToken;
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
+            lifetimeToken,
+            cancellationToken);
+        await RunProgressAsync(app, context, action, linkedCts.Token);
+    }
+
+    static async Task RunProgressAsync(
+        IApplication app,
+        SynchronizationContext context,
+        Func<IProgress<DownloadProgress>, CancellationToken, Task> action,
+        CancellationToken cancellationToken)
     {
         if (Environment.CurrentManagedThreadId != app.MainThreadId)
         {
             await InvokeOnOwnerAsync(
-                app,
-                () => RunProgressAsync(app, action, cancellationToken));
+                context,
+                () => RunProgressAsync(app, context, action, cancellationToken));
             return;
         }
 
@@ -196,17 +188,34 @@ static class ModalDialogs
     }
 
     public static T Select<T>(
-        IApplication app,
         string title,
         IEnumerable<T> choices,
         Func<T, string>? converter = null,
         CancellationToken cancellationToken = default)
     {
+        var host = TerminalUi.RequireHost();
+        var app = host.Application;
+        var context = host.OwnerContext;
+        var lifetimeToken = host.LifetimeToken;
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
+            lifetimeToken,
+            cancellationToken);
+        return Select(app, context, title, choices, converter, linkedCts.Token);
+    }
+
+    static T Select<T>(
+        IApplication app,
+        SynchronizationContext context,
+        string title,
+        IEnumerable<T> choices,
+        Func<T, string>? converter,
+        CancellationToken cancellationToken)
+    {
         if (Environment.CurrentManagedThreadId != app.MainThreadId)
         {
             return InvokeOnOwner(
-                app,
-                () => Select(app, title, choices, converter, cancellationToken));
+                context,
+                () => Select(app, context, title, choices, converter, cancellationToken));
         }
 
         var values = choices.ToArray();
@@ -222,14 +231,35 @@ static class ModalDialogs
     }
 
     public static T Menu<T>(
-        IApplication app,
         string title,
         IEnumerable<T> choices,
         Func<T, string>? converter = null,
         CancellationToken cancellationToken = default)
     {
+        var host = TerminalUi.RequireHost();
+        var app = host.Application;
+        var context = host.OwnerContext;
+        var lifetimeToken = host.LifetimeToken;
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
+            lifetimeToken,
+            cancellationToken);
+        return Menu(app, context, title, choices, converter, linkedCts.Token);
+    }
+
+    static T Menu<T>(
+        IApplication app,
+        SynchronizationContext context,
+        string title,
+        IEnumerable<T> choices,
+        Func<T, string>? converter,
+        CancellationToken cancellationToken)
+    {
         if (Environment.CurrentManagedThreadId != app.MainThreadId)
-            return InvokeOnOwner(app, () => Menu(app, title, choices, converter, cancellationToken));
+        {
+            return InvokeOnOwner(
+                context,
+                () => Menu(app, context, title, choices, converter, cancellationToken));
+        }
 
         var values = choices.ToArray();
         if (values.Length == 0)
@@ -281,18 +311,50 @@ static class ModalDialogs
     }
 
     public static IReadOnlyList<T> MultiSelect<T>(
-        IApplication app,
         string title,
         IEnumerable<T> choices,
         IEnumerable<T>? selected = null,
         Func<T, string>? converter = null,
         CancellationToken cancellationToken = default)
     {
+        var host = TerminalUi.RequireHost();
+        var app = host.Application;
+        var context = host.OwnerContext;
+        var lifetimeToken = host.LifetimeToken;
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
+            lifetimeToken,
+            cancellationToken);
+        return MultiSelect(
+            app,
+            context,
+            title,
+            choices,
+            selected,
+            converter,
+            linkedCts.Token);
+    }
+
+    static IReadOnlyList<T> MultiSelect<T>(
+        IApplication app,
+        SynchronizationContext context,
+        string title,
+        IEnumerable<T> choices,
+        IEnumerable<T>? selected,
+        Func<T, string>? converter,
+        CancellationToken cancellationToken)
+    {
         if (Environment.CurrentManagedThreadId != app.MainThreadId)
         {
             return InvokeOnOwner(
-                app,
-                () => MultiSelect(app, title, choices, selected, converter, cancellationToken));
+                context,
+                () => MultiSelect(
+                    app,
+                    context,
+                    title,
+                    choices,
+                    selected,
+                    converter,
+                    cancellationToken));
         }
 
         var values = choices.ToArray();
@@ -326,14 +388,35 @@ static class ModalDialogs
     }
 
     public static string Ask(
-        IApplication app,
         string title,
         string? value = null,
         bool allowEmpty = false,
         CancellationToken cancellationToken = default)
     {
+        var host = TerminalUi.RequireHost();
+        var app = host.Application;
+        var context = host.OwnerContext;
+        var lifetimeToken = host.LifetimeToken;
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
+            lifetimeToken,
+            cancellationToken);
+        return Ask(app, context, title, value, allowEmpty, linkedCts.Token);
+    }
+
+    static string Ask(
+        IApplication app,
+        SynchronizationContext context,
+        string title,
+        string? value,
+        bool allowEmpty,
+        CancellationToken cancellationToken)
+    {
         if (Environment.CurrentManagedThreadId != app.MainThreadId)
-            return InvokeOnOwner(app, () => Ask(app, title, value, allowEmpty, cancellationToken));
+        {
+            return InvokeOnOwner(
+                context,
+                () => Ask(app, context, title, value, allowEmpty, cancellationToken));
+        }
 
         using var dialog = CreateDialog(title, height: 10);
         var input = new TextField
@@ -368,13 +451,33 @@ static class ModalDialogs
     }
 
     public static bool Confirm(
-        IApplication app,
         string title,
         bool defaultValue = false,
         CancellationToken cancellationToken = default)
     {
+        var host = TerminalUi.RequireHost();
+        var app = host.Application;
+        var context = host.OwnerContext;
+        var lifetimeToken = host.LifetimeToken;
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
+            lifetimeToken,
+            cancellationToken);
+        return Confirm(app, context, title, defaultValue, linkedCts.Token);
+    }
+
+    static bool Confirm(
+        IApplication app,
+        SynchronizationContext context,
+        string title,
+        bool defaultValue,
+        CancellationToken cancellationToken)
+    {
         if (Environment.CurrentManagedThreadId != app.MainThreadId)
-            return InvokeOnOwner(app, () => Confirm(app, title, defaultValue, cancellationToken));
+        {
+            return InvokeOnOwner(
+                context,
+                () => Confirm(app, context, title, defaultValue, cancellationToken));
+        }
 
         using var dialog = CreateDialog(title, height: 9);
         var result = false;
@@ -399,12 +502,31 @@ static class ModalDialogs
     }
 
     public static bool Acknowledge(
-        IApplication app,
         string title = "按 Enter 返回",
         CancellationToken cancellationToken = default)
     {
+        var host = TerminalUi.RequireHost();
+        var app = host.Application;
+        var context = host.OwnerContext;
+        var lifetimeToken = host.LifetimeToken;
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
+            lifetimeToken,
+            cancellationToken);
+        return Acknowledge(app, context, title, linkedCts.Token);
+    }
+
+    static bool Acknowledge(
+        IApplication app,
+        SynchronizationContext context,
+        string title,
+        CancellationToken cancellationToken)
+    {
         if (Environment.CurrentManagedThreadId != app.MainThreadId)
-            return InvokeOnOwner(app, () => Acknowledge(app, title, cancellationToken));
+        {
+            return InvokeOnOwner(
+                context,
+                () => Acknowledge(app, context, title, cancellationToken));
+        }
 
         using var dialog = CreateDialog(title, height: 9);
         var accepted = false;
@@ -515,9 +637,8 @@ static class ModalDialogs
         dialog.Add(list, ok, cancel);
     }
 
-    static T InvokeOnOwner<T>(IApplication app, Func<T> action)
+    static T InvokeOnOwner<T>(SynchronizationContext context, Func<T> action)
     {
-        var context = GetOwnerContext(app);
         T result = default!;
         ExceptionDispatchInfo? failure = null;
         context.Send(_ =>
@@ -535,9 +656,8 @@ static class ModalDialogs
         return result;
     }
 
-    internal static Task InvokeOnOwnerAsync(IApplication app, Func<Task> action)
+    static Task InvokeOnOwnerAsync(SynchronizationContext context, Func<Task> action)
     {
-        var context = GetOwnerContext(app);
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         context.Post(_ =>
         {
@@ -576,19 +696,6 @@ static class ModalDialogs
                 TaskScheduler.Default);
         }, null);
         return completion.Task;
-    }
-
-    static SynchronizationContext GetOwnerContext(IApplication app)
-    {
-        lock (ownerGate)
-        {
-            if (!ReferenceEquals(ownerApplication, app) || ownerContext is null)
-            {
-                throw new InvalidOperationException(
-                    "Terminal.Gui dialog owner dispatcher 尚未绑定。");
-            }
-            return ownerContext;
-        }
     }
 
     sealed class DialogProgress(

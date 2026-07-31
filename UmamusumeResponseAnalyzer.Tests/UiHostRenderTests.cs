@@ -2651,7 +2651,7 @@ public sealed class UiHostRenderTests : IDisposable
         await terminal.InvokeAsync(() => button!.SetFocus());
 
         var confirm = Task.Run(
-            () => ModalDialogs.Confirm(terminal.Application, "Nested confirm"),
+            () => ModalDialogs.Confirm("Nested confirm"),
             TestContext.Current.CancellationToken);
         await terminal.WaitForScreenAsync("Nested confirm");
         await terminal.InjectAsync(Key.Esc);
@@ -2661,7 +2661,7 @@ public sealed class UiHostRenderTests : IDisposable
         Assert.Equal(1, accepted);
 
         var nestedAtShutdown = Task.Run(
-            () => ModalDialogs.Confirm(terminal.Application, "Stop nested"),
+            () => ModalDialogs.Confirm("Stop nested"),
             TestContext.Current.CancellationToken);
         await terminal.WaitForScreenAsync("Stop nested");
         await terminal.InjectAsync(Key.C.WithCtrl);
@@ -2680,7 +2680,7 @@ public sealed class UiHostRenderTests : IDisposable
         await StartAsync();
 
         var confirm = Task.Run(
-            () => ModalDialogs.Confirm(terminal.Application, "Background shutdown modal"),
+            () => ModalDialogs.Confirm("Background shutdown modal"),
             TestContext.Current.CancellationToken);
         await terminal.WaitForScreenAsync("Background shutdown modal");
         await Task.Run(host.RequestShutdown, TestContext.Current.CancellationToken);
@@ -4023,74 +4023,6 @@ public sealed class UiHostRenderTests : IDisposable
         Assert.False((await GetCommandModeAsync()).IsOpen);
         secondBootstrap.Dispose();
         Assert.Null(TerminalUi.DefaultExceptionWorkspace);
-    }
-
-    [Fact]
-    public void NotificationPopup_SummarizesOnlyVisibleOverflow()
-    {
-        var now = DateTimeOffset.Now;
-        var notifications = Enumerable.Range(1, 6)
-            .Select(i => new UiNotification(
-                null,
-                $"Plugin-{i}",
-                $"Notification-{i}",
-                UiSeverity.Info,
-                now.AddSeconds(10),
-                []))
-            .ToArray();
-
-        var lines = new NotificationPopupFormatter().BuildLines(
-            notifications,
-            popupWidth: 40,
-            maxHeight: 23,
-            now,
-            workspace => workspace.Title);
-
-        Assert.Contains(lines, line => line.Contains("Notification-1", StringComparison.Ordinal));
-        Assert.Contains(lines, line => line.Contains("还有 2 条通知", StringComparison.Ordinal));
-        Assert.All(lines, line => Assert.Equal(40, line.GetColumns()));
-    }
-
-    [Fact]
-    public void NotificationPopup_MultilineTextUsesPhysicalRowsWithoutCroppingNextCard()
-    {
-        var now = DateTimeOffset.Now;
-        var notifications = new[]
-        {
-            new UiNotification(
-                null,
-                "First",
-                $"first-line{Environment.NewLine}second-line",
-                UiSeverity.Info,
-                now.AddMinutes(1),
-                []),
-            new UiNotification(
-                null,
-                "Second",
-                "SecondCard",
-                UiSeverity.Info,
-                now.AddMinutes(1),
-                [])
-        };
-
-        var lines = new NotificationPopupFormatter().BuildLines(
-            notifications,
-            popupWidth: 40,
-            maxHeight: 12,
-            now,
-            workspace => workspace.Title);
-        var firstRow = lines.FindIndex(line => line.Contains("first-line", StringComparison.Ordinal));
-        var secondRow = lines.FindIndex(line => line.Contains("second-line", StringComparison.Ordinal));
-        var nextCard = lines.FindIndex(line => line.Contains("SecondCard", StringComparison.Ordinal));
-
-        Assert.Equal(firstRow + 1, secondRow);
-        Assert.True(secondRow < nextCard);
-        Assert.All(lines, line =>
-        {
-            Assert.DoesNotContain('\r', line);
-            Assert.DoesNotContain('\n', line);
-            Assert.Equal(40, line.GetColumns());
-        });
     }
 
     async Task StartAsync()

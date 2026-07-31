@@ -30,8 +30,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
             }
             catch (Exception ex)
             {
-                ModalDialogs.Acknowledge(
-                    TerminalUi.Application,
+                TerminalUi.Acknowledge(
                     $"插件仓库操作失败：{ex.Message}",
                     cancellationToken);
             }
@@ -42,8 +41,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
             var plugins = await FetchAllPluginsAsync(cancellationToken: cancellationToken);
             if (plugins.Count == 0)
             {
-                ModalDialogs.Acknowledge(
-                    TerminalUi.Application,
+                TerminalUi.Acknowledge(
                     "插件仓库没有可用插件",
                     cancellationToken);
                 return;
@@ -91,16 +89,14 @@ namespace UmamusumeResponseAnalyzer.Plugin
                     .ToList();
                 if (needRestart.Count == 0)
                 {
-                    ModalDialogs.Acknowledge(
-                        TerminalUi.Application,
+                    TerminalUi.Acknowledge(
                         $"插件已安装并生效：{string.Join("、", installed)}",
                         cancellationToken);
                 }
                 else
                 {
                     // 无法热重载的情形（如 [LoadInHostContext] 插件）通过重启完成应用。
-                    var restart = ModalDialogs.Acknowledge(
-                        TerminalUi.Application,
+                    var restart = TerminalUi.Acknowledge(
                         $"需重启以应用插件：{string.Join("、", needRestart)}",
                         cancellationToken);
                     if (restart)
