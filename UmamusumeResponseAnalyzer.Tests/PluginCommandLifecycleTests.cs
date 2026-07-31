@@ -1,6 +1,11 @@
+using System.Net;
+using System.Net.Sockets;
 using System.Reflection;
-using UmamusumeResponseAnalyzer.TerminalGui;
+using UmamusumeResponseAnalyzer.Commands;
 using UmamusumeResponseAnalyzer.Plugin;
+using UmamusumeResponseAnalyzer.TerminalGui;
+using WatsonWebserver.Core;
+using WatsonWebserver.Lite;
 using Xunit;
 
 namespace UmamusumeResponseAnalyzer.Tests;
@@ -10,138 +15,288 @@ public sealed class PluginCommandLifecycleTests : IDisposable
 {
     readonly string originalCwd;
     readonly string tempDir;
-    readonly TerminalGuiTestApp terminal;
-    readonly UiHost host;
-    Task? run;
 
-    public PluginCommandLifecycleTests()
+    public PluginCommandLifecycleTests(PluginRuntimeFixture runtime)
     {
-        ResetHotkeyManager();
         SeedConfig();
         ResetPluginState();
+        HotkeyManager.UnregisterAll();
+        HotkeyManager.OverlaySink = runtime.Host;
 
         originalCwd = Directory.GetCurrentDirectory();
-        tempDir = Path.Combine(Path.GetTempPath(), "ura-plugin-command-" + Guid.NewGuid().ToString("N"));
+        tempDir = Path.Combine(
+            Path.GetTempPath(),
+            "ura-plugin-command-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(Path.Combine(tempDir, "Plugins"));
         Directory.SetCurrentDirectory(tempDir);
-
-        terminal = new(width: 120, height: 35);
-        host = new(terminal.Application, static () => [], static _ => { });
-        terminal.RunOnOwnerThread(() => TerminalUi.Bind(host, terminal.Application));
-        HotkeyManager.OverlaySink = host;
-        PluginManager.BindWorkspaceOutput(terminal.Application, plugin => host.ForPlugin(plugin.Name));
     }
 
     public void Dispose()
     {
+        ResetPluginState();
+        HotkeyManager.UnregisterAll();
+        Directory.SetCurrentDirectory(originalCwd);
+        try { Directory.Delete(tempDir, recursive: true); } catch { }
+    }
+
+    [Fact]
+    public async Task PluginCommands_LoadUnloadReloadUseRealPluginManager()
+    {
+        const string pluginName = "CommandLifecycle";
+        var pluginPath = Path.Combine(tempDir, "Plugins", $"{pluginName}.dll");
+        PluginCompiler.Compile(PluginSource(pluginName, version: 1), pluginName, pluginPath);
+        PluginManager.Init();
+        Assert.False(Server.IsRunning, "前置条件:plugin command 在初始插件阶段完成后、HTTP server 启动前执行");
+        PluginManager.InitializeLoadedPlugins();
+        AssertInitializedAndOpen(pluginName);
+
+        var unload = Assert.IsType<HostCommands.Result>(
+            await HostCommands.ExecuteAsync(
+                $"/plugin unload {pluginName.ToLowerInvariant()}",
+                Snapshot()));
+        AssertLifecycleSuccess(unload, pluginName, "卸载");
+        Assert.DoesNotContain(
+            PluginManager.SnapshotLoadedPlugins(),
+            plugin => PluginManager.InternalName(plugin) == pluginName);
+        Assert.True(File.Exists(pluginPath));
+
+        var load = Assert.IsType<HostCommands.Result>(
+            await HostCommands.ExecuteAsync($"/plugin load {pluginName}", Snapshot()));
+        AssertLifecycleSuccess(load, pluginName, "加载");
+        AssertInitializedAndOpen(pluginName);
+
+        PluginCompiler.Compile(PluginSource(pluginName, version: 2), pluginName, pluginPath);
+        var reload = Assert.IsType<HostCommands.Result>(
+            await HostCommands.ExecuteAsync($"/plugin reload {pluginName}", Snapshot()));
+        AssertLifecycleSuccess(reload, pluginName, "重载");
+        AssertInitializedAndOpen(pluginName);
+        Assert.Equal(
+            new Version(2, 0),
+            Assert.Single(HostCommands.SnapshotPlugins(), plugin =>
+                plugin.InternalName == pluginName).Version);
+    }
+
+    [Fact]
+    public async Task PluginCommand_PreCancelledMutationDoesNotStart()
+    {
+        const string pluginName = "CommandCancellation";
+        PluginCompiler.Compile(
+            PluginSource(pluginName, version: 1),
+            pluginName,
+            Path.Combine(tempDir, "Plugins", $"{pluginName}.dll"));
+        PluginManager.Init();
+        Assert.False(Server.IsRunning, "前置条件:plugin command 在 HTTP server 启动前执行");
+        PluginManager.InitializeLoadedPlugins();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            HostCommands.ExecuteAsync(
+                $"/plugin unload {pluginName}",
+                Snapshot(),
+                new CancellationToken(canceled: true)));
+
+        Assert.Contains(
+            PluginManager.SnapshotLoadedPlugins(),
+            plugin => PluginManager.InternalName(plugin) == pluginName);
+    }
+
+    [Fact]
+    public async Task PluginCommand_UnloadFailurePropagatesAfterRealCleanup()
+    {
+        const string pluginName = "CommandDisposeFailure";
+        PluginCompiler.Compile(
+            PluginSource(pluginName, version: 1, failDispose: true),
+            pluginName,
+            Path.Combine(tempDir, "Plugins", $"{pluginName}.dll"));
+        PluginManager.Init();
+        Assert.False(Server.IsRunning, "前置条件:plugin command 在 HTTP server 启动前执行");
+        PluginManager.InitializeLoadedPlugins();
+
+        var error = await Assert.ThrowsAsync<AggregateException>(() =>
+            HostCommands.ExecuteAsync($"/plugin unload {pluginName}", Snapshot()));
+
+        Assert.Contains(error.InnerExceptions, exception =>
+            exception.Message.Contains(pluginName, StringComparison.Ordinal));
+        Assert.DoesNotContain(
+            PluginManager.SnapshotLoadedPlugins(),
+            plugin => PluginManager.InternalName(plugin) == pluginName);
+
+        var load = Assert.IsType<HostCommands.Result>(
+            await HostCommands.ExecuteAsync($"/plugin load {pluginName}", Snapshot()));
+        AssertLifecycleSuccess(load, pluginName, "加载");
+    }
+
+    [Fact]
+    public async Task PluginCommand_InitializeFailureIsNotReportedAsRestartRequired()
+    {
+        const string pluginName = "CommandInitializeFailure";
+        PluginCompiler.Compile(
+            PluginSource(pluginName, version: 1, failInitialize: true),
+            pluginName,
+            Path.Combine(tempDir, "Plugins", $"{pluginName}.dll"));
+        PluginManager.Init();
+        PluginManager.InitializeLoadedPlugins();
+
+        var result = Assert.IsType<HostCommands.Result>(
+            await HostCommands.ExecuteAsync($"/plugin load {pluginName}", Snapshot()));
+
+        Assert.Equal($"插件 {pluginName} 加载失败。", result.Message);
+        Assert.Equal(UiSeverity.Error, result.Severity);
+        Assert.True(result.RefreshSnapshot);
+        Assert.DoesNotContain("重启", result.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            PluginManager.SnapshotLoadedPlugins(),
+            plugin => PluginManager.InternalName(plugin) == pluginName);
+    }
+
+    [Fact]
+    public async Task PluginCommand_LoadInHostReloadIsReportedAsRestartRequired()
+    {
+        const string pluginName = "CommandLoadInHost";
+        PluginCompiler.Compile(
+            PluginSource(pluginName, version: 1, loadInHost: true),
+            pluginName,
+            Path.Combine(tempDir, "Plugins", $"{pluginName}.dll"));
+        PluginManager.Init();
+        PluginManager.InitializeLoadedPlugins();
+
+        var result = Assert.IsType<HostCommands.Result>(
+            await HostCommands.ExecuteAsync($"/plugin reload {pluginName}", Snapshot()));
+
+        Assert.Equal($"插件 {pluginName} 需要重启才能重载。", result.Message);
+        Assert.Equal(UiSeverity.Warning, result.Severity);
+        Assert.True(result.RefreshSnapshot);
+        Assert.Contains(
+            PluginManager.SnapshotLoadedPlugins(),
+            plugin => PluginManager.InternalName(plugin) == pluginName);
+    }
+
+    [Fact]
+    public async Task StartedPhaseDeliversOnceAcrossPreGlobalLoadAndPostGlobalReload()
+    {
+        const string pluginName = "StartedPhasePlugin";
+        var pluginPath = Path.Combine(tempDir, "Plugins", $"{pluginName}.dll");
+        PluginManager.Init();
+        PluginManager.InitializeLoadedPlugins();
+
+        var originalServer = Server.Instance;
+        using var listeningServer = new WebserverLite(
+            new WebserverSettings("127.0.0.1", GetFreePort()),
+            context => context.Response.Send(string.Empty));
+        Server.Instance = listeningServer;
         try
         {
-            if (run is { IsCompleted: false })
-            {
-                host.RequestShutdown();
-                if (!run.Wait(TimeSpan.FromSeconds(5)))
-                    throw new TimeoutException("Plugin command UI session did not stop.");
-            }
+            listeningServer.Start(TestContext.Current.CancellationToken);
+            using var listeningTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            while (!Server.IsRunning)
+                await Task.Delay(10, listeningTimeout.Token);
+            Assert.True(Server.IsRunning);
+
+            PluginCompiler.Compile(PluginSource(pluginName, version: 1), pluginName, pluginPath);
+            AssertLifecycleOutcome(await PluginManager.LoadPluginsAsync(pluginName), pluginName);
+            AssertInitializedAndOpen(pluginName, startedCalls: 0);
+
+            await PluginManager.TriggerStartedAsync();
+            AssertInitializedAndOpen(pluginName, startedCalls: 1);
+            await PluginManager.TriggerStartedAsync();
+            AssertInitializedAndOpen(pluginName, startedCalls: 1);
+
+            PluginCompiler.Compile(PluginSource(pluginName, version: 2), pluginName, pluginPath);
+            AssertLifecycleOutcome(await PluginManager.ReloadPluginsAsync(pluginName), pluginName);
+            AssertInitializedAndOpen(pluginName, startedCalls: 1);
+            AssertLifecycleOutcome(await PluginManager.UnloadPluginsAsync(pluginName), pluginName);
         }
         finally
         {
-            try
-            {
-                terminal.RunOnOwnerThread(() => TerminalUi.Unbind(host));
-                terminal.Dispose();
-            }
-            finally
-            {
-                ResetHotkeyManager();
-                ResetPluginState();
-                Directory.SetCurrentDirectory(originalCwd);
-                try { Directory.Delete(tempDir, recursive: true); } catch { }
-            }
+            Server.Instance = originalServer;
         }
     }
 
-    [Fact]
-    public async Task PluginCommand_ReloadSuccessShowsProgressPopup()
+    HostCommands.Snapshot Snapshot()
+        => new([], null, HostCommands.SnapshotPlugins());
+
+    static void AssertLifecycleSuccess(
+        HostCommands.Result result,
+        string pluginName,
+        string action)
     {
-        var pluginPath = Path.Combine(tempDir, "Plugins", "CommandPopup.dll");
-        PluginCompiler.Compile(PluginSource("CommandPopup"), "CommandPopup", pluginPath);
-        PluginManager.Init();
-        var workspace = host.CreateWorkspace("插件");
-        host.SetPanel(new WorkspacePanel(
-            workspace,
-            "Plugin",
-            "main",
-            "插件",
-            WorkspaceContent.Text("PluginBody"),
-            DateTimeOffset.Now));
-        run = await terminal.StartAsync(host);
-
-        await host.HandleCommandAsync("/plugin reload CommandPopup");
-        await terminal.WaitForScreenAsync("CommandPopup 已重载");
-        var screen = await terminal.CaptureScreenAsync();
-        var popup = await terminal.InvokeAsync(host.GetHotkeyPopupForTests);
-
-        Assert.NotNull(popup);
-        Assert.Contains(popup.Lines, line => line.Text == "Plugin command");
-        Assert.Contains(popup.Lines, line =>
-            line.Text.Contains("CommandPopup 已重载", StringComparison.Ordinal));
-        Assert.Contains("PluginBody", screen);
-        Assert.DoesNotContain("用法: /plugin", screen);
+        Assert.Equal($"插件 {pluginName} 已{action}。", result.Message);
+        Assert.Equal(UiSeverity.Success, result.Severity);
+        Assert.True(result.RefreshSnapshot);
+        Assert.Equal("Plugin command", result.Display?.Title);
+        Assert.Equal(
+            $"{pluginName} 已{action}。",
+            Assert.Single(result.Display!.Items).Text);
     }
 
-    [Fact]
-    public async Task ReloadedPlugin_CanInitializeAndPostOutputWhileMainLoopRuns()
+    static void AssertLifecycleOutcome(
+        IReadOnlyList<PluginManager.PluginLifecycleResult> results,
+        string pluginName)
     {
-        var pluginPath = Path.Combine(tempDir, "Plugins", "CommandOutput.dll");
-        PluginCompiler.Compile(
-            PluginSource("CommandOutput", writesConsoleOutput: true),
-            "CommandOutput",
-            pluginPath);
-        PluginManager.Init();
-        run = await terminal.StartAsync(host);
-
-        await host.HandleCommandAsync("/plugin reload CommandOutput")
-            .WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-        PluginManager.InitializePlugin(
-            Assert.Single(PluginManager.LoadedPlugins, plugin => plugin.Name == "CommandOutput"));
-        await terminal.WaitForAsync(async () =>
-            await terminal.InvokeAsync(() =>
-                host.GetLogsForTests(null).Any(line =>
-                    line.Text.Contains("PLUGIN_INIT_OUTPUT", StringComparison.Ordinal))));
-        var logs = await terminal.InvokeAsync(() => host.GetLogsForTests(null).ToArray());
-
-        Assert.True(host.IsRunning);
-        Assert.Contains(
-            logs,
-            line => line.Text.Contains("PLUGIN_INIT_OUTPUT", StringComparison.Ordinal));
+        var result = Assert.Single(results);
+        Assert.Equal(pluginName, result.PluginName);
+        Assert.Equal(PluginManager.PluginLifecycleOutcome.Succeeded, result.Outcome);
     }
 
-    static string PluginSource(string pluginName, bool writesConsoleOutput = false)
+    static void AssertInitializedAndOpen(string pluginName, int startedCalls = 0)
     {
-        var initialize = writesConsoleOutput
-            ? "TerminalUi.Log(\"URA\", \"PLUGIN_INIT_OUTPUT\");"
+        var plugin = Assert.Single(
+            PluginManager.SnapshotLoadedPlugins(),
+            candidate => PluginManager.InternalName(candidate) == pluginName);
+        Assert.True(Assert.IsType<bool>(plugin.GetType().GetProperty("Initialized")!.GetValue(plugin)));
+        Assert.Equal(startedCalls, Assert.IsType<int>(plugin.GetType().GetProperty("StartedCalls")!.GetValue(plugin)));
+        using var callback = PluginManager.TryEnterPluginCallback(plugin);
+        Assert.NotNull(callback);
+    }
+
+    static int GetFreePort()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        return ((IPEndPoint)listener.LocalEndpoint).Port;
+    }
+
+    static string PluginSource(
+        string pluginName,
+        int version,
+        bool failDispose = false,
+        bool failInitialize = false,
+        bool loadInHost = false)
+    {
+        var dispose = failDispose
+            ? "throw new InvalidOperationException(\"dispose failed\");"
             : string.Empty;
+        var initialize = failInitialize
+            ? "throw new InvalidOperationException(\"initialize failed\");"
+            : """
+                Initialized = true;
+                context.Events.OnStarted(_ =>
+                {
+                    StartedCalls++;
+                    return ValueTask.CompletedTask;
+                });
+                """;
+        var attribute = loadInHost ? "[assembly: LoadInHostContext]" : string.Empty;
         return $$"""
-            using UmamusumeResponseAnalyzer.TerminalGui;
+            using System;
+            using System.Threading.Tasks;
             using UmamusumeResponseAnalyzer.Plugin;
 
+            {{attribute}}
             public sealed class {{pluginName}} : IPlugin
             {
                 public string Name => "{{pluginName}}";
                 public string Author => "Test";
-                public string[] Targets => System.Array.Empty<string>();
+                public Version Version => new({{version}}, 0);
+                public string[] Targets => Array.Empty<string>();
+                public bool Initialized { get; private set; }
+                public int StartedCalls { get; private set; }
 
-                public void Initialize(IPluginContext context) { {{initialize}} }
+                public void Initialize(IPluginContext context)
+                {
+                    {{initialize}}
+                }
+                public void Dispose() { {{dispose}} }
             }
             """;
-    }
-
-    static void ResetHotkeyManager()
-    {
-        HotkeyManager.UnregisterAll();
-        HotkeyManager.OverlaySink = null;
-        HotkeyManager.PopupAutoCloseDelay = TimeSpan.FromSeconds(3);
-        TerminalUi.UnbindForTests();
     }
 
     static void ResetPluginState()
@@ -165,8 +320,11 @@ public sealed class PluginCommandLifecycleTests : IDisposable
 
     static void SeedConfig()
     {
-        var current = typeof(Config).GetProperty("Current", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var current = typeof(Config).GetProperty(
+            "Current",
+            BindingFlags.NonPublic | BindingFlags.Static)!;
         if (current.GetValue(null) is null)
+        {
             current.SetValue(null, new YamlConfig
             {
                 Core = new(),
@@ -176,5 +334,6 @@ public sealed class PluginCommandLifecycleTests : IDisposable
                 Language = new(),
                 Misc = new(),
             });
+        }
     }
 }
