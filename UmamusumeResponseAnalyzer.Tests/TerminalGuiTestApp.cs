@@ -18,6 +18,7 @@ internal sealed class TerminalGuiTestApp : IDisposable
     readonly int initialWidth;
     readonly int initialHeight;
     IApplication? ownedApplication;
+    int disposed;
 
     public TerminalGuiTestApp(int width = 80, int height = 24)
     {
@@ -26,7 +27,16 @@ internal sealed class TerminalGuiTestApp : IDisposable
         Time = new VirtualTimeProvider();
         uiThread = new Thread(RunUiThread) { IsBackground = true, Name = "Terminal.Gui test" };
         uiThread.Start();
-        Application = applicationReady.Task.WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+        try
+        {
+            Application = applicationReady.Task.WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+        }
+        catch
+        {
+            Interlocked.Exchange(ref disposed, 1);
+            StopUiThread();
+            throw;
+        }
     }
 
     public IApplication Application { get; }
@@ -46,52 +56,65 @@ internal sealed class TerminalGuiTestApp : IDisposable
         completion.Task.WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
     }
 
-    public async Task<Task> StartAsync(UiHost host, CancellationToken cancellationToken = default)
-        => await StartAsync(() => host.RunAsync(cancellationToken));
+    public async Task<Task> StartAsync(UiHost host)
+        => await StartAsync(host.RunAsync);
 
     public async Task<Task> StartAsync(Func<Task> run)
     {
-        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        runs.Add(new(run, completion));
-        await WaitForAsync(() => Application.TopRunnableView is not null || completion.Task.IsCompleted);
-        if (completion.Task.IsCompleted)
-            return completion.Task;
-
-        var runnable = Application.TopRunnableView!;
-        var screenReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        Application.Invoke(() =>
+        try
         {
-            try
+            var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            runs.Add(new(run, completion));
+            await WaitForAsync(() => Application.TopRunnableView is not null || completion.Task.IsCompleted);
+            if (completion.Task.IsCompleted)
             {
-                if (completion.Task.IsCompleted ||
-                    !ReferenceEquals(Application.TopRunnableView, runnable))
-                {
-                    screenReady.TrySetResult();
-                    return;
-                }
-
-                var driver = Application.Driver
-                    ?? throw new InvalidOperationException("Terminal.Gui driver was not initialized.");
-                driver.SetScreenSize(initialWidth, initialHeight);
-                Application.LayoutAndDraw(forceRedraw: true);
-                if (driver.Screen.Width != initialWidth ||
-                    driver.Screen.Height != initialHeight ||
-                    runnable.NeedsLayout)
-                {
-                    throw new InvalidOperationException("Terminal.Gui test screen did not stabilize.");
-                }
-
-                screenReady.SetResult();
+                await completion.Task;
+                return completion.Task;
             }
-            catch (Exception ex)
+
+            var runnable = Application.TopRunnableView!;
+            var screenReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            Application.Invoke(() =>
             {
-                screenReady.SetException(ex);
-            }
-        });
+                try
+                {
+                    if (completion.Task.IsCompleted ||
+                        !ReferenceEquals(Application.TopRunnableView, runnable))
+                    {
+                        screenReady.TrySetResult();
+                        return;
+                    }
 
-        if (await Task.WhenAny(screenReady.Task, completion.Task) == screenReady.Task)
-            await screenReady.Task;
-        return completion.Task;
+                    var driver = Application.Driver
+                        ?? throw new InvalidOperationException("Terminal.Gui driver was not initialized.");
+                    driver.SetScreenSize(initialWidth, initialHeight);
+                    Application.LayoutAndDraw(forceRedraw: true);
+                    if (driver.Screen.Width != initialWidth ||
+                        driver.Screen.Height != initialHeight ||
+                        runnable.NeedsLayout)
+                    {
+                        throw new InvalidOperationException("Terminal.Gui test screen did not stabilize.");
+                    }
+
+                    screenReady.SetResult();
+                }
+                catch (Exception ex)
+                {
+                    screenReady.SetException(ex);
+                }
+            });
+
+            if (await Task.WhenAny(screenReady.Task, completion.Task) == screenReady.Task)
+                await screenReady.Task;
+            if (completion.Task.IsCompleted)
+                await completion.Task;
+            return completion.Task;
+        }
+        catch
+        {
+            Dispose();
+            throw;
+        }
     }
 
     public Task InjectAsync(Key key) => InvokeAsync(() => Application.InjectKey(key));
@@ -147,7 +170,21 @@ internal sealed class TerminalGuiTestApp : IDisposable
 
     public void Dispose()
     {
-        StopAllSessions();
+        if (Interlocked.Exchange(ref disposed, 1) != 0)
+            return;
+
+        try
+        {
+            StopAllSessions();
+        }
+        finally
+        {
+            StopUiThread();
+        }
+    }
+
+    void StopUiThread()
+    {
         runs.CompleteAdding();
         if (!uiThread.Join(TimeSpan.FromSeconds(5)))
             throw new TimeoutException("Terminal.Gui test thread did not stop.");

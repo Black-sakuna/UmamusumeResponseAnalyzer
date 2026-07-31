@@ -589,6 +589,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         internal const string SyntheticFuturePluginSource = """
                 using System;
                 using System.Collections.Generic;
+                using System.Threading;
                 using System.Threading.Tasks;
                 using Terminal.Gui.ViewBase;
                 using UmamusumeResponseAnalyzer.Plugin;
@@ -602,7 +603,27 @@ namespace UmamusumeResponseAnalyzer.Tests
                     bool SharedPanelRemoved, bool MissingPanelRemoved,
                     bool BackgroundPanelRemoved, bool RecreatedGeneration,
                     bool RecreatedCanonicalReference, bool RecreatedCurrentReference,
-                    int TombstoneFailureCount);
+                    int TombstoneFailureCount)
+                {
+                    public string Format() => string.Join(
+                        Environment.NewLine,
+                        new[]
+                        {
+                            $"WorkspaceTitlePrefix={WorkspaceTitle.StartsWith("Synthetic Future Workspace ", StringComparison.Ordinal)}",
+                            $"Panel={PanelKey}|{PanelTitle}|{PanelText}",
+                            $"Log={LogText}",
+                            $"Notification={NotificationText}",
+                            $"CanonicalReference={CanonicalReference}",
+                            $"CurrentReference={CurrentReference}",
+                            $"SharedPanelRemoved={SharedPanelRemoved}",
+                            $"MissingPanelRemoved={MissingPanelRemoved}",
+                            $"BackgroundPanelRemoved={BackgroundPanelRemoved}",
+                            $"RecreatedGeneration={RecreatedGeneration}",
+                            $"RecreatedCanonicalReference={RecreatedCanonicalReference}",
+                            $"RecreatedCurrentReference={RecreatedCurrentReference}",
+                            $"TombstoneFailureCount={TombstoneFailureCount}"
+                        });
+                }
 
                 public sealed class SyntheticFuturePlugin : IPlugin
                 {
@@ -676,14 +697,12 @@ namespace UmamusumeResponseAnalyzer.Tests
                         var tombstoneFailureCount = VerifyTombstone(workspace);
 
                         ExerciseHotkeySurface(shortcut);
-                        Require(DialogSurface().Length == 5, "Dialog compile surface must remain callable without showing dialogs.");
+                        ExerciseDialogSurface();
 
                         SyntheticPanelWriterA.Write(recreated, panelKey, "First caller final", "first caller final content");
                         SyntheticPanelWriterB.Write(recreated, panelKey, finalPanelTitle, finalPanelText);
                         recreated.Log(sharedLogText, UiSeverity.Success);
                         recreated.Notify(sharedNotificationText, UiSeverity.Info, TimeSpan.Zero, shortcut);
-                        TerminalUi.Log("SyntheticFuturePlugin", "global", UiSeverity.Info);
-                        TerminalUi.Notify("SyntheticFuturePlugin", "global", UiSeverity.Info, TimeSpan.Zero);
 
                         return new(
                             recreated, workspaceTitle,
@@ -700,17 +719,29 @@ namespace UmamusumeResponseAnalyzer.Tests
 
                     public static void UnregisterAllInIsolatedChildProcess() => HotkeyManager.UnregisterAll();
 
-                    public static Delegate[] DialogSurface()
+                    static void ExerciseDialogSurface()
                     {
+                        var cancellation = new CancellationToken(canceled: true);
                         var choices = new[] { "one" };
-                        return new Delegate[]
+                        ExpectCanceled(() => TerminalUi.Select("Select value", new[] { 1 }, cancellationToken: cancellation));
+                        ExpectCanceled(() => TerminalUi.MultiSelect("MultiSelect", choices, cancellationToken: cancellation));
+                        ExpectCanceled(() => TerminalUi.Ask("Ask", cancellationToken: cancellation));
+                        ExpectCanceled(() => TerminalUi.Confirm("Confirm", cancellationToken: cancellation));
+                        ExpectCanceled(() => TerminalUi.Acknowledge(cancellationToken: cancellation));
+                    }
+
+                    static void ExpectCanceled(Action action)
+                    {
+                        try
                         {
-                            (Func<int>)(() => TerminalUi.Select("Select value", new[] { 1 })),
-                            (Func<IReadOnlyList<string>>)(() => TerminalUi.MultiSelect("MultiSelect", choices)),
-                            (Func<string>)(() => TerminalUi.Ask("Ask")),
-                            (Func<bool>)(() => TerminalUi.Confirm("Confirm")),
-                            (Func<bool>)(() => TerminalUi.Acknowledge())
-                        };
+                            action();
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            return;
+                        }
+
+                        throw new InvalidOperationException("TerminalUi dialog must observe deterministic cancellation.");
                     }
 
                     static void ExerciseHotkeySurface(UiShortcut shortcut)
@@ -832,23 +863,115 @@ namespace UmamusumeResponseAnalyzer.Tests
                 """;
 
         [Fact]
-        public void SyntheticFuturePluginCompilesAgainstTargetAbi()
+        public async Task SyntheticFuturePluginLoadsAndExercisesTargetAbi()
+        {
+            const string scenario = "synthetic-abi";
+            if (TerminalUiLifecycleChildProcess.IsChild(scenario))
+            {
+                TerminalUiLifecycleChildProcess.WriteResult(RunSyntheticFuturePlugin());
+                return;
+            }
+
+            var formatted = await TerminalUiLifecycleProcessTests.RunChildAsync(
+                scenario,
+                typeof(PluginAbiBoundaryTests),
+                nameof(SyntheticFuturePluginLoadsAndExercisesTargetAbi));
+            Assert.Equal(
+                string.Join(
+                    Environment.NewLine,
+                    [
+                        "WorkspaceTitlePrefix=True",
+                        "Panel=shared|Second caller final|second caller final content",
+                        "Log=synthetic shared log",
+                        "Notification=synthetic shared notification",
+                        "CanonicalReference=True",
+                        "CurrentReference=True",
+                        "SharedPanelRemoved=True",
+                        "MissingPanelRemoved=False",
+                        "BackgroundPanelRemoved=True",
+                        "RecreatedGeneration=True",
+                        "RecreatedCanonicalReference=True",
+                        "RecreatedCurrentReference=True",
+                        "TombstoneFailureCount=6"
+                    ]),
+                formatted);
+        }
+
+        internal static string RunSyntheticFuturePlugin()
         {
             var dllPath = Path.Combine(
                 Path.GetTempPath(),
                 $"ura-synthetic-future-plugin-{Guid.NewGuid():N}.dll");
+            using var terminal = new TerminalGuiTestApp();
+            var host = TerminalUiLifecycleChildProcess.InitializeHost(
+                terminal,
+                CancellationToken.None);
+            var run = terminal.StartAsync(host).GetAwaiter().GetResult();
+            var baseline = Workspace.Create("M6 synthetic baseline");
+            baseline.SwitchTo();
+            host.FlushAsync().WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+            var originalCurrent = Assert.IsType<Workspace>(Workspace.Current);
+            Assert.Same(baseline, originalCurrent);
+
+            Assembly? assembly = null;
+            object? result = null;
+            Workspace? exercisedWorkspace = null;
+            string? formatted = null;
             try
             {
                 PluginCompiler.Compile(
                     SyntheticFuturePluginSource,
                     "SyntheticFuturePlugin",
                     dllPath);
-                Assert.True(File.Exists(dllPath));
+                assembly = Assembly.Load(File.ReadAllBytes(dllPath));
+                var pluginType = assembly.GetType("SyntheticFuturePlugin", throwOnError: true)!;
+                var exercise = pluginType.GetMethod(
+                    "ExerciseAsync",
+                    BindingFlags.Public | BindingFlags.Static)!;
+                var task = Assert.IsAssignableFrom<Task>(exercise.Invoke(null, null));
+
+                task.WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+                result = exercise.ReturnType.GetProperty("Result")!.GetValue(task);
+                Assert.NotNull(result);
+                host.FlushAsync().WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+
+                exercisedWorkspace = Assert.IsType<Workspace>(
+                    result.GetType().GetProperty("Workspace")!.GetValue(result));
+                formatted = Assert.IsType<string>(
+                    result.GetType().GetMethod("Format", PublicDeclared)!.Invoke(result, null));
             }
             finally
             {
-                File.Delete(dllPath);
+                try
+                {
+                    if (assembly is not null && result is not null)
+                    {
+                        assembly.GetType("SyntheticFuturePlugin", throwOnError: true)!
+                            .GetMethod("Cleanup", BindingFlags.Public | BindingFlags.Static)!
+                            .Invoke(null, [result]);
+                        if (!ReferenceEquals(originalCurrent, exercisedWorkspace))
+                        {
+                            originalCurrent.SwitchTo();
+                        }
+                        host.FlushAsync().WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+                        Assert.Same(originalCurrent, Workspace.Current);
+                    }
+                }
+                finally
+                {
+                    try
+                    {
+                        File.Delete(dllPath);
+                    }
+                    finally
+                    {
+                        terminal.StopAsync(host, run).GetAwaiter().GetResult();
+                    }
+                }
             }
+
+            Assert.NotNull(formatted);
+            return formatted;
         }
 
         [Fact]
@@ -929,15 +1052,15 @@ namespace UmamusumeResponseAnalyzer.Tests
             Assert.False(property.SetMethod.IsStatic);
         }
 
-        static DirectoryInfo FindRepositoryRoot()
+        static DirectoryInfo FindRepositoryRoot([CallerFilePath] string sourceFilePath = "")
         {
-            for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
-            {
-                if (File.Exists(Path.Combine(directory.FullName, "UmamusumeResponseAnalyzer.sln")))
-                    return directory;
-            }
+            var repositoryRoot = new FileInfo(sourceFilePath).Directory?.Parent;
+            if (repositoryRoot is not null &&
+                File.Exists(Path.Combine(repositoryRoot.FullName, "UmamusumeResponseAnalyzer.sln")))
+                return repositoryRoot;
 
-            throw new InvalidOperationException("找不到 UmamusumeResponseAnalyzer repository root。");
+            throw new InvalidOperationException(
+                $"编译期 source anchor 不在 UmamusumeResponseAnalyzer repository 中：{sourceFilePath}");
         }
     }
 }
