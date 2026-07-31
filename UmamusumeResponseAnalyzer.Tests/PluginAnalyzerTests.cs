@@ -340,38 +340,54 @@ namespace UmamusumeResponseAnalyzer.Tests
         [Fact]
         public async Task DispatchKnownEndpointFailures_RemainReported()
         {
-            var terminal = runtime.Terminal;
-            var host = runtime.Host;
-            var bootstrap = new BootstrapWorkspace(host);
-            try
+            const string scenario = "known-endpoint-failures";
+            if (TerminalUiLifecycleChildProcess.IsChild(scenario))
             {
-                bootstrap.Workspace.SwitchTo();
-                await host.FlushAsync();
+                var terminal = runtime.Terminal;
+                var host = runtime.Host;
+                var bootstrap = new BootstrapWorkspace(host);
+                try
+                {
+                    bootstrap.Workspace.SwitchTo();
+                    await host.FlushAsync();
+                    await terminal.ResizeAsync(320, 48);
+                    await terminal.RedrawAsync();
 
-                var malformedPayloadPlugin = new ResponseDispatchPlugin();
-                LoadTestPlugin(malformedPayloadPlugin);
+                    var malformedPayloadPlugin = new ResponseDispatchPlugin();
+                    LoadTestPlugin(malformedPayloadPlugin);
 
-                await Assert.ThrowsAsync<FormatException>(
-                    async () => await Server.DispatchResponse("account/index", [0xC0]));
-                await terminal.WaitForScreenAsync("canonical URL");
+                    await Assert.ThrowsAsync<FormatException>(
+                        async () => await Server.DispatchResponse("account/index", [0xC0]));
+                    await terminal.WaitForScreenAsync("canonical URL");
 
-                await Server.DispatchResponse(AccountIndexPath, [0xC1]);
-                await terminal.WaitForScreenAsync("Gallop DTO 反序列化失败");
+                    await Server.DispatchResponse(AccountIndexPath, [0xC1]);
+                    await terminal.WaitForScreenAsync("Gallop DTO 反序列化失败");
 
-                ResetAnalyzerState();
-                LoadTestPlugin(new ThrowingResponsePlugin());
-                await Server.DispatchResponse(
-                    AccountIndexPath,
-                    MessagePackSerializer.Serialize(new DataLinkIndexResponse()));
-                await terminal.WaitForScreenAsync("响应分析插件处理失败");
-                await terminal.WaitForScreenAsync("analyzer failed");
+                    ResetAnalyzerState();
+                    LoadTestPlugin(new ThrowingResponsePlugin());
+                    await Server.DispatchResponse(
+                        AccountIndexPath,
+                        MessagePackSerializer.Serialize(new DataLinkIndexResponse()));
+                    await terminal.WaitForScreenAsync("响应分析插件处理失败");
+                    await terminal.WaitForScreenAsync("analyzer failed");
+                }
+                finally
+                {
+                    bootstrap.Dispose();
+                    host.RemoveWorkspace(bootstrap.Workspace);
+                    await host.FlushAsync();
+                }
+
+                TerminalUiLifecycleChildProcess.WriteResult("ok");
+                return;
             }
-            finally
-            {
-                bootstrap.Dispose();
-                host.RemoveWorkspace(bootstrap.Workspace);
-                await host.FlushAsync();
-            }
+
+            Assert.Equal(
+                "ok",
+                await TerminalUiLifecycleProcessTests.RunChildAsync(
+                    scenario,
+                    typeof(PluginAnalyzerTests),
+                    nameof(DispatchKnownEndpointFailures_RemainReported)));
         }
 
         [Fact]
@@ -711,14 +727,19 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
 
         [Fact]
-        public void PluginLoadContext_ResolvesSharedAbiAssemblyFromDefaultContext()
+        public async Task PluginLoadContext_ResolvesSharedAbiAssemblyFromDefaultContext()
         {
+            var host = runtime.Host;
+            var bootstrap = new BootstrapWorkspace(host);
             var ctx = new PluginManager.PluginLoadContext("shared-abi-test");
             try
             {
-                var host = ctx.LoadFromAssemblyName(typeof(IPlugin).Assembly.GetName());
+                bootstrap.Workspace.SwitchTo();
+                await host.FlushAsync();
 
-                Assert.Same(typeof(Server).Assembly, host);
+                var sharedHost = ctx.LoadFromAssemblyName(typeof(IPlugin).Assembly.GetName());
+
+                Assert.Same(typeof(Server).Assembly, sharedHost);
 
                 var oldHostVersion = new AssemblyName(typeof(Server).Assembly.GetName().Name!)
                 {
@@ -731,6 +752,8 @@ namespace UmamusumeResponseAnalyzer.Tests
                     Version = new Version(99, 0, 0, 0),
                 };
                 Assert.Same(typeof(Server).Assembly, ctx.LoadFromAssemblyName(futureHostVersion));
+                await host.FlushAsync();
+                await runtime.Terminal.WaitForScreenAsync("插件依赖的宿主 ABI 版本更高");
 
                 var wrongTerminalGuiVersion = new AssemblyName(typeof(View).Assembly.GetName().Name!)
                 {
@@ -741,6 +764,9 @@ namespace UmamusumeResponseAnalyzer.Tests
             finally
             {
                 ctx.Unload();
+                bootstrap.Dispose();
+                host.RemoveWorkspace(bootstrap.Workspace);
+                await host.FlushAsync();
             }
         }
 

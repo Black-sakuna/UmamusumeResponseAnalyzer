@@ -739,32 +739,54 @@ public sealed class HotkeyManagerTests : IDisposable
 }
 
 [Collection("PluginReload")]
-public sealed class HotkeyManagerErrorChannelTests(PluginRuntimeFixture runtime) : IDisposable
+public sealed class HotkeyManagerErrorChannelTests(PluginRuntimeFixture runtime)
 {
-    public void Dispose()
-    {
-        HotkeyManager.UnregisterAll();
-        HotkeyManager.OverlaySink = null;
-    }
-
     [Fact]
     public async Task ThrowingHandler_ReportsVisibleErrorAndDoesNotBreakLaterDispatch()
     {
-        HotkeyManager.UnregisterAll();
-        HotkeyManager.OverlaySink = runtime.Host;
-        var laterCalls = 0;
-        HotkeyManager.Register(ConsoleKey.F1, "throws", () =>
-            throw new InvalidOperationException("hotkey-handler-sentinel"));
-        HotkeyManager.Register(ConsoleKey.F2, "later", () =>
+        const string scenario = "hotkey-error-channel";
+        if (TerminalUiLifecycleChildProcess.IsChild(scenario))
         {
-            laterCalls++;
-            return Task.CompletedTask;
-        });
+            var host = runtime.Host;
+            var bootstrap = new BootstrapWorkspace(host);
+            try
+            {
+                bootstrap.Workspace.SwitchTo();
+                await host.FlushAsync();
+                HotkeyManager.UnregisterAll();
+                var laterCalls = 0;
+                HotkeyManager.Register(ConsoleKey.F1, "throws", () =>
+                    throw new InvalidOperationException("hotkey-handler-sentinel"));
+                HotkeyManager.Register(ConsoleKey.F2, "later", () =>
+                {
+                    laterCalls++;
+                    return Task.CompletedTask;
+                });
 
-        Assert.True(await HotkeyManager.HandleKeyAsync(new(KeyCode.F1)));
-        await runtime.Terminal.WaitForScreenAsync(
-            "热键处理失败: hotkey-handler-sentinel");
-        Assert.True(await HotkeyManager.HandleKeyAsync(new(KeyCode.F2)));
-        Assert.Equal(1, laterCalls);
+                Assert.True(await HotkeyManager.HandleKeyAsync(new(KeyCode.F1)));
+                await host.FlushAsync();
+                await runtime.Terminal.WaitForScreenAsync(
+                    "热键处理失败: hotkey-handler-sentinel");
+                Assert.True(await HotkeyManager.HandleKeyAsync(new(KeyCode.F2)));
+                Assert.Equal(1, laterCalls);
+            }
+            finally
+            {
+                HotkeyManager.UnregisterAll();
+                bootstrap.Dispose();
+                host.RemoveWorkspace(bootstrap.Workspace);
+                await host.FlushAsync();
+            }
+
+            TerminalUiLifecycleChildProcess.WriteResult("ok");
+            return;
+        }
+
+        Assert.Equal(
+            "ok",
+            await TerminalUiLifecycleProcessTests.RunChildAsync(
+                scenario,
+                typeof(HotkeyManagerErrorChannelTests),
+                nameof(ThrowingHandler_ReportsVisibleErrorAndDoesNotBreakLaterDispatch)));
     }
 }

@@ -417,7 +417,7 @@ public sealed class WorkspaceViewTests
                         X = 0,
                         Y = Pos.AnchorEnd(2)
                     };
-                    action.Activated += (_, _) => workspaceAction = true;
+                    action.Accepted += (_, _) => workspaceAction = true;
                     root.Add(
                         new Label { Text = "VIEWPORT-BODY" },
                         action);
@@ -459,17 +459,21 @@ public sealed class WorkspaceViewTests
                 screen = await terminal.CaptureScreenAsync();
                 var gammaPoint = FindText(screen, "Gamma");
                 var alphaPoint = FindText(screen, "Alpha");
+                var dragTarget = alphaPoint with
+                {
+                    X = Math.Max(0, alphaPoint.X - alpha.Title.Length / 2)
+                };
                 await terminal.InjectAsync(MouseAt(
                     terminal,
                     gammaPoint,
                     MouseFlags.LeftButtonPressed));
                 await terminal.InjectAsync(MouseAt(
                     terminal,
-                    alphaPoint,
+                    dragTarget,
                     MouseFlags.LeftButtonPressed | MouseFlags.PositionReport));
                 await terminal.InjectAsync(MouseAt(
                     terminal,
-                    alphaPoint,
+                    dragTarget,
                     MouseFlags.LeftButtonReleased));
                 await terminal.WaitForAsync(() => saved is not null);
 
