@@ -11,7 +11,6 @@ namespace UmamusumeResponseAnalyzer.TerminalGui;
 
 internal sealed class BootstrapWorkspace : IDisposable
 {
-    const string HostSource = "URA";
     const int MaxLogRows = 128;
 
     readonly UiHost uiHost;
@@ -33,8 +32,8 @@ internal sealed class BootstrapWorkspace : IDisposable
     public BootstrapWorkspace(UiHost uiHost)
     {
         this.uiHost = uiHost;
-        Workspace = uiHost.CreateWorkspace("启动");
-        uiHost.BindWorkspaceHotkey(Workspace, ConsoleKey.B, ConsoleModifiers.Control, "启动信息");
+        Workspace = global::UmamusumeResponseAnalyzer.TerminalGui.Workspace.Create("启动");
+        Workspace.BindHotkey(ConsoleKey.B, ConsoleModifiers.Control, "启动信息");
         uiHost.LogAdded += OnLogAdded;
         TerminalUi.DefaultExceptionWorkspace = Workspace;
         Refresh();
@@ -70,18 +69,17 @@ internal sealed class BootstrapWorkspace : IDisposable
     }
 
     public void Log(string source, string text, UiSeverity severity = UiSeverity.Info)
-        => uiHost.Log(new UiLogLine(Workspace, source, text, severity));
+        => Workspace.Log($"[{source}] {text}", severity);
 
     void OnLogAdded(UiLogLine line)
     {
-        if (!ReferenceEquals(line.Workspace, Workspace))
+        if (line.Workspace is not null && !ReferenceEquals(line.Workspace, Workspace))
             return;
 
         lock (gate)
         {
             logs.Add(new(
                 SeverityLabel(line.Severity),
-                line.PluginId,
                 line.Text,
                 line.ExceptionDetails));
             if (logs.Count > MaxLogRows)
@@ -92,9 +90,7 @@ internal sealed class BootstrapWorkspace : IDisposable
 
     void Refresh()
     {
-        uiHost.SetPanel(new WorkspacePanel(
-            Workspace,
-            HostSource,
+        Workspace.SetPanel(
             "status",
             "启动状态",
             new WorkspaceContent(() =>
@@ -117,8 +113,7 @@ internal sealed class BootstrapWorkspace : IDisposable
                     pluginSnapshot,
                     logSnapshot);
             }),
-            DateTimeOffset.Now,
-            FullBleed: true),
+            fullBleed: true,
             switchToWorkspace: false);
     }
 
@@ -140,7 +135,7 @@ internal sealed class BootstrapWorkspace : IDisposable
         UiSeverity.Success => "OK",
         UiSeverity.Warning => "WARN",
         UiSeverity.Error => "ERR",
-        _ => "INFO"
+        _ => throw new ArgumentOutOfRangeException(nameof(severity), severity, null)
     };
 }
 
@@ -173,7 +168,6 @@ internal sealed record BootstrapPluginRow(
 
 internal sealed record BootstrapLogRow(
     string Status,
-    string Source,
     string Text,
     string? ExceptionDetails = null);
 
@@ -244,7 +238,7 @@ internal sealed class BootstrapDashboardView : View
             Command.Activate,
             Command.Context);
         logList.SetSource(new ObservableCollection<string>(
-            logs.Select(x => $"{x.Status} [{x.Source}] {x.Text}")));
+            logs.Select(x => $"{x.Status} {x.Text}")));
         if (logs.Count > 0)
             logList.SelectedItem = logs.Count - 1;
         logFrame = CreateFrame("最近日志", logList);

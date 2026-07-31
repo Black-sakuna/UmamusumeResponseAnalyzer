@@ -73,8 +73,22 @@ namespace UmamusumeResponseAnalyzer.Plugin
 
             if (installed.Count > 0)
             {
-                var needRestart = await PluginManager.ReloadPluginsAsync([.. installed]);
+                var results = await PluginManager.ReloadPluginsAsync([.. installed]);
                 cancellationToken.ThrowIfCancellationRequested();
+                var failed = results
+                    .Where(result => result.Outcome == PluginManager.PluginLifecycleOutcome.Failed)
+                    .Select(result => result.PluginName)
+                    .ToList();
+                if (failed.Count != 0)
+                {
+                    throw new InvalidOperationException(
+                        $"插件安装完成，但加载失败：{string.Join("、", failed)}");
+                }
+
+                var needRestart = results
+                    .Where(result => result.Outcome == PluginManager.PluginLifecycleOutcome.RestartRequired)
+                    .Select(result => result.PluginName)
+                    .ToList();
                 if (needRestart.Count == 0)
                 {
                     ModalDialogs.Acknowledge(

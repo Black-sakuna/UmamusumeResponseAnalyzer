@@ -4,40 +4,38 @@ namespace UmamusumeResponseAnalyzer.TerminalGui;
 
 public static class TerminalUi
 {
-    static IApplication? application;
+    static readonly object initializationGate = new();
     static UiHost? uiHost;
-    static CancellationToken lifetimeCancellationToken;
+    static Workspace? defaultExceptionWorkspace;
 
-    internal static Workspace? DefaultExceptionWorkspace { get; set; }
-    internal static IApplication Application
-        => application ?? throw new InvalidOperationException("Terminal.Gui application 尚未绑定。");
-
-    internal static void Bind(
-        UiHost host,
-        IApplication app,
-        CancellationToken cancellationToken = default)
+    internal static Workspace? DefaultExceptionWorkspace
     {
-        uiHost = host;
-        application = app;
-        lifetimeCancellationToken = cancellationToken;
-        ModalDialogs.BindOwner(
-            app,
-            SynchronizationContext.Current
-                ?? throw new InvalidOperationException("Terminal.Gui owner SynchronizationContext 不存在。"));
+        get => Volatile.Read(ref defaultExceptionWorkspace);
+        set => Volatile.Write(ref defaultExceptionWorkspace, value);
     }
 
-    internal static void Unbind(UiHost host)
-    {
-        if (!ReferenceEquals(uiHost, host))
-            return;
+    internal static IApplication Application => RequireHost().Application;
 
-        var app = application;
-        uiHost = null;
-        application = null;
-        lifetimeCancellationToken = default;
-        DefaultExceptionWorkspace = null;
-        if (app is not null)
-            ModalDialogs.UnbindOwner(app);
+    internal static void Initialize(UiHost host)
+    {
+        ArgumentNullException.ThrowIfNull(host);
+        lock (initializationGate)
+        {
+            if (uiHost is not null)
+                throw new InvalidOperationException("TerminalUi 已初始化；进程内不允许替换 UiHost。");
+
+            host.EnsureAvailable();
+            ModalDialogs.BindOwner(host.Application, host.OwnerContext);
+            Volatile.Write(ref uiHost, host);
+        }
+    }
+
+    internal static UiHost RequireHost()
+    {
+        var host = Volatile.Read(ref uiHost)
+            ?? throw new InvalidOperationException("TerminalUi 尚未初始化。");
+        host.EnsureAvailable();
+        return host;
     }
 
     public static T Select<T>(
@@ -45,18 +43,26 @@ public static class TerminalUi
         IEnumerable<T> choices,
         Func<T, string>? converter = null,
         CancellationToken cancellationToken = default)
-        => WithCancellation(
+    {
+        var host = RequireHost();
+        return WithCancellation(
+            host.LifetimeToken,
             cancellationToken,
-            token => ModalDialogs.Select(Application, title, choices, converter, token));
+            token => ModalDialogs.Select(host.Application, title, choices, converter, token));
+    }
 
     internal static T Menu<T>(
         string title,
         IEnumerable<T> choices,
         Func<T, string>? converter = null,
         CancellationToken cancellationToken = default)
-        => WithCancellation(
+    {
+        var host = RequireHost();
+        return WithCancellation(
+            host.LifetimeToken,
             cancellationToken,
-            token => ModalDialogs.Menu(Application, title, choices, converter, token));
+            token => ModalDialogs.Menu(host.Application, title, choices, converter, token));
+    }
 
     public static IReadOnlyList<T> MultiSelect<T>(
         string title,
@@ -64,83 +70,101 @@ public static class TerminalUi
         IEnumerable<T>? selected = null,
         Func<T, string>? converter = null,
         CancellationToken cancellationToken = default)
-        => WithCancellation(
+    {
+        var host = RequireHost();
+        return WithCancellation(
+            host.LifetimeToken,
             cancellationToken,
             token => ModalDialogs.MultiSelect(
-                Application,
+                host.Application,
                 title,
                 choices,
                 selected,
                 converter,
                 token));
+    }
 
     public static string Ask(
         string title,
         string? value = null,
         bool allowEmpty = false,
         CancellationToken cancellationToken = default)
-        => WithCancellation(
+    {
+        var host = RequireHost();
+        return WithCancellation(
+            host.LifetimeToken,
             cancellationToken,
-            token => ModalDialogs.Ask(Application, title, value, allowEmpty, token));
+            token => ModalDialogs.Ask(host.Application, title, value, allowEmpty, token));
+    }
 
     public static bool Confirm(
         string title,
         bool defaultValue = false,
         CancellationToken cancellationToken = default)
-        => WithCancellation(
+    {
+        var host = RequireHost();
+        return WithCancellation(
+            host.LifetimeToken,
             cancellationToken,
-            token => ModalDialogs.Confirm(Application, title, defaultValue, token));
+            token => ModalDialogs.Confirm(host.Application, title, defaultValue, token));
+    }
 
     public static bool Acknowledge(
         string title = "按 Enter 返回",
         CancellationToken cancellationToken = default)
-        => WithCancellation(
+    {
+        var host = RequireHost();
+        return WithCancellation(
+            host.LifetimeToken,
             cancellationToken,
-            token => ModalDialogs.Acknowledge(Application, title, token));
+            token => ModalDialogs.Acknowledge(host.Application, title, token));
+    }
 
     internal static async Task RunProgressAsync(
         Func<IProgress<DownloadProgress>, CancellationToken, Task> action,
         CancellationToken cancellationToken = default)
     {
+        var host = RequireHost();
         await WithCancellationAsync(
+            host.LifetimeToken,
             cancellationToken,
-            token => ModalDialogs.RunProgressAsync(Application, action, token));
+            token => ModalDialogs.RunProgressAsync(host.Application, action, token));
     }
 
-    internal static CancellationToken LifetimeCancellationToken => lifetimeCancellationToken;
-
     static T WithCancellation<T>(
+        CancellationToken lifetimeToken,
         CancellationToken cancellationToken,
         Func<CancellationToken, T> action)
     {
-        if (!lifetimeCancellationToken.CanBeCanceled)
+        if (!lifetimeToken.CanBeCanceled)
             return action(cancellationToken);
         if (!cancellationToken.CanBeCanceled)
-            return action(lifetimeCancellationToken);
+            return action(lifetimeToken);
 
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
-            lifetimeCancellationToken,
+            lifetimeToken,
             cancellationToken);
         return action(linkedCts.Token);
     }
 
     static async Task WithCancellationAsync(
+        CancellationToken lifetimeToken,
         CancellationToken cancellationToken,
         Func<CancellationToken, Task> action)
     {
-        if (!lifetimeCancellationToken.CanBeCanceled)
+        if (!lifetimeToken.CanBeCanceled)
         {
             await action(cancellationToken);
             return;
         }
         if (!cancellationToken.CanBeCanceled)
         {
-            await action(lifetimeCancellationToken);
+            await action(lifetimeToken);
             return;
         }
 
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
-            lifetimeCancellationToken,
+            lifetimeToken,
             cancellationToken);
         await action(linkedCts.Token);
     }
@@ -150,19 +174,12 @@ public static class TerminalUi
         Exception ex,
         UiSeverity severity = UiSeverity.Error)
     {
-        var host = uiHost;
-        if (host is null)
-        {
-            Console.Error.WriteLine(ex);
-            return;
-        }
-
-        host.Log(new UiLogLine(
+        ArgumentNullException.ThrowIfNull(ex);
+        RequireHost().Log(
             DefaultExceptionWorkspace,
-            source,
-            FormatExceptionLogMessage(ex),
+            $"[{source}] {FormatExceptionLogMessage(ex)}",
             severity,
-            ex.ToString()));
+            ex.ToString());
     }
 
     internal static string FormatExceptionLogMessage(Exception ex)
@@ -264,47 +281,12 @@ public static class TerminalUi
         string source,
         string text,
         UiSeverity severity = UiSeverity.Info)
-    {
-        var host = uiHost;
-        if (host is null)
-        {
-            Console.WriteLine($"[{source}] {text}");
-            return;
-        }
-
-        host.Log(new UiLogLine(null, source, text, severity));
-    }
+        => RequireHost().Log(null, $"[{source}] {text}", severity);
 
     public static void Notify(
         string source,
         string text,
         UiSeverity severity = UiSeverity.Info,
         TimeSpan? ttl = null)
-    {
-        var host = uiHost;
-        if (host is null)
-        {
-            Console.WriteLine($"[{source}] {text}");
-            return;
-        }
-
-        host.Notify(new UiNotification(
-            null,
-            source,
-            text,
-            severity,
-            UiNotification.ExpiresAtFromNow(severity, ttl),
-            []));
-    }
-
-    internal static void UnbindForTests()
-    {
-        var app = application;
-        uiHost = null;
-        application = null;
-        lifetimeCancellationToken = default;
-        DefaultExceptionWorkspace = null;
-        if (app is not null)
-            ModalDialogs.UnbindOwner(app);
-    }
+        => RequireHost().Notify(null, $"[{source}] {text}", severity, ttl, []);
 }

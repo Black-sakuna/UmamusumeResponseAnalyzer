@@ -4,18 +4,19 @@ using UmamusumeResponseAnalyzer.TerminalGui;
 namespace UmamusumeResponseAnalyzer.Plugin
 {
     internal sealed class PluginContext(
-        IApplication application,
+        UiHost host,
         IPlugin plugin,
-        IWorkspaceOutput workspaceOutput,
         PluginHostEvents events) : IPluginContext, IPluginHostEvents
     {
-        public IApplication Application { get; } = application;
-        public IWorkspaceOutput WorkspaceOutput { get; } = workspaceOutput;
+        public IApplication Application { get; } = host.Application;
         public IPluginHostEvents Events => this;
         public IPluginAnalyzerRegistry Analyzers { get; } = PluginManager.AnalyzersFor(plugin);
 
         public IDisposable OnStarted(Func<CancellationToken, ValueTask> handler)
-            => events.SubscribeStarted(plugin, handler);
+        {
+            using var registration = PluginManager.EnterPluginRegistration(plugin);
+            return events.SubscribeStarted(plugin, handler);
+        }
     }
 
     internal sealed class PluginHostEvents
@@ -42,16 +43,16 @@ namespace UmamusumeResponseAnalyzer.Plugin
 
         internal async Task TriggerStartedAsync(IEnumerable<IPlugin>? plugins = null, CancellationToken cancellationToken = default)
         {
-            using var callback = await PluginManager.EnterPluginCallbackAsync(cancellationToken);
-            var subscriptions = Snapshot(plugins);
-            foreach (var subscription in subscriptions)
-                await subscription.InvokeAsync(cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            using var subscriptions = Snapshot(plugins, cancellationToken);
+            for (var i = 0; i < subscriptions.Count; i++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                await subscriptions[i].InvokeAsync(cancellationToken);
+            }
         }
 
         internal void DisposeFor(IPlugin plugin)
-            => DisposeForLater(plugin)();
-
-        internal Action DisposeForLater(IPlugin plugin)
         {
             List<StartedSubscription> subscriptions = [];
             lock (gate)
@@ -62,12 +63,6 @@ namespace UmamusumeResponseAnalyzer.Plugin
 
             foreach (var subscription in subscriptions)
                 subscription.MarkDisposed();
-
-            return () =>
-            {
-                foreach (var subscription in subscriptions)
-                    subscription.WaitForIdle();
-            };
         }
 
         internal void Clear()
@@ -81,23 +76,22 @@ namespace UmamusumeResponseAnalyzer.Plugin
 
             foreach (var subscription in subscriptions)
                 subscription.MarkDisposed();
-
-            foreach (var subscription in subscriptions)
-                subscription.WaitForIdle();
         }
 
-        List<StartedSubscription> Snapshot(IEnumerable<IPlugin>? plugins)
+        PluginCallbackSnapshot<StartedSubscription> Snapshot(
+            IEnumerable<IPlugin>? plugins,
+            CancellationToken cancellationToken)
         {
             lock (gate)
             {
-                if (plugins is null)
-                    return subscriptionsByPlugin.Values.SelectMany(x => x).Where(x => !x.IsDisposed).ToList();
-
-                var set = plugins.ToHashSet<IPlugin>(ReferenceEqualityComparer.Instance);
-                return set
-                    .SelectMany(plugin => subscriptionsByPlugin.TryGetValue(plugin, out var subscriptions) ? subscriptions : [])
-                    .Where(x => !x.IsDisposed)
-                    .ToList();
+                var candidates = plugins is null
+                    ? subscriptionsByPlugin.Values.SelectMany(x => x)
+                    : plugins.ToHashSet<IPlugin>(ReferenceEqualityComparer.Instance)
+                        .SelectMany(plugin => subscriptionsByPlugin.TryGetValue(plugin, out var subscriptions) ? subscriptions : []);
+                return PluginCallbackSnapshot<StartedSubscription>.Create(
+                    candidates.Where(x => !x.IsDisposed),
+                    static subscription => subscription.Plugin,
+                    cancellationToken);
             }
         }
 
@@ -120,8 +114,6 @@ namespace UmamusumeResponseAnalyzer.Plugin
             Func<CancellationToken, ValueTask> handler) : IDisposable
         {
             int disposed;
-            int inFlight;
-            readonly ManualResetEventSlim idle = new(initialState: true);
 
             public IPlugin Plugin { get; } = plugin;
             public bool IsDisposed => Volatile.Read(ref disposed) != 0;
@@ -139,52 +131,37 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 Interlocked.Exchange(ref disposed, 1);
             }
 
-            public void WaitForIdle()
-            {
-                idle.Wait();
-            }
-
             public async ValueTask InvokeAsync(CancellationToken cancellationToken)
             {
-                if (!TryEnter())
+                if (IsDisposed)
                     return;
 
+                using var callback = PluginManager.EnterPluginCallbackScope();
+                using var ownerScope = HotkeyManager.RegisterScope(Plugin);
                 try
                 {
-                    using var callback = PluginManager.EnterPluginCallbackScope();
-                    using var scope = HotkeyManager.RegisterScope(Plugin);
                     await handler(cancellationToken);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
                 }
                 catch (Exception ex)
                 {
-                    TerminalUi.Notify("Plugin", $"插件事件处理错误: {ex.Message}", UiSeverity.Error);
-                    TerminalUi.LogException("Plugin", ex);
+                    var exceptionType = ex.GetType().FullName ?? ex.GetType().Name;
+                    string message;
+                    try { message = ex.Message; }
+                    catch (Exception messageError)
+                    {
+                        var messageErrorType = messageError.GetType().FullName ?? messageError.GetType().Name;
+                        message = $"<读取 Message 失败: {messageErrorType}>";
+                    }
+
+                    var failure = new InvalidOperationException(
+                        $"插件事件处理错误: plugin={PluginManager.InternalName(Plugin)}, " +
+                        $"exception={exceptionType}, message={message}");
+                    _ = PluginManager.ReportPluginFailure("Plugin", failure);
                 }
-                finally
-                {
-                    Exit();
-                }
-            }
-
-            bool TryEnter()
-            {
-                if (IsDisposed)
-                    return false;
-
-                if (Interlocked.Increment(ref inFlight) == 1)
-                    idle.Reset();
-
-                if (!IsDisposed)
-                    return true;
-
-                Exit();
-                return false;
-            }
-
-            void Exit()
-            {
-                if (Interlocked.Decrement(ref inFlight) == 0)
-                    idle.Set();
             }
         }
     }

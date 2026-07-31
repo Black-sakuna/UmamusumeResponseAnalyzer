@@ -1,4 +1,4 @@
-using Terminal.Gui.App;
+using System.Collections;
 using Terminal.Gui.Drivers;
 using Terminal.Gui.Input;
 using UmamusumeResponseAnalyzer.TerminalGui;
@@ -12,24 +12,17 @@ public sealed class HotkeyManagerCollection;
 [Collection("HotkeyManager")]
 public sealed class HotkeyManagerTests : IDisposable
 {
-    readonly IApplication application = Application.Create();
+    public HotkeyManagerTests() => Reset();
 
-    public HotkeyManagerTests() => ResetHotkeyManager();
-
-    public void Dispose()
-    {
-        ResetHotkeyManager();
-        application.Dispose();
-    }
+    public void Dispose() => Reset();
 
     static Func<Task> NoopHandler => () => Task.CompletedTask;
 
-    static void ResetHotkeyManager()
+    static void Reset()
     {
         HotkeyManager.UnregisterAll();
         HotkeyManager.OverlaySink = null;
         HotkeyManager.PopupAutoCloseDelay = TimeSpan.FromSeconds(3);
-        TerminalUi.UnbindForTests();
     }
 
     [Theory]
@@ -37,13 +30,12 @@ public sealed class HotkeyManagerTests : IDisposable
     [InlineData(ConsoleKey.UpArrow, ConsoleModifiers.None, "↑")]
     [InlineData(ConsoleKey.DownArrow, ConsoleModifiers.Control, "Ctrl+↓")]
     [InlineData(ConsoleKey.Oem2, ConsoleModifiers.None, "/")]
+    [InlineData(ConsoleKey.Spacebar, ConsoleModifiers.Alt, "Alt+Space")]
     public void FormatKeyCombo_UsesStableReadableNames(
         ConsoleKey key,
         ConsoleModifiers modifiers,
         string expected)
-    {
-        Assert.Equal(expected, HotkeyManager.FormatKeyCombo(key, modifiers));
-    }
+        => Assert.Equal(expected, HotkeyManager.FormatKeyCombo(key, modifiers));
 
     [Theory]
     [InlineData(ConsoleKey.S)]
@@ -57,44 +49,413 @@ public sealed class HotkeyManagerTests : IDisposable
     }
 
     [Fact]
-    public void Registrations_ReplacePreciselyAndTrackOwnerByReference()
+    public async Task FourRegisterOverloads_InvokeAndExposeTheirResults()
+    {
+        var sink = new RecordingOverlaySink();
+        HotkeyManager.OverlaySink = sink;
+        HotkeyManager.PopupAutoCloseDelay = TimeSpan.Zero;
+        var calls = new List<string>();
+
+        HotkeyManager.Register(ConsoleKey.F1, ConsoleModifiers.Alt, "task+mods", () =>
+        {
+            calls.Add("task+mods");
+            return Task.CompletedTask;
+        });
+        HotkeyManager.Register(ConsoleKey.F2, ConsoleModifiers.Control, "context+mods", context =>
+        {
+            calls.Add("context+mods");
+            context.AddLine("context+mods output");
+            return Task.CompletedTask;
+        });
+        HotkeyManager.Register(ConsoleKey.F3, "task", () =>
+        {
+            calls.Add("task");
+            return Task.CompletedTask;
+        });
+        HotkeyManager.Register(ConsoleKey.F4, "context", context =>
+        {
+            calls.Add("context");
+            context.AddLine("context output");
+            return Task.CompletedTask;
+        });
+
+        Assert.True(await PressAsync(KeyCode.F1 | KeyCode.AltMask));
+        Assert.True(await PressAsync(KeyCode.F2 | KeyCode.CtrlMask));
+        Assert.Equal("context+mods output", Assert.Single(sink.Popup!.Lines).Text);
+        Assert.True(await PressAsync(KeyCode.F3));
+        Assert.Null(sink.Popup);
+        Assert.True(await PressAsync(KeyCode.F4));
+
+        Assert.Equal(["task+mods", "context+mods", "task", "context"], calls);
+        Assert.Equal("context output", Assert.Single(sink.Popup!.Lines).Text);
+        Assert.Equal(4, HotkeyManager.Hotkeys.Count);
+    }
+
+    [Fact]
+    public void Hotkeys_IsImmutableSnapshotAndDuplicateRegistrationReplacesTheEntry()
+    {
+        HotkeyManager.Register(ConsoleKey.F1, "first", NoopHandler);
+        var snapshot = HotkeyManager.Hotkeys;
+        var first = snapshot[(ConsoleKey.F1, ConsoleModifiers.None)];
+        var mutation = new HotkeyManager.HotkeyEntry("mutation", NoopHandler);
+
+        Assert.Throws<NotSupportedException>(() =>
+            ((IDictionary<(ConsoleKey Key, ConsoleModifiers Modifiers), HotkeyManager.HotkeyEntry>)snapshot)
+                .Add((ConsoleKey.F12, ConsoleModifiers.None), mutation));
+        Assert.Throws<NotSupportedException>(() =>
+            ((IDictionary)snapshot).Add((ConsoleKey.F12, ConsoleModifiers.None), mutation));
+
+        HotkeyManager.Register(ConsoleKey.F1, "replacement", NoopHandler);
+        HotkeyManager.Register(ConsoleKey.F2, "second", NoopHandler);
+
+        Assert.Single(snapshot);
+        Assert.Same(first, snapshot[(ConsoleKey.F1, ConsoleModifiers.None)]);
+        Assert.Equal("replacement", HotkeyManager.Hotkeys[(ConsoleKey.F1, ConsoleModifiers.None)].Description);
+        Assert.Equal(2, HotkeyManager.Hotkeys.Count);
+    }
+
+    [Fact]
+    public void Unregister_AllAndByOwnerRemoveOnlyTheirRegistrations()
     {
         var owner = new object();
         var otherOwner = new object();
-        HotkeyManager.HotkeyEntry first;
         using (HotkeyManager.RegisterScope(owner))
-            first = HotkeyManager.RegisterTracked(ConsoleKey.K, ConsoleModifiers.Control, "first", NoopHandler);
+        {
+            HotkeyManager.Register(ConsoleKey.F1, "owned", NoopHandler);
+            HotkeyManager.Register(ConsoleKey.F2, "owned", NoopHandler);
+        }
         using (HotkeyManager.RegisterScope(otherOwner))
-            HotkeyManager.Register(ConsoleKey.A, "other", NoopHandler);
+            HotkeyManager.Register(ConsoleKey.F3, "other", NoopHandler);
 
-        var replacement = HotkeyManager.RegisterTracked(
-            ConsoleKey.K,
-            ConsoleModifiers.Control,
-            "replacement",
-            NoopHandler);
-
-        Assert.False(HotkeyManager.Unregister(ConsoleKey.K, ConsoleModifiers.Control, first));
-        Assert.Same(replacement, HotkeyManager.Hotkeys[(ConsoleKey.K, ConsoleModifiers.Control)]);
-        Assert.Equal(1, HotkeyManager.UnregisterByOwner(otherOwner));
+        Assert.True(HotkeyManager.Unregister(ConsoleKey.F1));
+        Assert.False(HotkeyManager.Unregister(ConsoleKey.F1));
+        Assert.Equal(1, HotkeyManager.UnregisterByOwner(owner));
         Assert.Single(HotkeyManager.Hotkeys);
-        Assert.True(HotkeyManager.Unregister(ConsoleKey.K, ConsoleModifiers.Control));
+
+        HotkeyManager.UnregisterAll();
         Assert.Empty(HotkeyManager.Hotkeys);
     }
 
     [Fact]
-    public async Task Popup_NavigatesClampsSelectsAndCloses()
+    public async Task RegisterScope_FlowsAcrossAwaitAndRealAsyncCallerThenRestores()
+    {
+        var owner = new object();
+
+        await RegisterFromAsyncCaller(owner);
+        HotkeyManager.Register(ConsoleKey.F2, "unowned", NoopHandler);
+
+        Assert.Same(owner, HotkeyManager.Hotkeys[(ConsoleKey.F1, ConsoleModifiers.None)].Owner);
+        Assert.Null(HotkeyManager.Hotkeys[(ConsoleKey.F2, ConsoleModifiers.None)].Owner);
+    }
+
+    [Fact]
+    public async Task OwnedCallback_PropagatesOwnerToNestedRegistration()
+    {
+        var owner = new object();
+        var nestedCalls = 0;
+        using (HotkeyManager.RegisterScope(owner))
+        {
+            HotkeyManager.Register(ConsoleKey.F1, "owner callback", () =>
+            {
+                HotkeyManager.Register(ConsoleKey.F2, "nested", () =>
+                {
+                    nestedCalls++;
+                    return Task.CompletedTask;
+                });
+                return Task.CompletedTask;
+            });
+        }
+
+        Assert.True(await PressAsync(KeyCode.F1));
+        Assert.Equal(2, HotkeyManager.UnregisterByOwner(owner));
+        Assert.False(await PressAsync(KeyCode.F1));
+        Assert.False(await PressAsync(KeyCode.F2));
+        Assert.Equal(0, nestedCalls);
+    }
+
+    [Fact]
+    public async Task GlobalCallback_ClearsAmbientOwnerForNestedRegistration()
+    {
+        var ambientOwner = new object();
+        var nestedCalls = 0;
+        HotkeyManager.Register(ConsoleKey.F1, "global callback", () =>
+        {
+            HotkeyManager.Register(ConsoleKey.F2, "nested global", () =>
+            {
+                nestedCalls++;
+                return Task.CompletedTask;
+            });
+            return Task.CompletedTask;
+        });
+
+        using (HotkeyManager.RegisterScope(ambientOwner))
+            Assert.True(await PressAsync(KeyCode.F1));
+
+        Assert.Null(HotkeyManager.Hotkeys[(ConsoleKey.F2, ConsoleModifiers.None)].Owner);
+        Assert.Equal(0, HotkeyManager.UnregisterByOwner(ambientOwner));
+        Assert.True(await PressAsync(KeyCode.F2));
+        Assert.Equal(1, nestedCalls);
+    }
+
+    [Fact]
+    public async Task OwnerCleanup_DoesNotAffectAnotherHandlerSharingTheSameWorkspace()
+    {
+        var sharedWorkspace = new Workspace("shared");
+        var removedOwner = new object();
+        var keptOwner = new object();
+        Workspace? observed = null;
+        using (HotkeyManager.RegisterScope(removedOwner))
+            HotkeyManager.Register(ConsoleKey.F1, "removed", () => Task.CompletedTask);
+        using (HotkeyManager.RegisterScope(keptOwner))
+        {
+            HotkeyManager.Register(ConsoleKey.F2, "kept", () =>
+            {
+                observed = sharedWorkspace;
+                return Task.CompletedTask;
+            });
+        }
+
+        Assert.Equal(1, HotkeyManager.UnregisterByOwner(removedOwner));
+        Assert.False(await PressAsync(KeyCode.F1));
+        Assert.True(await PressAsync(KeyCode.F2));
+        Assert.Same(sharedWorkspace, observed);
+        Assert.Equal("shared", sharedWorkspace.Title);
+    }
+
+    [Fact]
+    public async Task NotificationShortcutRegistrationId_BindsRemovalTtlAndOwnerLifetime()
+    {
+        var removedOwner = new object();
+        var keptOwner = new object();
+        var calls = new List<string>();
+        long removedId;
+        long keptId;
+        using (HotkeyManager.RegisterScope(removedOwner))
+        {
+            removedId = HotkeyManager.RegisterNotificationShortcuts(
+                DateTimeOffset.Now.AddMinutes(1),
+                [new UiShortcut(ConsoleKey.F8, () =>
+                {
+                    calls.Add("removed");
+                    return Task.CompletedTask;
+                })]);
+        }
+        using (HotkeyManager.RegisterScope(keptOwner))
+        {
+            keptId = HotkeyManager.RegisterNotificationShortcuts(
+                DateTimeOffset.Now.AddMinutes(1),
+                [new UiShortcut(ConsoleKey.F8, () =>
+                {
+                    calls.Add("kept");
+                    return Task.CompletedTask;
+                })]);
+        }
+
+        Assert.NotEqual(0, removedId);
+        Assert.NotEqual(0, keptId);
+        Assert.True(await PressAsync(KeyCode.F8));
+        Assert.Equal(["kept"], calls);
+
+        Assert.Equal(1, HotkeyManager.UnregisterByOwner(keptOwner));
+        Assert.True(await PressAsync(KeyCode.F8));
+        Assert.Equal(["kept", "removed"], calls);
+
+        HotkeyManager.UnregisterNotificationShortcuts(removedId);
+        Assert.False(await PressAsync(KeyCode.F8));
+
+        HotkeyManager.RegisterNotificationShortcuts(
+            DateTimeOffset.Now.AddMilliseconds(-1),
+            [new UiShortcut(ConsoleKey.F9, NoopHandler)]);
+        Assert.False(await PressAsync(KeyCode.F9));
+    }
+
+    [Fact]
+    public async Task Dispatch_SerializesCallbacksInArrivalOrder()
+    {
+        var firstEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirst = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var order = new List<string>();
+        var concurrentCallbacks = 0;
+        var maxConcurrentCallbacks = 0;
+        HotkeyManager.Register(ConsoleKey.F1, "first", async () =>
+        {
+            order.Add("first:start");
+            maxConcurrentCallbacks = Math.Max(maxConcurrentCallbacks, Interlocked.Increment(ref concurrentCallbacks));
+            firstEntered.SetResult();
+            await releaseFirst.Task;
+            Interlocked.Decrement(ref concurrentCallbacks);
+            order.Add("first:end");
+        });
+        HotkeyManager.Register(ConsoleKey.F2, "second", () =>
+        {
+            order.Add("second");
+            maxConcurrentCallbacks = Math.Max(maxConcurrentCallbacks, Interlocked.Increment(ref concurrentCallbacks));
+            Interlocked.Decrement(ref concurrentCallbacks);
+            return Task.CompletedTask;
+        });
+
+        var first = PressAsync(KeyCode.F1);
+        await firstEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var second = PressAsync(KeyCode.F2);
+        Assert.NotSame(second, await Task.WhenAny(second, Task.Delay(30)));
+        releaseFirst.SetResult();
+        await Task.WhenAll(first, second);
+
+        Assert.Equal(1, maxConcurrentCallbacks);
+        Assert.Equal(["first:start", "first:end", "second"], order);
+    }
+
+    [Fact]
+    public async Task CallbackCanAwaitWorkThatReentersRegistrationState()
+    {
+        HotkeyManager.Register(ConsoleKey.F1, "reentrant", async () =>
+        {
+            await Task.Run(() => HotkeyManager.Register(ConsoleKey.F2, "nested", NoopHandler))
+                .WaitAsync(TimeSpan.FromSeconds(2));
+        });
+
+        Assert.True(await PressAsync(KeyCode.F1));
+        Assert.Contains((ConsoleKey.F2, ConsoleModifiers.None), HotkeyManager.Hotkeys.Keys);
+    }
+
+    [Fact]
+    public void OverlayCalloutCanWaitForWorkThatReentersRegistrationState()
+    {
+        var sink = new RecordingOverlaySink
+        {
+            ShowPopupCallout = () =>
+            {
+                var registration = Task.Run(() =>
+                    HotkeyManager.Register(ConsoleKey.F2, "from sink", NoopHandler));
+                Assert.True(registration.Wait(TimeSpan.FromSeconds(2)));
+            }
+        };
+        HotkeyManager.OverlaySink = sink;
+        HotkeyManager.PopupAutoCloseDelay = TimeSpan.Zero;
+
+        HotkeyManager.ShowPopup(new HotkeyContext().AddLine("visible"));
+
+        Assert.Equal("visible", Assert.Single(sink.Popup!.Lines).Text);
+        Assert.Contains((ConsoleKey.F2, ConsoleModifiers.None), HotkeyManager.Hotkeys.Keys);
+    }
+
+    [Fact]
+    public async Task PopupRenderFailure_RollsBackStateAndAutoCloseBeforeRethrowing()
+    {
+        var showCalls = 0;
+        var sink = new RecordingOverlaySink
+        {
+            ShowPopupCallout = () =>
+            {
+                if (Interlocked.Increment(ref showCalls) == 1)
+                    throw new InvalidOperationException("render failed");
+            }
+        };
+        HotkeyManager.OverlaySink = sink;
+        HotkeyManager.PopupAutoCloseDelay = TimeSpan.FromMilliseconds(20);
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            HotkeyManager.ShowPopup(new HotkeyContext().AddLine("failed")));
+
+        Assert.Equal("render failed", exception.Message);
+        Assert.False(HotkeyManager.HasPriorityPopup);
+        Assert.Null(sink.Popup);
+
+        HotkeyManager.PopupAutoCloseDelay = TimeSpan.Zero;
+        HotkeyManager.ShowPopup(new HotkeyContext().AddLine("next"));
+        await Task.Delay(50);
+        Assert.True(HotkeyManager.HasPriorityPopup);
+        Assert.Equal("next", Assert.Single(sink.Popup!.Lines).Text);
+    }
+
+    [Fact]
+    public async Task Detach_WaitsForInFlightShowThenClearsOldSinkAndTimer()
+    {
+        using var showEntered = new ManualResetEventSlim();
+        using var releaseShow = new ManualResetEventSlim();
+        var sink = new RecordingOverlaySink
+        {
+            ShowPopupCallout = () =>
+            {
+                showEntered.Set();
+                Assert.True(releaseShow.Wait(TimeSpan.FromSeconds(2)));
+            }
+        };
+        HotkeyManager.OverlaySink = sink;
+        HotkeyManager.PopupAutoCloseDelay = TimeSpan.FromMilliseconds(30);
+
+        var show = Task.Run(() =>
+            HotkeyManager.ShowPopup(new HotkeyContext().AddLine("in flight")));
+        Assert.True(showEntered.Wait(TimeSpan.FromSeconds(2)));
+        var detach = Task.Run(() => HotkeyManager.OverlaySink = null);
+        try
+        {
+            Assert.NotSame(detach, await Task.WhenAny(detach, Task.Delay(30)));
+        }
+        finally
+        {
+            releaseShow.Set();
+        }
+
+        await Task.WhenAll(show, detach).WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.False(HotkeyManager.HasPriorityPopup);
+        Assert.Null(sink.Popup);
+        var calloutsAfterDetach = sink.PopupCalloutCount;
+        await Task.Delay(70);
+        Assert.Equal(calloutsAfterDetach, sink.PopupCalloutCount);
+    }
+
+    [Fact]
+    public void SinkBinding_IsIdempotentRejectsReplacementAndAllowsFreshAttachAfterDetach()
+    {
+        var first = new RecordingOverlaySink();
+        var second = new RecordingOverlaySink();
+        HotkeyManager.OverlaySink = first;
+        HotkeyManager.OverlaySink = first;
+
+        Assert.Throws<InvalidOperationException>(() => HotkeyManager.OverlaySink = second);
+
+        HotkeyManager.PopupAutoCloseDelay = TimeSpan.Zero;
+        HotkeyManager.ShowPopup(new HotkeyContext().AddLine("first"));
+        HotkeyManager.OverlaySink = null;
+        Assert.Null(first.Popup);
+        Assert.False(HotkeyManager.HasPriorityPopup);
+
+        HotkeyManager.OverlaySink = second;
+        Assert.Null(second.Popup);
+        HotkeyManager.ShowPopup(new HotkeyContext().AddLine("second"));
+        Assert.Equal("second", Assert.Single(second.Popup!.Lines).Text);
+    }
+
+    [Fact]
+    public void Detach_PropagatesSinkFailureAfterClearingManagerState()
+    {
+        var sink = new RecordingOverlaySink
+        {
+            HidePopupCallout = () => throw new InvalidOperationException("sink stopped")
+        };
+        HotkeyManager.OverlaySink = sink;
+        HotkeyManager.PopupAutoCloseDelay = TimeSpan.Zero;
+        HotkeyManager.ShowPopup(new HotkeyContext().AddLine("visible"));
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            HotkeyManager.OverlaySink = null);
+
+        Assert.Equal("sink stopped", exception.Message);
+        Assert.False(HotkeyManager.HasPriorityPopup);
+        Assert.Null(HotkeyManager.OverlaySink);
+    }
+
+    [Fact]
+    public async Task Popup_NavigatesClampsSelectsAndClosesWithVisibleOutput()
     {
         var sink = new RecordingOverlaySink { PopupVisibleLineCount = 2 };
         HotkeyManager.OverlaySink = sink;
         HotkeyManager.PopupAutoCloseDelay = TimeSpan.Zero;
         var confirmedLine = -1;
         HotkeyManager.ShowPopup(new HotkeyPopup(
-            [
-                new("title"),
-                new("first"),
-                new("second")
-            ],
-            Selection: new HotkeyPopupSelection([1, 2], 0, line =>
+            [new("title"), new("first"), new("second")],
+            Selection: new([1, 2], 0, line =>
             {
                 confirmedLine = line;
                 return Task.CompletedTask;
@@ -107,9 +468,28 @@ public sealed class HotkeyManagerTests : IDisposable
         Assert.Equal(1, sink.Popup?.ScrollOffset);
 
         await PressAsync(KeyCode.Enter);
-
         Assert.Equal(2, confirmedLine);
         Assert.Null(sink.Popup);
+    }
+
+    [Fact]
+    public async Task PopupAutoClose_ClosesCurrentPopupAndCanceledTimerCannotCloseReplacement()
+    {
+        var sink = new RecordingOverlaySink();
+        HotkeyManager.OverlaySink = sink;
+        HotkeyManager.PopupAutoCloseDelay = TimeSpan.FromMilliseconds(30);
+        HotkeyManager.ShowPopup(new HotkeyContext().AddLine("auto-close"));
+
+        await WaitUntilAsync(() => sink.Popup is null);
+
+        HotkeyManager.PopupAutoCloseDelay = TimeSpan.FromMilliseconds(50);
+        HotkeyManager.ShowPopup(new HotkeyContext().AddLine("old"));
+        await Task.Delay(10);
+        HotkeyManager.PopupAutoCloseDelay = TimeSpan.Zero;
+        HotkeyManager.ShowPopup(new HotkeyContext().AddLine("replacement"));
+        await Task.Delay(80);
+
+        Assert.Equal("replacement", Assert.Single(sink.Popup!.Lines).Text);
     }
 
     [Fact]
@@ -122,143 +502,107 @@ public sealed class HotkeyManagerTests : IDisposable
         HotkeyManager.OverlaySink = sink;
         HotkeyManager.PopupAutoCloseDelay = TimeSpan.Zero;
         var calls = new List<string>();
-
         HotkeyManager.Register(ConsoleKey.F8, "persistent", () =>
         {
             calls.Add("persistent");
             return Task.CompletedTask;
         });
-        HotkeyManager.Register(ConsoleKey.UpArrow, "persistent-up", () =>
-        {
-            calls.Add("persistent-up");
-            return Task.CompletedTask;
-        });
         var notification = HotkeyManager.RegisterNotificationShortcuts(
-            workspace: null,
             DateTimeOffset.Now.AddMinutes(1),
             [new UiShortcut(ConsoleKey.F8, () =>
             {
                 calls.Add("notification");
                 return Task.CompletedTask;
             })]);
-
         HotkeyManager.ShowPopup(new HotkeyContext()
             .AddLine("popup")
-            .BindShortcut(new UiShortcut(ConsoleKey.F8, () =>
+            .BindShortcut(new(ConsoleKey.F8, () =>
             {
                 calls.Add("popup");
                 return Task.CompletedTask;
             })));
 
-        await PressAsync(KeyCode.F8);
+        Assert.True(await PressAsync(KeyCode.F8));
         Assert.Equal(["popup"], calls);
-
-        await PressAsync(KeyCode.Esc);
-        await PressAsync(KeyCode.F8);
+        Assert.True(await PressAsync(KeyCode.Esc));
+        Assert.True(await PressAsync(KeyCode.F8));
         Assert.Equal(["popup", "notification"], calls);
 
         HotkeyManager.UnregisterNotificationShortcuts(notification);
-        await PressAsync(KeyCode.CursorUp);
-        await PressAsync(KeyCode.F8);
-
+        Assert.True(await PressAsync(KeyCode.CursorUp));
+        Assert.True(await PressAsync(KeyCode.F8));
         Assert.Equal(["popup", "notification", "persistent"], calls);
         Assert.Equal(Command.Up, Assert.Single(sink.WorkspaceCommands));
     }
 
     [Fact]
-    public async Task PopupBuiltInKey_PrecedesNotificationAndPersistentShortcut()
+    public async Task PopupShortcut_ModifiersMatchExactlyAndDoNotChangePopupLifetime()
     {
         var sink = new RecordingOverlaySink();
         HotkeyManager.OverlaySink = sink;
         HotkeyManager.PopupAutoCloseDelay = TimeSpan.Zero;
-        var notification = 0;
-        var persistent = 0;
-        HotkeyManager.Register(ConsoleKey.Enter, "persistent", () =>
+        var cases = new[]
         {
-            persistent++;
-            return Task.CompletedTask;
-        });
-        HotkeyManager.RegisterNotificationShortcuts(
-            workspace: null,
-            DateTimeOffset.Now.AddMinutes(1),
-            [new UiShortcut(ConsoleKey.Enter, () =>
-            {
-                notification++;
-                return Task.CompletedTask;
-            })]);
-        HotkeyManager.ShowPopup(new HotkeyContext().AddLine("popup"));
+            (ConsoleModifiers.None, KeyCode.F8, KeyCode.F8 | KeyCode.CtrlMask),
+            (ConsoleModifiers.Control, KeyCode.F8 | KeyCode.CtrlMask, KeyCode.F8),
+            (ConsoleModifiers.Alt, KeyCode.F8 | KeyCode.AltMask, KeyCode.F8 | KeyCode.ShiftMask),
+            (ConsoleModifiers.Shift, KeyCode.F8 | KeyCode.ShiftMask, KeyCode.F8 | KeyCode.AltMask),
+            (ConsoleModifiers.Control | ConsoleModifiers.Alt,
+                KeyCode.F8 | KeyCode.CtrlMask | KeyCode.AltMask,
+                KeyCode.F8 | KeyCode.CtrlMask)
+        };
 
-        await PressAsync(KeyCode.Enter);
-
-        Assert.Null(sink.Popup);
-        Assert.Equal((0, 0), (notification, persistent));
-    }
-
-    [Fact]
-    public async Task TransientShortcut_MatchesModifiersExactlyAndDoesNotClosePopup()
-    {
-        var sink = new RecordingOverlaySink();
-        HotkeyManager.OverlaySink = sink;
-        HotkeyManager.PopupAutoCloseDelay = TimeSpan.Zero;
-        var transient = 0;
-        var persistent = 0;
-        HotkeyManager.Register(ConsoleKey.K, "bare", () =>
+        foreach (var (modifiers, matchingKey, wrongKey) in cases)
         {
-            persistent++;
-            return Task.CompletedTask;
-        });
-        HotkeyManager.ShowPopup(new HotkeyContext()
-            .AddLine("popup")
-            .BindShortcut(new UiShortcut(
-                ConsoleKey.K,
-                () =>
+            var calls = 0;
+            HotkeyManager.ShowPopup(new HotkeyContext()
+                .AddLine(modifiers.ToString())
+                .BindShortcut(new(ConsoleKey.F8, () =>
                 {
-                    transient++;
+                    calls++;
                     return Task.CompletedTask;
-                },
-                ConsoleModifiers.Control)));
+                }, modifiers)));
 
-        await PressAsync(KeyCode.K | KeyCode.CtrlMask);
-        await PressAsync(KeyCode.K | KeyCode.AltMask);
+            Assert.False(await PressAsync(wrongKey));
+            Assert.Equal(0, calls);
+            Assert.NotNull(sink.Popup);
 
-        Assert.Equal((1, 0), (transient, persistent));
-        Assert.NotNull(sink.Popup);
-
-        await PressAsync(KeyCode.K);
-        Assert.Equal((1, 1), (transient, persistent));
-        Assert.Null(sink.Popup);
+            Assert.True(await PressAsync(matchingKey));
+            Assert.Equal(1, calls);
+            Assert.NotNull(sink.Popup);
+            Assert.True(HotkeyManager.HasPriorityPopup);
+            Assert.True(await PressAsync(KeyCode.Esc));
+        }
     }
 
     [Fact]
-    public async Task LatestUnexpiredNotificationShortcutWinsThenOlderResumes()
+    public async Task OwnerCleanup_RemovesActivePopupShortcutWithoutClosingPopup()
     {
-        var calls = new List<string>();
-        HotkeyManager.RegisterNotificationShortcuts(
-            workspace: null,
-            DateTimeOffset.Now.AddMinutes(1),
-            [new UiShortcut(ConsoleKey.F9, () =>
-            {
-                calls.Add("old");
-                return Task.CompletedTask;
-            })]);
-        HotkeyManager.RegisterNotificationShortcuts(
-            workspace: null,
-            DateTimeOffset.Now.AddMilliseconds(80),
-            [new UiShortcut(ConsoleKey.F9, () =>
-            {
-                calls.Add("new");
-                return Task.CompletedTask;
-            })]);
+        var sink = new RecordingOverlaySink();
+        var owner = new object();
+        var calls = 0;
+        HotkeyManager.OverlaySink = sink;
+        HotkeyManager.PopupAutoCloseDelay = TimeSpan.Zero;
+        using (HotkeyManager.RegisterScope(owner))
+        {
+            HotkeyManager.ShowPopup(new HotkeyContext()
+                .AddLine("still visible")
+                .BindShortcut(new(ConsoleKey.F8, () =>
+                {
+                    calls++;
+                    return Task.CompletedTask;
+                })));
+        }
 
-        await PressAsync(KeyCode.F9);
-        await Task.Delay(120, TestContext.Current.CancellationToken);
-        await PressAsync(KeyCode.F9);
-
-        Assert.Equal(["new", "old"], calls);
+        Assert.Equal(1, HotkeyManager.UnregisterByOwner(owner));
+        Assert.False(await PressAsync(KeyCode.F8));
+        Assert.Equal(0, calls);
+        Assert.True(HotkeyManager.HasPriorityPopup);
+        Assert.Equal("still visible", Assert.Single(sink.Popup!.Lines).Text);
     }
 
     [Fact]
-    public async Task MouseWheel_UsesTerminalGuiStepsAndSuppressesNonVerticalOrModifiedInput()
+    public async Task MouseWheel_UsesTerminalGuiStepsAndSuppressesModifiedOrPopupInput()
     {
         var sink = new RecordingOverlaySink { HandleWorkspaceCommand = _ => true };
         HotkeyManager.OverlaySink = sink;
@@ -267,85 +611,160 @@ public sealed class HotkeyManagerTests : IDisposable
         await HotkeyManager.HandleMouseWheelAsync(-2, hasModifiers: false);
         await HotkeyManager.HandleMouseWheelAsync(1, hasModifiers: true);
         await HotkeyManager.HandleMouseWheelAsync(1, hasModifiers: false, isHorizontal: true);
-
         Assert.Equal(
             [Command.Up, Command.Up, Command.Down, Command.Down],
             sink.WorkspaceCommands);
 
+        HotkeyManager.PopupAutoCloseDelay = TimeSpan.Zero;
         HotkeyManager.ShowPopup(new HotkeyContext().AddLine("popup"));
         await HotkeyManager.HandleMouseWheelAsync(1, hasModifiers: false);
         Assert.Equal(4, sink.WorkspaceCommands.Count);
     }
 
     [Fact]
-    public async Task HandlerException_IsReportedWithoutBreakingLaterDispatch()
+    public async Task UnregisterAll_ClearsPersistentNotificationAndPopupState()
     {
-        var attempts = 0;
-        HotkeyManager.Register(ConsoleKey.F10, "throws", () =>
+        var sink = new RecordingOverlaySink();
+        HotkeyManager.OverlaySink = sink;
+        HotkeyManager.PopupAutoCloseDelay = TimeSpan.Zero;
+        HotkeyManager.Register(ConsoleKey.F1, "persistent", NoopHandler);
+        HotkeyManager.RegisterNotificationShortcuts(
+            DateTimeOffset.Now.AddMinutes(1),
+            [new UiShortcut(ConsoleKey.F2, NoopHandler)]);
+        HotkeyManager.ShowPopup(new HotkeyContext().AddLine("popup"));
+
+        HotkeyManager.UnregisterAll();
+
+        Assert.Empty(HotkeyManager.Hotkeys);
+        Assert.Null(sink.Popup);
+        Assert.False(await PressAsync(KeyCode.F1));
+        Assert.False(await PressAsync(KeyCode.F2));
+    }
+
+    static async Task RegisterFromAsyncCaller(object owner)
+    {
+        using var scope = HotkeyManager.RegisterScope(owner);
+        await Task.Yield();
+        await Task.Run(() => HotkeyManager.Register(ConsoleKey.F1, "owned", NoopHandler));
+    }
+
+    static Task<bool> PressAsync(KeyCode keyCode)
+        => HotkeyManager.HandleKeyAsync(new(keyCode));
+
+    static async Task WaitUntilAsync(Func<bool> condition)
+    {
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(2);
+        while (!condition())
         {
-            attempts++;
-            throw new InvalidOperationException("boom");
-        });
-
-        Assert.Null(await Record.ExceptionAsync(() => PressAsync(KeyCode.F10)));
-        Assert.Null(await Record.ExceptionAsync(() => PressAsync(KeyCode.F10)));
-        Assert.Equal(2, attempts);
+            Assert.True(DateTimeOffset.UtcNow < deadline, "Timed out waiting for popup transition.");
+            await Task.Delay(10);
+        }
     }
-
-    [Fact]
-    public async Task WorkspaceRemoval_UnregistersOnlyItsTransientShortcut()
-    {
-        var output = new UiHost(application, static () => [], static _ => { }).ForPlugin("owner");
-        var removed = output.CreateWorkspace("removed");
-        var kept = output.CreateWorkspace("kept");
-        var calls = new List<string>();
-        output.Notify(
-            removed,
-            "removed",
-            ttl: TimeSpan.FromMinutes(1),
-            shortcuts: new UiShortcut(ConsoleKey.F7, () =>
-            {
-                calls.Add("removed");
-                return Task.CompletedTask;
-            }));
-        output.Notify(
-            kept,
-            "kept",
-            ttl: TimeSpan.FromMinutes(1),
-            shortcuts: new UiShortcut(ConsoleKey.F8, () =>
-            {
-                calls.Add("kept");
-                return Task.CompletedTask;
-            }));
-
-        output.RemoveWorkspace(removed);
-        await PressAsync(KeyCode.F7);
-        await PressAsync(KeyCode.F8);
-
-        Assert.Equal(["kept"], calls);
-    }
-
-    static Task PressAsync(KeyCode keyCode) => HotkeyManager.HandleKeyAsync(new Key(keyCode));
 
     sealed class RecordingOverlaySink : IUiInputSink
     {
+        readonly object gate = new();
         readonly List<Command> workspaceCommands = [];
+        HotkeyPopup? popup;
+        int popupGeneration;
+        int showPopupCalls;
+        int hidePopupCalls;
 
         public int PopupVisibleLineCount { get; init; } = 10;
         public Func<Command, bool>? HandleWorkspaceCommand { get; init; }
-        public IReadOnlyList<Command> WorkspaceCommands => workspaceCommands;
-        public HotkeyPopup? Popup { get; private set; }
+        public Action? ShowPopupCallout { get; init; }
+        public Action? HidePopupCallout { get; init; }
+        public IReadOnlyList<Command> WorkspaceCommands
+        {
+            get
+            {
+                lock (gate)
+                    return workspaceCommands.ToArray();
+            }
+        }
+        public HotkeyPopup? Popup
+        {
+            get
+            {
+                lock (gate)
+                    return popup;
+            }
+        }
+        public int PopupCalloutCount
+        {
+            get
+            {
+                lock (gate)
+                    return showPopupCalls + hidePopupCalls;
+            }
+        }
 
         public Task<bool> TryHandleWorkspaceCommandAsync(Command command)
         {
             if (HandleWorkspaceCommand?.Invoke(command) != true)
                 return Task.FromResult(false);
-
-            workspaceCommands.Add(command);
+            lock (gate)
+                workspaceCommands.Add(command);
             return Task.FromResult(true);
         }
 
-        public void ShowPopup(HotkeyPopup popup, int generation) => Popup = popup;
-        public void HidePopup(int generation) => Popup = null;
+        public void ShowPopup(HotkeyPopup value, int generation)
+        {
+            lock (gate)
+                showPopupCalls++;
+            ShowPopupCallout?.Invoke();
+            lock (gate)
+            {
+                if (generation < popupGeneration)
+                    return;
+                popup = value;
+                popupGeneration = generation;
+            }
+        }
+
+        public void HidePopup(int generation)
+        {
+            lock (gate)
+                hidePopupCalls++;
+            HidePopupCallout?.Invoke();
+            lock (gate)
+            {
+                if (generation < popupGeneration)
+                    return;
+                popup = null;
+                popupGeneration = generation;
+            }
+        }
+    }
+}
+
+[Collection("PluginReload")]
+public sealed class HotkeyManagerErrorChannelTests(PluginRuntimeFixture runtime) : IDisposable
+{
+    public void Dispose()
+    {
+        HotkeyManager.UnregisterAll();
+        HotkeyManager.OverlaySink = null;
+    }
+
+    [Fact]
+    public async Task ThrowingHandler_ReportsVisibleErrorAndDoesNotBreakLaterDispatch()
+    {
+        HotkeyManager.UnregisterAll();
+        HotkeyManager.OverlaySink = runtime.Host;
+        var laterCalls = 0;
+        HotkeyManager.Register(ConsoleKey.F1, "throws", () =>
+            throw new InvalidOperationException("hotkey-handler-sentinel"));
+        HotkeyManager.Register(ConsoleKey.F2, "later", () =>
+        {
+            laterCalls++;
+            return Task.CompletedTask;
+        });
+
+        Assert.True(await HotkeyManager.HandleKeyAsync(new(KeyCode.F1)));
+        await runtime.Terminal.WaitForScreenAsync(
+            "热键处理失败: hotkey-handler-sentinel");
+        Assert.True(await HotkeyManager.HandleKeyAsync(new(KeyCode.F2)));
+        Assert.Equal(1, laterCalls);
     }
 }

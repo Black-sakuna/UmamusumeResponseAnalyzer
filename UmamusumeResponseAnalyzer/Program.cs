@@ -130,18 +130,14 @@ namespace UmamusumeResponseAnalyzer
             var pluginInitialization = Task.CompletedTask;
             var pluginUpdateCheck = Task.CompletedTask;
             var shutdownBindingAdded = false;
-            var terminalUiBound = false;
             ExceptionDispatchInfo? workflowFailure = null;
             try
             {
                 uiHost = new(
                     application,
-                    () => Config.WorkspaceTaskbarTitleOrder,
-                    titles =>
-                    {
-                        Config.WorkspaceTaskbarTitleOrder = [.. titles];
-                        Config.Save();
-                    });
+                    synchronizationContext,
+                    lifetimeCts.Token);
+                TerminalUi.Initialize(uiHost);
                 bootstrap = new(uiHost);
                 shutdownTarget = new(() =>
                 {
@@ -155,10 +151,7 @@ namespace UmamusumeResponseAnalyzer
                     shutdownTarget,
                     Terminal.Gui.Input.Command.Quit);
                 shutdownBindingAdded = true;
-                TerminalUi.Bind(uiHost, application, lifetimeCts.Token);
-                terminalUiBound = true;
                 HotkeyManager.OverlaySink = uiHost;
-                PluginManager.BindWorkspaceOutput(application, plugin => uiHost.ForPlugin(plugin.Name));
 
                 Config.Initialize();
                 await ResourceUpdater.TryUpdateProgram(cancellationToken: lifetimeCts.Token);
@@ -320,7 +313,7 @@ namespace UmamusumeResponseAnalyzer
 
                 // Terminal.Gui 2.4.17 的 RunAsync 会同步进入 run loop，必须先创建 startup waiter。
                 var startupTask = CompleteStartupAsync();
-                var uiTask = uiHost.RunAsync(lifetimeCts.Token);
+                var uiTask = uiHost.RunAsync();
                 _ = uiTask.ContinueWith(
                     static (_, state) => ((CancellationTokenSource)state!).Cancel(),
                     lifetimeCts,
@@ -396,12 +389,6 @@ namespace UmamusumeResponseAnalyzer
                         () =>
                         {
                             bootstrap?.Dispose();
-                            return ValueTask.CompletedTask;
-                        },
-                        () =>
-                        {
-                            if (terminalUiBound)
-                                TerminalUi.Unbind(uiHost!);
                             return ValueTask.CompletedTask;
                         },
                         () =>

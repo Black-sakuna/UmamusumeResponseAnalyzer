@@ -16,6 +16,7 @@ namespace UmamusumeResponseAnalyzer.Tests
     public sealed class PluginAnalyzerTests : IDisposable
     {
         readonly IApplication application;
+        readonly PluginRuntimeFixture runtime;
 
         const string AccountIndexPath = "/umamusume/account/index";
         const string AccountIndexPathWithoutPrefix = "/account/index";
@@ -32,18 +33,18 @@ namespace UmamusumeResponseAnalyzer.Tests
             "android",
             "tablet");
 
-        public PluginAnalyzerTests()
+        public PluginAnalyzerTests(PluginRuntimeFixture runtime)
         {
-            application = Application.Create();
+            this.runtime = runtime;
+            application = runtime.Application;
             SeedConfig();
             ResetAnalyzerState();
-            PluginManager.BindWorkspaceOutput(application, _ => new FakeWorkspaceOutput());
+            HotkeyManager.OverlaySink = runtime.Host;
         }
 
         public void Dispose()
         {
             ResetAnalyzerState();
-            application.Dispose();
         }
 
         [Fact]
@@ -201,43 +202,44 @@ namespace UmamusumeResponseAnalyzer.Tests
         [Fact]
         public async Task DispatchUnknownEndpoints_AreSilentAndDoNotAffectKnownDispatch()
         {
-            await RunWithUiHostAsync(async (terminal, host) =>
-            {
-                var requestPlugin = new RequestDispatchPlugin();
-                var responsePlugin = new ResponseDispatchPlugin();
-                PluginManager.RegisterMethods(requestPlugin);
-                PluginManager.RegisterMethods(responsePlugin);
+            var terminal = runtime.Terminal;
+            var host = runtime.Host;
+            var requestPlugin = new RequestDispatchPlugin();
+            var responsePlugin = new ResponseDispatchPlugin();
+            LoadTestPlugin(requestPlugin);
+            LoadTestPlugin(responsePlugin);
+            var logCount = await terminal.InvokeAsync(() => host.GetLogsForTests(null).Count);
+            var notificationCount = await terminal.InvokeAsync(() => host.GetNotificationsForTests(null).Count);
 
-                await Server.DispatchRequest("/unknown/path", [0xC1]);
-                await Server.DispatchResponse("/umamusume/account/indx", [0xC1]);
-                await terminal.InvokeAsync(() => { });
+            await Server.DispatchRequest("/unknown/path", [0xC1]);
+            await Server.DispatchResponse("/umamusume/account/indx", [0xC1]);
+            await terminal.InvokeAsync(() => { });
 
-                Assert.Equal(0, requestPlugin.RawCalls);
-                Assert.Equal(0, requestPlugin.DtoCalls);
-                Assert.Equal(0, responsePlugin.RawCalls);
-                Assert.Equal(0, responsePlugin.DtoCalls);
-                Assert.Empty(await terminal.InvokeAsync(() => host.GetLogsForTests(null)));
-                Assert.Empty(await terminal.InvokeAsync(() => host.GetNotificationsForTests(null)));
+            Assert.Equal(0, requestPlugin.RawCalls);
+            Assert.Equal(0, requestPlugin.DtoCalls);
+            Assert.Equal(0, responsePlugin.RawCalls);
+            Assert.Equal(0, responsePlugin.DtoCalls);
+            Assert.Equal(logCount, await terminal.InvokeAsync(() => host.GetLogsForTests(null).Count));
+            Assert.Equal(notificationCount, await terminal.InvokeAsync(() => host.GetNotificationsForTests(null).Count));
 
-                await Server.DispatchRequest(
-                    AccountIndexPath,
-                    MessagePackSerializer.Serialize(new DataLinkIndexRequest()));
-                await Server.DispatchResponse(
-                    AccountIndexPath,
-                    MessagePackSerializer.Serialize(new DataLinkIndexResponse()));
+            await Server.DispatchRequest(
+                AccountIndexPath,
+                MessagePackSerializer.Serialize(new DataLinkIndexRequest()));
+            await Server.DispatchResponse(
+                AccountIndexPath,
+                MessagePackSerializer.Serialize(new DataLinkIndexResponse()));
 
-                Assert.Equal(1, requestPlugin.RawCalls);
-                Assert.Equal(1, requestPlugin.DtoCalls);
-                Assert.Equal(1, responsePlugin.RawCalls);
-                Assert.Equal(1, responsePlugin.DtoCalls);
-            });
+            Assert.Equal(1, requestPlugin.RawCalls);
+            Assert.Equal(1, requestPlugin.DtoCalls);
+            Assert.Equal(1, responsePlugin.RawCalls);
+            Assert.Equal(1, responsePlugin.DtoCalls);
         }
 
         [Fact]
         public async Task DispatchResponse_CallsRawAndDtoAnalyzersInPriorityOrder()
         {
             var plugin = new ResponseDispatchPlugin();
-            PluginManager.RegisterMethods(plugin);
+            LoadTestPlugin(plugin);
             var payload = MessagePackSerializer.Serialize(new DataLinkIndexResponse
             {
                 data = new DataLinkIndexResponse.CommonResponse
@@ -259,7 +261,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         public async Task DispatchResponse_AcceptsCanonicalUrlWithoutUmamusumePrefix()
         {
             var plugin = new ResponseDispatchPlugin();
-            PluginManager.RegisterMethods(plugin);
+            LoadTestPlugin(plugin);
             var payload = MessagePackSerializer.Serialize(new DataLinkIndexResponse
             {
                 data = new DataLinkIndexResponse.CommonResponse
@@ -281,7 +283,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         public async Task DispatchRequest_DeliversHeadersToAttributeRawAnalyzerSecondParameter()
         {
             var plugin = new RawHeadersDispatchPlugin();
-            PluginManager.RegisterMethods(plugin);
+            LoadTestPlugin(plugin);
             var payload = MessagePackSerializer.Serialize(new DataLinkIndexRequest());
             var headers = TestHeaders;
 
@@ -295,7 +297,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         public async Task DispatchResponse_DeliversHeadersToAttributeDtoAnalyzerSecondParameter()
         {
             var plugin = new DtoHeadersDispatchPlugin();
-            PluginManager.RegisterMethods(plugin);
+            LoadTestPlugin(plugin);
             var payload = MessagePackSerializer.Serialize(new DataLinkIndexResponse
             {
                 data = new DataLinkIndexResponse.CommonResponse
@@ -315,7 +317,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         public async Task DispatchResponse_IsolatesDtoDeserializationAtDtoAnalyzerExecutionPoint()
         {
             var plugin = new ResponseDispatchPlugin();
-            PluginManager.RegisterMethods(plugin);
+            LoadTestPlugin(plugin);
 
             await Server.DispatchResponse(AccountIndexPath, [0xC1]);
 
@@ -326,32 +328,33 @@ namespace UmamusumeResponseAnalyzer.Tests
         [Fact]
         public async Task DispatchKnownEndpointFailures_RemainReported()
         {
-            await RunWithUiHostAsync(async (terminal, host) =>
+            var terminal = runtime.Terminal;
+            var host = runtime.Host;
+            var logCount = await terminal.InvokeAsync(() => host.GetLogsForTests(null).Count);
+            var notificationCount = await terminal.InvokeAsync(() => host.GetNotificationsForTests(null).Count);
+            var malformedPayloadPlugin = new ResponseDispatchPlugin();
+            LoadTestPlugin(malformedPayloadPlugin);
+
+            await Assert.ThrowsAsync<FormatException>(
+                async () => await Server.DispatchResponse("account/index", [0xC0]));
+            await Server.DispatchResponse(AccountIndexPath, [0xC1]);
+
+            ResetAnalyzerState();
+            LoadTestPlugin(new ThrowingResponsePlugin());
+            await Server.DispatchResponse(
+                AccountIndexPath,
+                MessagePackSerializer.Serialize(new DataLinkIndexResponse()));
+
+            await terminal.WaitForAsync(async () =>
             {
-                var malformedPayloadPlugin = new ResponseDispatchPlugin();
-                PluginManager.RegisterMethods(malformedPayloadPlugin);
-
-                await Assert.ThrowsAsync<FormatException>(
-                    async () => await Server.DispatchResponse("account/index", [0xC0]));
-                await Server.DispatchResponse(AccountIndexPath, [0xC1]);
-
-                ResetAnalyzerState();
-                PluginManager.RegisterMethods(new ThrowingResponsePlugin());
-                await Server.DispatchResponse(
-                    AccountIndexPath,
-                    MessagePackSerializer.Serialize(new DataLinkIndexResponse()));
-
-                await terminal.WaitForAsync(async () =>
-                {
-                    var logs = await terminal.InvokeAsync(() => host.GetLogsForTests(null));
-                    var notifications = await terminal.InvokeAsync(() => host.GetNotificationsForTests(null));
-                    return logs.Any(x => x.Text.Contains("canonical URL 必须包含绝对 path", StringComparison.Ordinal))
-                        && logs.Any(x => x.Text.Contains("Gallop DTO 反序列化失败", StringComparison.Ordinal))
-                        && logs.Any(x => x.Text.Contains("analyzer failed", StringComparison.Ordinal))
-                        && notifications.Any(x => x.Text.Contains("canonical URL 必须包含绝对 path", StringComparison.Ordinal))
-                        && notifications.Any(x => x.Text.Contains("Gallop DTO 反序列化失败", StringComparison.Ordinal))
-                        && notifications.Any(x => x.Text.Contains("analyzer failed", StringComparison.Ordinal));
-                });
+                var logs = (await terminal.InvokeAsync(() => host.GetLogsForTests(null))).Skip(logCount);
+                var notifications = (await terminal.InvokeAsync(() => host.GetNotificationsForTests(null))).Skip(notificationCount);
+                return logs.Any(x => x.Text.Contains("canonical URL 必须包含绝对 path", StringComparison.Ordinal))
+                    && logs.Any(x => x.Text.Contains("Gallop DTO 反序列化失败", StringComparison.Ordinal))
+                    && logs.Any(x => x.Text.Contains("analyzer failed", StringComparison.Ordinal))
+                    && notifications.Any(x => x.Text.Contains("canonical URL 必须包含绝对 path", StringComparison.Ordinal))
+                    && notifications.Any(x => x.Text.Contains("Gallop DTO 反序列化失败", StringComparison.Ordinal))
+                    && notifications.Any(x => x.Text.Contains("analyzer failed", StringComparison.Ordinal));
             });
         }
 
@@ -359,7 +362,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         public async Task DispatchResponse_CallsRawAnalyzerWhenNoDtoAnalyzerExists()
         {
             var plugin = new RawResponseDispatchPlugin();
-            PluginManager.RegisterMethods(plugin);
+            LoadTestPlugin(plugin);
 
             await Server.DispatchResponse(AccountIndexPath, [0xC1]);
 
@@ -480,10 +483,10 @@ namespace UmamusumeResponseAnalyzer.Tests
         [Fact]
         public async Task DispatchResponse_IsolatesAnalyzerExceptionAndContinues()
         {
-            var throwingPlugin = new ThrowingResponsePlugin();
+            var throwingPlugin = new HostileMessageResponsePlugin();
             var nextPlugin = new ResponseDispatchPlugin();
-            PluginManager.RegisterMethods(throwingPlugin);
-            PluginManager.RegisterMethods(nextPlugin);
+            LoadTestPlugin(throwingPlugin);
+            LoadTestPlugin(nextPlugin);
             var payload = MessagePackSerializer.Serialize(new DataLinkIndexResponse());
 
             await Server.DispatchResponse(AccountIndexPath, payload);
@@ -496,7 +499,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         public async Task DispatchRequest_CallsRawAndDtoAnalyzersInPriorityOrder()
         {
             var plugin = new RequestDispatchPlugin();
-            PluginManager.RegisterMethods(plugin);
+            LoadTestPlugin(plugin);
             var payload = MessagePackSerializer.Serialize(new DataLinkIndexRequest());
 
             await Server.DispatchRequest(AccountIndexAbsoluteUrl, payload);
@@ -512,7 +515,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         public async Task DispatchRequest_CallsRawAnalyzerWhenNoDtoAnalyzerExists()
         {
             var plugin = new RawRequestDispatchPlugin();
-            PluginManager.RegisterMethods(plugin);
+            LoadTestPlugin(plugin);
 
             await Server.DispatchRequest(AccountIndexUrlWithQuery, [0xC0]);
 
@@ -620,7 +623,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         public async Task DispatchResponse_UsesEmptyHeadersWhenHeadersOmitted()
         {
             var plugin = new DtoHeadersDispatchPlugin();
-            PluginManager.RegisterMethods(plugin);
+            LoadTestPlugin(plugin);
             var payload = MessagePackSerializer.Serialize(new DataLinkIndexResponse());
 
             await Server.DispatchResponse(AccountIndexPath, payload);
@@ -663,7 +666,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         public async Task DispatchResponse_SharesDtoInstanceWithinDispatch()
         {
             var plugin = new DtoCacheDispatchPlugin();
-            PluginManager.RegisterMethods(plugin);
+            LoadTestPlugin(plugin);
             var payload = MessagePackSerializer.Serialize(new DataLinkIndexResponse());
 
             await Server.DispatchResponse(AccountIndexPath, payload);
@@ -675,15 +678,13 @@ namespace UmamusumeResponseAnalyzer.Tests
         public async Task InitializePlugin_PassesPluginContextAndDisposesStartedSubscription()
         {
             var plugin = new ContextPlugin();
-            var workspaceOutput = new FakeWorkspaceOutput();
-            PluginManager.BindWorkspaceOutput(application, _ => workspaceOutput);
 
             PluginManager.InitializePlugin(plugin);
 
             Assert.NotNull(plugin.Context);
             Assert.Same(application, plugin.Context!.Application);
-            Assert.Same(workspaceOutput, plugin.Context!.WorkspaceOutput);
             Assert.NotNull(plugin.Context.Events);
+            Assert.NotNull(plugin.Context.Analyzers);
 
             await PluginManager.TriggerStartedForPluginsAsync([plugin]);
             Assert.Equal(1, plugin.StartedCalls);
@@ -697,10 +698,6 @@ namespace UmamusumeResponseAnalyzer.Tests
         public async Task PluginLoadContext_ResolvesSharedAbiAssemblyFromDefaultContext()
         {
             var ctx = new PluginManager.PluginLoadContext("shared-abi-test");
-            using var terminal = new TerminalGuiTestApp();
-            var uiHost = new UiHost(terminal.Application, static () => [], static _ => { });
-            terminal.RunOnOwnerThread(() => TerminalUi.Bind(uiHost, terminal.Application));
-            var run = await terminal.StartAsync(uiHost);
             try
             {
                 var host = ctx.LoadFromAssemblyName(typeof(IPlugin).Assembly.GetName());
@@ -718,11 +715,11 @@ namespace UmamusumeResponseAnalyzer.Tests
                     Version = new Version(99, 0, 0, 0),
                 };
                 Assert.Same(typeof(Server).Assembly, ctx.LoadFromAssemblyName(futureHostVersion));
-                await terminal.WaitForAsync(() =>
-                    uiHost.GetLogsForTests(null).Any(line =>
+                await runtime.Terminal.WaitForAsync(() =>
+                    runtime.Host.GetLogsForTests(null).Any(line =>
                         line.Text.Contains("插件依赖的宿主 ABI 版本更高", StringComparison.Ordinal)));
                 Assert.Contains(
-                    uiHost.GetLogsForTests(null),
+                    runtime.Host.GetLogsForTests(null),
                     line => line.Text.Contains("插件依赖的宿主 ABI 版本更高", StringComparison.Ordinal));
 
                 var wrongTerminalGuiVersion = new AssemblyName(typeof(View).Assembly.GetName().Name!)
@@ -733,39 +730,25 @@ namespace UmamusumeResponseAnalyzer.Tests
             }
             finally
             {
-                await terminal.StopAsync(uiHost, run);
-                terminal.RunOnOwnerThread(() => TerminalUi.Unbind(uiHost));
                 ctx.Unload();
             }
         }
 
-        static async Task RunWithUiHostAsync(Func<TerminalGuiTestApp, UiHost, Task> action)
+        static void LoadTestPlugin(IPlugin plugin)
         {
-            using var terminal = new TerminalGuiTestApp();
-            var host = new UiHost(terminal.Application, static () => [], static _ => { });
-            terminal.RunOnOwnerThread(() => TerminalUi.Bind(host, terminal.Application));
-            try
-            {
-                var run = await terminal.StartAsync(host);
-                try
-                {
-                    await action(terminal, host);
-                }
-                finally
-                {
-                    await terminal.StopAsync(host, run);
-                }
-            }
-            finally
-            {
-                terminal.RunOnOwnerThread(() => TerminalUi.Unbind(host));
-            }
+            PluginManager.RegisterMethods(plugin);
+            PluginManager.LoadedPlugins.Add(plugin);
+            PluginManager.InitializePlugin(plugin);
         }
 
         static void ResetAnalyzerState()
         {
             PluginManager.RequestAnalyzerMethods.Clear();
             PluginManager.ResponseAnalyzerMethods.Clear();
+            PluginManager.ClearHostEventSubscriptions();
+            foreach (var plugin in PluginManager.LoadedPlugins)
+                HotkeyManager.UnregisterByOwner(plugin);
+            PluginManager.LoadedPlugins.Clear();
         }
 
         static void SeedConfig()
@@ -1067,6 +1050,19 @@ namespace UmamusumeResponseAnalyzer.Tests
             }
         }
 
+        sealed class HostileMessageResponsePlugin : TestPlugin
+        {
+            [ResponseAnalyzer<GameApi.Account.Index>]
+            public ValueTask OnDto(DataLinkIndexResponse response)
+                => throw new HostileMessageException();
+        }
+
+        sealed class HostileMessageException : Exception
+        {
+            public override string Message => throw new InvalidOperationException("Message getter failed");
+            public override string ToString() => throw new InvalidOperationException("ToString failed");
+        }
+
         sealed class RequestDispatchPlugin : TestPlugin
         {
             public int DtoCalls { get; private set; }
@@ -1264,18 +1260,5 @@ namespace UmamusumeResponseAnalyzer.Tests
             }
         }
 
-        sealed class FakeWorkspaceOutput : IWorkspaceOutput
-        {
-            public Workspace? CurrentWorkspace => null;
-            public Workspace CreateWorkspace(string title) => Workspace.Create(title);
-            public void RemoveWorkspace(Workspace workspace) { }
-            public void SwitchWorkspace(Workspace workspace) { }
-            public void BindWorkspaceHotkey(Workspace workspace, ConsoleKey key, ConsoleModifiers modifiers = 0, string? description = null) { }
-            public void SetPanel(Workspace workspace, string key, string title, WorkspaceContent content, bool fullBleed = false, bool switchToWorkspace = true) { }
-            public void Log(string text, UiSeverity severity = UiSeverity.Info) { }
-            public void Log(Workspace workspace, string text, UiSeverity severity = UiSeverity.Info) { }
-            public void Notify(string text, UiSeverity severity = UiSeverity.Info, TimeSpan? ttl = null, params UiShortcut[] shortcuts) { }
-            public void Notify(Workspace workspace, string text, UiSeverity severity = UiSeverity.Info, TimeSpan? ttl = null, params UiShortcut[] shortcuts) { }
-        }
     }
 }

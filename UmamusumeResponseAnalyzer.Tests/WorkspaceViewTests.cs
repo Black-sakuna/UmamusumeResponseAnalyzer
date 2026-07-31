@@ -1,0 +1,675 @@
+using System.Drawing;
+using System.Runtime.CompilerServices;
+using Terminal.Gui.Input;
+using Terminal.Gui.ViewBase;
+using Terminal.Gui.Views;
+using UmamusumeResponseAnalyzer.TerminalGui;
+using Xunit;
+
+namespace UmamusumeResponseAnalyzer.Tests;
+
+[Collection("HotkeyManager")]
+public sealed class WorkspaceViewTests
+{
+    [Fact]
+    public async Task ReconcileRealizesOnlyFinalContentAndReusesItsView()
+    {
+        using var terminal = new TerminalGuiTestApp(width: 50, height: 12);
+        using var viewport = new WorkspaceViewport();
+        var workspace = new Workspace("Model batch");
+        var inactiveWorkspace = new Workspace("Inactive");
+        Button? finalView = null;
+        var finalContent = new WorkspaceContent(() =>
+        {
+            if (finalView is not null)
+                return new Button { Text = "RECREATED" };
+
+            finalView = new Button { Text = "FINAL-CONTENT" };
+            return finalView;
+        });
+        viewport.SetActiveWorkspace(workspace);
+        viewport.SetPanel(Panel(
+            workspace,
+            "global",
+            "Discarded one",
+            new(() =>
+            {
+                throw new InvalidOperationException("Discarded content was realized.");
+            }),
+            1));
+        viewport.SetPanel(Panel(
+            workspace,
+            "global",
+            "Discarded two",
+            new(() =>
+            {
+                throw new InvalidOperationException("Discarded content was realized.");
+            }),
+            2));
+        viewport.SetPanel(Panel(workspace, "global", "Final title", finalContent, 3));
+        viewport.Reconcile();
+
+        using var window = WindowWith(viewport);
+        var run = await StartAsync(terminal, window);
+        try
+        {
+            var screen = await terminal.CaptureScreenAsync();
+            Assert.Contains("Final title", screen);
+            Assert.Contains("FINAL-CONTENT", screen);
+            Assert.DoesNotContain("DISCARDED", screen);
+
+            await terminal.InvokeAsync(() =>
+            {
+                finalView!.Text = "PERSISTED-STATE";
+                finalView.SetFocus();
+                viewport.SetPanel(Panel(workspace, "global", "Renamed title", finalContent, 4));
+                viewport.SetPanel(Panel(
+                    inactiveWorkspace,
+                    "inactive",
+                    "Inactive title",
+                    new(() => throw new InvalidOperationException("Inactive content was realized.")),
+                    1));
+                viewport.Reconcile();
+            });
+            await terminal.RedrawAsync();
+            screen = await terminal.CaptureScreenAsync();
+
+            Assert.Contains("Renamed title", screen);
+            Assert.Contains("PERSISTED-STATE", screen);
+            Assert.DoesNotContain("RECREATED", screen);
+            Assert.Same(
+                finalView,
+                await terminal.InvokeAsync(() => window.MostFocused));
+        }
+        finally
+        {
+            await StopAsync(terminal, run);
+        }
+    }
+
+    [Fact]
+    public async Task SelectionUsesReferenceGenerationKeyOrderAndLatestFullBleed()
+    {
+        using var terminal = new TerminalGuiTestApp(width: 48, height: 10);
+        using var viewport = new WorkspaceViewport();
+        var oldGeneration = new Workspace("Shared title");
+        var newGeneration = new Workspace("shared TITLE");
+        viewport.SetPanel(Panel(
+            oldGeneration,
+            "ghost",
+            "Ghost title",
+            WorkspaceContent.Text("OLD-GENERATION"),
+            1));
+        viewport.SetPanel(Panel(
+            newGeneration,
+            "z-global",
+            "Second title",
+            WorkspaceContent.Text("SECOND-GLOBAL"),
+            2));
+        viewport.SetPanel(Panel(
+            newGeneration,
+            "a-global",
+            "First title",
+            WorkspaceContent.Text("FIRST-GLOBAL"),
+            3));
+        viewport.RemoveWorkspace(oldGeneration);
+        viewport.SetActiveWorkspace(newGeneration);
+        viewport.Reconcile();
+
+        using var window = WindowWith(viewport);
+        var run = await StartAsync(terminal, window);
+        try
+        {
+            var screen = await terminal.CaptureScreenAsync();
+            Assert.DoesNotContain("OLD-GENERATION", screen);
+            Assert.Contains("FIRST-GLOBAL", screen);
+            Assert.Contains("SECOND-GLOBAL", screen);
+            var firstTitle = screen.IndexOf("First title", StringComparison.Ordinal);
+            var secondTitle = screen.IndexOf("Second title", StringComparison.Ordinal);
+            Assert.True(firstTitle >= 0);
+            Assert.True(secondTitle >= 0);
+            Assert.True(firstTitle < secondTitle);
+            Assert.DoesNotContain("Plugin -", screen);
+
+            await terminal.InvokeAsync(() =>
+            {
+                viewport.SetPanel(Panel(
+                    newGeneration,
+                    "full-new",
+                    "New full bleed",
+                    new(() => new Label
+                    {
+                        Text = "LATEST-FULL-BLEED",
+                        Height = Dim.Fill()
+                    }),
+                    11,
+                    fullBleed: true));
+                viewport.SetPanel(Panel(
+                    newGeneration,
+                    "full-old",
+                    "Old full bleed",
+                    WorkspaceContent.Text("OLDER-FULL-BLEED"),
+                    10,
+                    fullBleed: true));
+                viewport.Reconcile();
+            });
+            await terminal.RedrawAsync();
+            screen = await terminal.CaptureScreenAsync();
+
+            Assert.Contains("LATEST-FULL-BLEED", screen);
+            Assert.DoesNotContain("OLDER-FULL-BLEED", screen);
+            Assert.DoesNotContain("FIRST-GLOBAL", screen);
+
+            await terminal.InvokeAsync(() =>
+            {
+                viewport.SetPanel(Panel(
+                    newGeneration,
+                    "full-explicit",
+                    "Explicit full bleed",
+                    new(() => new Label
+                    {
+                        Text = string.Join(
+                            Environment.NewLine,
+                            Enumerable.Range(1, 20).Select(index => $"explicit-{index:00}")),
+                        Height = 20
+                    }),
+                    12,
+                    fullBleed: true));
+                viewport.Reconcile();
+                viewport.SetFocus();
+            });
+            await terminal.RedrawAsync();
+            Assert.Contains("explicit-20", await terminal.CaptureScreenAsync());
+
+            await terminal.InjectAsync(Key.Home);
+            await terminal.RedrawAsync();
+            Assert.Contains("explicit-01", await terminal.CaptureScreenAsync());
+        }
+        finally
+        {
+            await StopAsync(terminal, run);
+        }
+    }
+
+    [Theory]
+    [InlineData(ReleaseAction.Replace)]
+    [InlineData(ReleaseAction.RemovePanel)]
+    [InlineData(ReleaseAction.RemoveWorkspace)]
+    [InlineData(ReleaseAction.Dispose)]
+    public void ReleasedPanelsDoNotKeepFactoryOrViewAlive(ReleaseAction action)
+    {
+        var tracked = CreateReleasedPanel(action);
+
+        Assert.True(tracked.Signal.Disposed);
+        Collect();
+
+        Assert.False(tracked.FactoryOwner.IsAlive);
+        Assert.False(tracked.View.IsAlive);
+        GC.KeepAlive(tracked.Viewport);
+    }
+
+    [Fact]
+    public void FactoriesRejectAttachedSharedAndReleasedViews()
+    {
+        using (var owner = new View())
+        using (var viewport = new WorkspaceViewport())
+        {
+            var workspace = new Workspace("Attached");
+            var attached = new View();
+            owner.Add(attached);
+            viewport.SetActiveWorkspace(workspace);
+            viewport.SetPanel(Panel(
+                workspace,
+                "attached",
+                "Attached",
+                new(() => attached),
+                1,
+                fullBleed: true));
+
+            Assert.Throws<InvalidOperationException>(viewport.Reconcile);
+        }
+
+        using (var viewport = new WorkspaceViewport())
+        {
+            var workspace = new Workspace("Shared");
+            var shared = new View();
+            viewport.SetActiveWorkspace(workspace);
+            viewport.SetPanel(Panel(workspace, "a", "A", new(() => shared), 1));
+            viewport.SetPanel(Panel(workspace, "b", "B", new(() => shared), 2));
+
+            Assert.Throws<InvalidOperationException>(viewport.Reconcile);
+        }
+
+        using (var viewport = new WorkspaceViewport())
+        {
+            var workspace = new Workspace("Released");
+            var signal = new DisposeSignal();
+            var released = new TrackingView(signal) { Text = "released" };
+            viewport.SetActiveWorkspace(workspace);
+            viewport.SetPanel(Panel(
+                workspace,
+                "panel",
+                "First",
+                new(() => released),
+                1,
+                fullBleed: true));
+            viewport.Reconcile();
+            viewport.SetPanel(Panel(
+                workspace,
+                "panel",
+                "Replacement",
+                WorkspaceContent.Text("replacement"),
+                2,
+                fullBleed: true));
+            viewport.Reconcile();
+            Assert.True(signal.Disposed);
+            viewport.SetPanel(Panel(
+                workspace,
+                "panel",
+                "Released again",
+                new(() => released),
+                3,
+                fullBleed: true));
+
+            Assert.Throws<InvalidOperationException>(viewport.Reconcile);
+        }
+    }
+
+    [Fact]
+    public void DisposeContinuesAfterOwnedViewThrows()
+    {
+        var first = new DisposeSignal();
+        var second = new DisposeSignal();
+        var viewport = new WorkspaceViewport();
+        var workspace = new Workspace("Dispose");
+        viewport.SetActiveWorkspace(workspace);
+        viewport.SetPanel(Panel(
+            workspace,
+            "a",
+            "Throwing",
+            new(() => new ThrowingDisposeView(first)),
+            1));
+        viewport.SetPanel(Panel(
+            workspace,
+            "b",
+            "Tracking",
+            new(() => new TrackingView(second)),
+            2));
+        viewport.Reconcile();
+
+        Assert.NotNull(Record.Exception(viewport.Dispose));
+        Assert.True(first.Disposed);
+        Assert.True(second.Disposed);
+    }
+
+    [Fact]
+    public async Task ViewportStartsAtBottomNavigatesAndClampsAfterContentShrinks()
+    {
+        using var terminal = new TerminalGuiTestApp(width: 32, height: 8);
+        using var viewport = new WorkspaceViewport();
+        var workspace = new Workspace("Scroll");
+        viewport.SetActiveWorkspace(workspace);
+        viewport.SetPanel(Panel(
+            workspace,
+            "log",
+            "Long output",
+            WorkspaceContent.Text(string.Join(
+                Environment.NewLine,
+                Enumerable.Range(1, 50).Select(index => $"line-{index:00}"))),
+            1));
+        viewport.Reconcile();
+
+        using var window = WindowWith(viewport);
+        var run = await StartAsync(terminal, window);
+        try
+        {
+            await terminal.InvokeAsync(viewport.SetFocus);
+            var screen = await terminal.CaptureScreenAsync();
+            Assert.Contains("line-50", screen);
+            Assert.DoesNotContain("line-01", screen);
+
+            await terminal.InjectAsync(Key.Home);
+            await terminal.RedrawAsync();
+            Assert.Contains("line-01", await terminal.CaptureScreenAsync());
+
+            await terminal.InjectAsync(Key.PageDown);
+            await terminal.InjectAsync(Key.End);
+            await terminal.RedrawAsync();
+            Assert.Contains("line-50", await terminal.CaptureScreenAsync());
+
+            await terminal.InjectAsync(Key.CursorUp);
+            await terminal.InjectAsync(Key.CursorDown);
+            await terminal.ResizeAsync(14, 6);
+            await terminal.RedrawAsync();
+            Assert.Contains("line-50", await terminal.CaptureScreenAsync());
+
+            Button? focusTarget = null;
+            await terminal.InvokeAsync(() =>
+            {
+                viewport.Navigate(Command.Start);
+                viewport.SetPanel(Panel(
+                    workspace,
+                    "log",
+                    "Short output",
+                    new(() =>
+                    {
+                        var root = new View { Width = Dim.Fill(), Height = Dim.Fill() };
+                        root.Add(
+                            new Label { Text = "Short body", Width = Dim.Fill(), Height = 1 },
+                            focusTarget = new Button { Text = "Focus target", Y = 2 });
+                        return root;
+                    }),
+                    2,
+                    fullBleed: true));
+                viewport.Reconcile();
+            });
+            await terminal.RedrawAsync();
+            screen = await terminal.CaptureScreenAsync();
+
+            Assert.Contains("Short body", screen);
+            Assert.DoesNotContain("line-", screen);
+            await terminal.InvokeAsync(() => focusTarget!.SetFocus());
+            Assert.Same(
+                focusTarget,
+                await terminal.InvokeAsync(() => window.MostFocused));
+        }
+        finally
+        {
+            await StopAsync(terminal, run);
+        }
+    }
+
+    [Fact]
+    public async Task TaskbarHoverClickDragResizeAndViewportStayIndependent()
+    {
+        using var terminal = new TerminalGuiTestApp(width: 48, height: 12);
+        using var viewport = new WorkspaceViewport();
+        var alpha = new Workspace("Alpha");
+        var beta = new Workspace("Beta");
+        var gamma = new Workspace("Gamma");
+        var workspaceAction = false;
+        Workspace? switched = null;
+        string[]? saved = null;
+        var snapshot = new[] { alpha, beta, gamma };
+        WorkspaceTaskbarView? taskbar = null;
+        taskbar = new(
+            () => false,
+            workspace =>
+            {
+                switched = workspace;
+                taskbar!.Refresh(snapshot, workspace);
+            },
+            [],
+            order => saved = [.. order]);
+        using (taskbar)
+        {
+            viewport.SetActiveWorkspace(alpha);
+            viewport.SetPanel(Panel(
+                alpha,
+                "main",
+                "Main",
+                new(() =>
+                {
+                    var root = new View { Width = Dim.Fill(), Height = Dim.Fill() };
+                    var action = new Button
+                    {
+                        Text = "GO",
+                        X = 0,
+                        Y = Pos.AnchorEnd(2)
+                    };
+                    action.Activated += (_, _) => workspaceAction = true;
+                    root.Add(
+                        new Label { Text = "VIEWPORT-BODY" },
+                        action);
+                    return root;
+                }),
+                1,
+                fullBleed: true));
+            viewport.Reconcile();
+            taskbar.Refresh(snapshot, alpha);
+
+            using var window = WindowWith(viewport, taskbar.BottomEdgeTrigger, taskbar);
+            var run = await StartAsync(terminal, window);
+            try
+            {
+                await terminal.MoveMouseAsync(new Point(0, 11));
+                await terminal.WaitForScreenAsync("Alpha");
+                var screen = await terminal.CaptureScreenAsync();
+                Assert.Contains("VIEWPORT-BODY", screen);
+                Assert.Contains("Alpha", screen);
+                Assert.Contains("Beta", screen);
+                Assert.Contains("Gamma", screen);
+
+                await terminal.ClickAsync(FindText(screen, "GO"));
+                await terminal.WaitForAsync(() => workspaceAction);
+
+                await terminal.MoveMouseAsync(new Point(0, 11));
+                await terminal.WaitForScreenAsync("Beta");
+                screen = await terminal.CaptureScreenAsync();
+                var betaPoint = FindText(screen, "Beta");
+                var beforeHover = await terminal.CaptureAttributeAsync(betaPoint);
+                await terminal.MoveMouseAsync(betaPoint);
+                await terminal.RedrawAsync();
+                var afterHover = await terminal.CaptureAttributeAsync(betaPoint);
+                Assert.NotEqual(beforeHover, afterHover);
+
+                await terminal.ClickAsync(betaPoint);
+                await terminal.WaitForAsync(() => ReferenceEquals(switched, beta));
+
+                screen = await terminal.CaptureScreenAsync();
+                var gammaPoint = FindText(screen, "Gamma");
+                var alphaPoint = FindText(screen, "Alpha");
+                await terminal.InjectAsync(MouseAt(
+                    terminal,
+                    gammaPoint,
+                    MouseFlags.LeftButtonPressed));
+                await terminal.InjectAsync(MouseAt(
+                    terminal,
+                    alphaPoint,
+                    MouseFlags.LeftButtonPressed | MouseFlags.PositionReport));
+                await terminal.InjectAsync(MouseAt(
+                    terminal,
+                    alphaPoint,
+                    MouseFlags.LeftButtonReleased));
+                await terminal.WaitForAsync(() => saved is not null);
+
+                Assert.Equal(["Gamma", "Alpha", "Beta"], saved!);
+                Assert.Same(beta, switched);
+
+                await terminal.ResizeAsync(16, 8);
+                await terminal.MoveMouseAsync(new Point(0, 7));
+                await terminal.RedrawAsync();
+                screen = await terminal.CaptureScreenAsync();
+                Assert.Contains("VIEWPORT-BODY", screen);
+                Assert.Contains("…", screen);
+            }
+            finally
+            {
+                await StopAsync(terminal, run);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task BootstrapDashboardRendersCoreStateAndExplicitLogText()
+    {
+        using var terminal = new TerminalGuiTestApp(width: 120, height: 36);
+        const string logText = "[Plugin] bootstrap-log";
+        using var dashboard = new BootstrapDashboardView(
+            [("版本", "M1-test"), ("工作目录", "K:\\repo")],
+            [new("插件初始化", UiSeverity.Success, "初始化完成")],
+            [new("ExamplePlugin", "1.2.3", "OK", "初始化完成")],
+            [new("WARN", logText)]);
+        using var window = WindowWith(dashboard);
+        var run = await StartAsync(terminal, window);
+        try
+        {
+            var screen = await terminal.CaptureScreenAsync();
+
+            Assert.Contains("运行环境", screen);
+            Assert.Contains("初始化结果", screen);
+            Assert.Contains("插件摘要", screen);
+            Assert.Contains("最近日志", screen);
+            Assert.Contains("M1-test", screen);
+            Assert.Contains("ExamplePlugin", screen);
+            Assert.Contains($"WARN {logText}", screen);
+            Assert.Throws<ArgumentOutOfRangeException>(
+                () => BootstrapWorkspace.SeverityLabel((UiSeverity)int.MaxValue));
+        }
+        finally
+        {
+            await StopAsync(terminal, run);
+        }
+    }
+
+    static WorkspacePanel Panel(
+        Workspace workspace,
+        string key,
+        string title,
+        WorkspaceContent content,
+        long sequence,
+        bool fullBleed = false)
+        => new(workspace, key, title, content, sequence, fullBleed);
+
+    static Window WindowWith(params View[] views)
+    {
+        var window = new Window
+        {
+            Width = Dim.Fill(),
+            Height = Dim.Fill(),
+            BorderStyle = null
+        };
+        window.Add(views);
+        return window;
+    }
+
+    static async Task<Task> StartAsync(TerminalGuiTestApp terminal, Window window)
+        => await terminal.StartAsync(
+            () => terminal.Application.RunAsync(window, CancellationToken.None));
+
+    static async Task StopAsync(TerminalGuiTestApp terminal, Task run)
+    {
+        await terminal.InvokeAsync(() => terminal.Application.RequestStop());
+        await run.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    static Point FindText(string screen, string text)
+    {
+        var lines = screen.ReplaceLineEndings("\n").Split('\n');
+        for (var y = 0; y < lines.Length; y++)
+        {
+            var x = lines[y].IndexOf(text, StringComparison.Ordinal);
+            if (x >= 0)
+                return new(x + Math.Max(0, text.Length / 2), y);
+        }
+        throw new InvalidOperationException($"Framebuffer 中没有找到 '{text}'。");
+    }
+
+    static Mouse MouseAt(TerminalGuiTestApp terminal, Point point, MouseFlags flags)
+        => new()
+        {
+            ScreenPosition = point,
+            Flags = flags,
+            Timestamp = terminal.Time.Now
+        };
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static TrackedRelease CreateReleasedPanel(ReleaseAction action)
+    {
+        var viewport = new WorkspaceViewport();
+        var workspace = new Workspace("Release");
+        var factoryOwner = new object();
+        var signal = new DisposeSignal();
+        WeakReference? viewReference = null;
+        var content = new WorkspaceContent(() =>
+        {
+            GC.KeepAlive(factoryOwner);
+            var view = new TrackingView(signal) { Text = "tracked", Height = Dim.Fill() };
+            viewReference = new(view);
+            return view;
+        });
+        viewport.SetActiveWorkspace(workspace);
+        viewport.SetPanel(Panel(workspace, "tracked", "Tracked", content, 1, fullBleed: true));
+        viewport.Reconcile();
+
+        switch (action)
+        {
+            case ReleaseAction.Replace:
+                viewport.SetPanel(Panel(
+                    workspace,
+                    "tracked",
+                    "Replacement",
+                    WorkspaceContent.Text("replacement"),
+                    2,
+                    fullBleed: true));
+                viewport.Reconcile();
+                break;
+            case ReleaseAction.RemovePanel:
+                viewport.RemovePanel(workspace, "tracked");
+                viewport.Reconcile();
+                break;
+            case ReleaseAction.RemoveWorkspace:
+                viewport.RemoveWorkspace(workspace);
+                viewport.Reconcile();
+                break;
+            case ReleaseAction.Dispose:
+                viewport.Dispose();
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(action), action, null);
+        }
+
+        return new(
+            viewport,
+            signal,
+            new WeakReference(factoryOwner),
+            viewReference ?? throw new InvalidOperationException("Tracked View was not realized."));
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static void Collect()
+    {
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+    }
+
+    public enum ReleaseAction
+    {
+        Replace,
+        RemovePanel,
+        RemoveWorkspace,
+        Dispose
+    }
+
+    sealed record TrackedRelease(
+        WorkspaceViewport Viewport,
+        DisposeSignal Signal,
+        WeakReference FactoryOwner,
+        WeakReference View);
+
+    sealed class DisposeSignal
+    {
+        public bool Disposed { get; set; }
+    }
+
+    class TrackingView(DisposeSignal signal) : View
+    {
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+                signal.Disposed = true;
+            base.Dispose(disposing);
+        }
+    }
+
+    sealed class ThrowingDisposeView(DisposeSignal signal) : TrackingView(signal)
+    {
+        protected override void Dispose(bool disposing)
+        {
+            base.Dispose(disposing);
+            if (disposing)
+                throw new InvalidOperationException("Dispose failed after releasing the View.");
+        }
+    }
+}

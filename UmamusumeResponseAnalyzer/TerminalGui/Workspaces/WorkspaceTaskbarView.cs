@@ -101,7 +101,7 @@ internal sealed class WorkspaceTaskbarView : View
 
     internal View BottomEdgeTrigger => bottomEdgeTrigger;
 
-    internal void Refresh(IEnumerable<Workspace> workspaces, Workspace? activeWorkspace)
+    internal void Refresh(IReadOnlyList<Workspace> workspaces, Workspace? activeWorkspace)
     {
         var current = OrderWorkspaces(workspaces);
         if (items.Count != current.Length ||
@@ -167,8 +167,15 @@ internal sealed class WorkspaceTaskbarView : View
 
     void BottomEdgeTriggerMouseLeave(object? sender, EventArgs e)
     {
-        if (pressedItem is null)
-            Hide();
+        if (pressedItem is not null ||
+            popup.Visible &&
+            App?.Mouse.LastMousePosition is { } position &&
+            popup.FrameToScreen().Contains(position))
+        {
+            return;
+        }
+
+        Hide();
     }
 
     void Show()
@@ -182,7 +189,6 @@ internal sealed class WorkspaceTaskbarView : View
             return;
         }
 
-        bottomEdgeTrigger.Height = 3;
         popup.Visible = true;
         ApplyTitleLayout();
     }

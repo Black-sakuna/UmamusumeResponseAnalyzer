@@ -16,18 +16,17 @@ namespace UmamusumeResponseAnalyzer.Tests
     {
         readonly IApplication application;
 
-        public PluginLifecycleTests()
+        public PluginLifecycleTests(PluginRuntimeFixture runtime)
         {
-            application = Application.Create();
+            application = runtime.Application;
             SeedConfig();
             ResetPluginState();
-            PluginManager.BindWorkspaceOutput(application, _ => new FakeWorkspaceOutput());
+            HotkeyManager.OverlaySink = runtime.Host;
         }
 
         public void Dispose()
         {
             ResetPluginState();
-            application.Dispose();
         }
 
         [Fact]
@@ -67,16 +66,14 @@ namespace UmamusumeResponseAnalyzer.Tests
         public void InitializePlugin_CallsContextInitializeEntrypoint()
         {
             var context = new ContextInitializePlugin();
-            var workspaceOutput = new FakeWorkspaceOutput();
-            PluginManager.BindWorkspaceOutput(application, _ => workspaceOutput);
 
             PluginManager.InitializePlugin(context);
 
             Assert.True(context.Initialized);
             Assert.NotNull(context.Context);
             Assert.Same(application, context.Context.Application);
-            Assert.Same(workspaceOutput, context.Context.WorkspaceOutput);
             Assert.Same(context.Context, context.Context.Events);
+            Assert.NotNull(context.Context.Analyzers);
         }
 
         [Fact]
@@ -84,6 +81,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         {
             var failing = new FailingInitializePlugin();
             var healthy = new ContextInitializePlugin();
+            Assert.Throws<InvalidOperationException>(() => failing.Equals(healthy));
             PluginManager.RegisterMethods(failing);
             PluginManager.LoadedPlugins.Add(failing);
             PluginManager.LoadedPlugins.Add(healthy);
@@ -115,6 +113,38 @@ namespace UmamusumeResponseAnalyzer.Tests
 
             Assert.Null(ex);
             Assert.Equal(1, counter.StartedCalls);
+        }
+
+        [Fact]
+        public async Task TriggerStartedForPluginsAsync_RethrowsRequestedCancellation()
+        {
+            using var cancellation = new CancellationTokenSource();
+            var plugin = new CanceledStartedPlugin(cancellation);
+            PluginManager.InitializePlugin(plugin);
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                PluginManager.TriggerStartedForPluginsAsync([plugin], cancellation.Token));
+        }
+
+        [Fact]
+        public async Task TriggerStartedForPluginsAsync_ChecksCancellationBetweenSubscriptions()
+        {
+            using var cancellation = new CancellationTokenSource();
+            var lateOutput = Path.Combine(Path.GetTempPath(), "ura-started-cancellation-" + Guid.NewGuid().ToString("N"));
+            var plugin = new CancelBetweenStartedSubscriptionsPlugin(cancellation, lateOutput);
+            PluginManager.InitializePlugin(plugin);
+            try
+            {
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                    PluginManager.TriggerStartedForPluginsAsync([plugin], cancellation.Token));
+
+                Assert.False(File.Exists(lateOutput));
+            }
+            finally
+            {
+                if (File.Exists(lateOutput))
+                    File.Delete(lateOutput);
+            }
         }
 
         [Fact]
@@ -169,10 +199,27 @@ namespace UmamusumeResponseAnalyzer.Tests
             var plugin = new ReloadingConfigPromptPlugin();
             LoadTestPlugin(plugin);
 
-            await PluginConfigPrompt.RunAsync(plugin);
+            var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                PluginConfigPrompt.RunAsync(plugin));
 
-            Assert.NotNull(plugin.ReloadException);
-            Assert.Contains("插件回调内禁止执行热重载", plugin.ReloadException!.Message, StringComparison.Ordinal);
+            Assert.Contains("插件回调内禁止执行热重载", ex.Message, StringComparison.Ordinal);
+        }
+
+        [Fact]
+        public void FailedInitializeContext_RejectsLateAnalyzerAndEventRegistration()
+        {
+            var plugin = new CapturingFailingInitializePlugin();
+            PluginManager.LoadedPlugins.Add(plugin);
+
+            PluginManager.InitializeLoadedPlugins();
+
+            var context = Assert.IsAssignableFrom<IPluginContext>(plugin.Context);
+            var analyzerError = Assert.Throws<InvalidOperationException>(() =>
+                context.Analyzers.RegisterResponse<GameApi.Account.Index>(_ => ValueTask.CompletedTask));
+            var eventError = Assert.Throws<InvalidOperationException>(() =>
+                context.Events.OnStarted(_ => ValueTask.CompletedTask));
+            Assert.Contains("不接受注册", analyzerError.Message, StringComparison.Ordinal);
+            Assert.Contains("不接受注册", eventError.Message, StringComparison.Ordinal);
         }
 
         [Fact]
@@ -516,6 +563,12 @@ namespace UmamusumeResponseAnalyzer.Tests
                 context.Analyzers.RegisterResponse<GameApi.Account.Index>(_ => ValueTask.CompletedTask);
                 throw new InvalidOperationException("plugin initialize failed");
             }
+
+            public override bool Equals(object? obj)
+                => throw new InvalidOperationException("plugin equality must not be used");
+
+            public override int GetHashCode()
+                => System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(this);
         }
 
         sealed class StartedFailurePlugin : TestPlugin
@@ -526,8 +579,14 @@ namespace UmamusumeResponseAnalyzer.Tests
 
             public override void Initialize(IPluginContext context)
             {
-                context.Events.OnStarted(_ => throw new InvalidOperationException("started failed"));
+                context.Events.OnStarted(_ => throw new HostileMessageException());
             }
+        }
+
+        sealed class HostileMessageException : Exception
+        {
+            public override string Message => throw new InvalidOperationException("Message getter failed");
+            public override string ToString() => throw new InvalidOperationException("ToString failed");
         }
 
         sealed class StartedCounterPlugin : TestPlugin
@@ -545,6 +604,53 @@ namespace UmamusumeResponseAnalyzer.Tests
                     StartedCalls++;
                     return ValueTask.CompletedTask;
                 });
+            }
+        }
+
+        sealed class CanceledStartedPlugin(CancellationTokenSource cancellation)
+            : TestPlugin("CanceledStartedPlugin")
+        {
+            public override void Initialize(IPluginContext context)
+            {
+                context.Events.OnStarted(cancellationToken =>
+                {
+                    cancellation.Cancel();
+                    return ValueTask.FromCanceled(cancellationToken);
+                });
+            }
+        }
+
+        sealed class CancelBetweenStartedSubscriptionsPlugin(
+            CancellationTokenSource cancellation,
+            string lateOutput) : TestPlugin("CancelBetweenStartedSubscriptionsPlugin")
+        {
+            public override void Initialize(IPluginContext context)
+            {
+                context.Events.OnStarted(_ =>
+                {
+                    cancellation.Cancel();
+                    return ValueTask.CompletedTask;
+                });
+                context.Events.OnStarted(_ =>
+                {
+                    File.WriteAllText(lateOutput, "invoked");
+                    return ValueTask.CompletedTask;
+                });
+            }
+        }
+
+        sealed class CapturingFailingInitializePlugin : TestPlugin
+        {
+            public CapturingFailingInitializePlugin() : base("CapturingFailingInitializePlugin")
+            {
+            }
+
+            public IPluginContext? Context { get; private set; }
+
+            public override void Initialize(IPluginContext context)
+            {
+                Context = context;
+                throw new InvalidOperationException("initialize failed");
             }
         }
 
@@ -583,15 +689,12 @@ namespace UmamusumeResponseAnalyzer.Tests
             {
             }
 
-            public Exception? ReloadException { get; private set; }
-
             public override async Task ConfigPromptAsync(
                 IApplication application,
                 CancellationToken cancellationToken = default)
             {
                 await Task.Yield();
-                ReloadException = await Assert.ThrowsAsync<InvalidOperationException>(
-                    () => PluginManager.ReloadPluginsAsync("AnyPlugin"));
+                await PluginManager.ReloadPluginsAsync("AnyPlugin");
             }
         }
 
@@ -601,20 +704,6 @@ namespace UmamusumeResponseAnalyzer.Tests
             public string Author => author;
             public string[] Targets => [];
             public void Initialize(IPluginContext context) { }
-        }
-
-        sealed class FakeWorkspaceOutput : IWorkspaceOutput
-        {
-            public Workspace? CurrentWorkspace => null;
-            public Workspace CreateWorkspace(string title) => Workspace.Create(title);
-            public void RemoveWorkspace(Workspace workspace) { }
-            public void SwitchWorkspace(Workspace workspace) { }
-            public void BindWorkspaceHotkey(Workspace workspace, ConsoleKey key, ConsoleModifiers modifiers = 0, string? description = null) { }
-            public void SetPanel(Workspace workspace, string key, string title, WorkspaceContent content, bool fullBleed = false, bool switchToWorkspace = true) { }
-            public void Log(string text, UiSeverity severity = UiSeverity.Info) { }
-            public void Log(Workspace workspace, string text, UiSeverity severity = UiSeverity.Info) { }
-            public void Notify(string text, UiSeverity severity = UiSeverity.Info, TimeSpan? ttl = null, params UiShortcut[] shortcuts) { }
-            public void Notify(Workspace workspace, string text, UiSeverity severity = UiSeverity.Info, TimeSpan? ttl = null, params UiShortcut[] shortcuts) { }
         }
 
     }

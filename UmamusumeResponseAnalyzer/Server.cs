@@ -192,10 +192,45 @@ namespace UmamusumeResponseAnalyzer
 
         internal static Task StopAsync()
         {
+            TaskCompletionSource completion;
+            WebserverLite server;
+            ServerRequestBarrier? requestBarrier;
             lock (LifecycleLock)
             {
-                return shutdownTask ??= ShutdownCoreAsync(Instance, requests);
+                if (shutdownTask is not null)
+                    return shutdownTask;
+
+                completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                shutdownTask = completion.Task;
+                server = Instance;
+                requestBarrier = requests;
             }
+
+            _ = CompleteShutdownAsync(completion, server, requestBarrier);
+            return completion.Task;
+        }
+
+        static async Task CompleteShutdownAsync(
+            TaskCompletionSource completion,
+            WebserverLite server,
+            ServerRequestBarrier? requestBarrier)
+        {
+            try
+            {
+                await ShutdownCoreAsync(server, requestBarrier);
+            }
+            catch (OperationCanceledException ex)
+            {
+                completion.SetCanceled(ex.CancellationToken);
+                return;
+            }
+            catch (Exception ex)
+            {
+                completion.SetException(ex);
+                return;
+            }
+
+            completion.SetResult();
         }
 
         internal static async Task ShutdownCoreAsync(WebserverLite server, ServerRequestBarrier? requestBarrier)
@@ -326,7 +361,6 @@ namespace UmamusumeResponseAnalyzer
 
                 SaveDebugPacket(kind, canonicalUrl, buffer);
 
-                using var callback = await PluginManager.EnterPluginCallbackAsync();
                 await DispatchPacketLocked(kind, descriptor, buffer, headers);
             }
             catch (Exception e)
@@ -392,28 +426,42 @@ namespace UmamusumeResponseAnalyzer
 
         static async ValueTask DispatchPacketLocked(AnalyzerKind kind, GameEndpointDescriptor descriptor, byte[] buffer, GameHttpHeaders headers)
         {
-            var registrations = PluginManager.SnapshotAnalyzerRegistrations(kind, descriptor.EndpointType);
+            using var registrations = PluginManager.SnapshotAnalyzerRegistrations(kind, descriptor.EndpointType);
             if (registrations.Count == 0)
                 return;
 
             var context = new AnalyzerDispatchContext(kind, descriptor, buffer, headers);
-            foreach (var registration in registrations)
-                await InvokeAnalyzer(kind, registration, context);
+            for (var i = 0; i < registrations.Count; i++)
+                await InvokeAnalyzer(kind, registrations[i], context);
         }
 
         static async ValueTask InvokeAnalyzer(AnalyzerKind kind, AnalyzerRegistration registration, AnalyzerDispatchContext context)
         {
+            using var callback = PluginManager.EnterPluginCallbackScope();
+            using var owner = HotkeyManager.RegisterScope(registration.Plugin);
             try
             {
-                using var callback = PluginManager.EnterPluginCallbackScope();
                 await registration.Handler(context);
             }
             catch (Exception e)
             {
                 var root = e is TargetInvocationException { InnerException: { } inner } ? inner : e;
+                var exceptionType = root.GetType().FullName ?? root.GetType().Name;
+                string message;
+                try { message = root.Message; }
+                catch (Exception messageError)
+                {
+                    var messageErrorType = messageError.GetType().FullName ?? messageError.GetType().Name;
+                    message = $"<读取 Message 失败: {messageErrorType}>";
+                }
+
                 var label = kind == AnalyzerKind.Request ? "请求" : "响应";
-                TerminalUi.Notify("Plugin", $"{label}分析插件处理失败: {root.Message}", UiSeverity.Error);
-                TerminalUi.LogException(registration.Method?.DeclaringType?.Name ?? registration.Source, root);
+                var failure = new InvalidOperationException(
+                    $"{label}分析插件处理失败: plugin={PluginManager.InternalName(registration.Plugin)}, " +
+                    $"exception={exceptionType}, message={message}");
+                _ = PluginManager.ReportPluginFailure(
+                    registration.Method?.DeclaringType?.Name ?? registration.Source,
+                    failure);
             }
         }
 
