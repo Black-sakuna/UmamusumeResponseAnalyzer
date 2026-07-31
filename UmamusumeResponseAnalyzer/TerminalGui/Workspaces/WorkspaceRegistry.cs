@@ -8,6 +8,9 @@ internal sealed class WorkspaceRegistry
 
     internal Workspace? Current { get; private set; }
 
+    internal Workspace[] SnapshotRegistrationOrder()
+        => [.. registrationOrder];
+
     internal (Workspace Workspace, bool Created) Create(string title)
     {
         if (registrations.TryGetValue(title, out var existing))

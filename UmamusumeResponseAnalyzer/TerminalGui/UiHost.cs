@@ -1,15 +1,19 @@
+using System.Collections.Immutable;
+using System.Runtime.ExceptionServices;
 using System.Threading.Channels;
 using Terminal.Gui.App;
+using Terminal.Gui.Drivers;
 using Terminal.Gui.Input;
 using Terminal.Gui.ViewBase;
 using Terminal.Gui.Views;
+using UmamusumeResponseAnalyzer.Commands;
+using UmamusumeResponseAnalyzer.Plugin;
 
 namespace UmamusumeResponseAnalyzer.TerminalGui;
 
 internal sealed class UiHost : IUiInputSink
 {
     const int MaxIngressBatch = 256;
-    const int MaxLogLines = 300;
     const int StateCreated = 0;
     const int StateRunning = 1;
     const int StateStopping = 2;
@@ -20,25 +24,32 @@ internal sealed class UiHost : IUiInputSink
     {
         None = 0,
         Workspace = 1,
-        Overlays = 2,
-        All = Workspace | Overlays
+        Notifications = 2,
+        Hotkey = 4,
+        All = Workspace | Notifications | Hotkey
     }
 
     readonly object ingressGate = new();
     readonly WorkspaceRegistry registry = new();
     readonly HashSet<(Workspace Workspace, string Key)> admittedPanels = [];
-    readonly Channel<AdmittedUiEvent> events = CreateUiChannel<AdmittedUiEvent>();
+    readonly Dictionary<Workspace, WorkspaceHotkey> workspaceHotkeys =
+        new(ReferenceEqualityComparer.Instance);
+    readonly Channel<AdmittedUiEvent> events = Channel.CreateUnbounded<AdmittedUiEvent>(
+        new UnboundedChannelOptions
+        {
+            SingleReader = true,
+            SingleWriter = false,
+            AllowSynchronousContinuations = false
+        });
     readonly TaskCompletionSource ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    readonly Dictionary<Workspace, WorkspaceState> workspaces =
-        new(ReferenceEqualityComparer.Instance);
-    readonly Dictionary<(Workspace Workspace, string Key), WorkspacePanel> panels = [];
-    readonly List<UiLogLine> globalLogs = [];
-    readonly Dictionary<Workspace, List<UiLogLine>> workspaceLogs =
-        new(ReferenceEqualityComparer.Instance);
-    readonly List<UiNotification> notifications = [];
+    readonly TaskCompletionSource shutdownCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    readonly List<NotificationState> notifications = [];
+    readonly CancellationTokenSource stopping = new();
     readonly CancellationTokenRegistration lifetimeRegistration;
 
-    Workspace? activeWorkspace;
+    HostCommands.Snapshot commandSnapshot = HostCommands.Snapshot.Empty;
+    Workspace[] renderedWorkspaces = [];
+    Workspace? renderedWorkspace;
     HotkeyPopup? hotkeyPopup;
     int hotkeyPopupGeneration;
     int popupVisibleLineCount = 1;
@@ -48,13 +59,18 @@ internal sealed class UiHost : IUiInputSink
     bool drainRunning;
     bool drainScheduled;
     bool runClaimed;
+    bool rootCreated;
     bool shutdownRequested;
+    bool applicationStopRequested;
+    int shutdownStarted;
+    Exception? rootCreationFailure;
     Window? window;
-    View? workspaceLayer;
-    View? workspaceView;
-    Label? notificationLayer;
+    WorkspaceViewport? workspaceViewport;
+    WorkspaceTaskbarView? workspaceTaskbar;
+    NotificationOverlayView? notificationOverlay;
     Label? hotkeyLayer;
-    object? popupTimer;
+    CommandModeView? commandMode;
+    object? overlayTimer;
 
     internal UiHost(
         IApplication application,
@@ -74,6 +90,7 @@ internal sealed class UiHost : IUiInputSink
     internal CancellationToken LifetimeToken { get; }
     internal Task Ready => ready.Task;
     internal event Action<UiLogLine>? LogAdded;
+    internal event Action? ShutdownStarting;
 
     internal void EnsureAvailable()
     {
@@ -101,7 +118,12 @@ internal sealed class UiHost : IUiInputSink
             if (!created)
                 return workspace;
 
-            schedule = AdmitLocked(new RegisterWorkspaceIngress(workspace));
+            var registrationOrder = registry.SnapshotRegistrationOrder();
+            CaptureCommandSnapshotLocked(registrationOrder);
+            schedule = AdmitLocked(new RegisterWorkspaceIngress(
+                workspace,
+                registrationOrder,
+                registry.Current));
         }
         ScheduleDrain(schedule);
         return workspace;
@@ -111,6 +133,7 @@ internal sealed class UiHost : IUiInputSink
     {
         bool schedule;
         Workspace? replacement;
+        Workspace[] registrationOrder;
         lock (ingressGate)
         {
             EnsureAvailableLocked();
@@ -118,7 +141,12 @@ internal sealed class UiHost : IUiInputSink
                 return;
 
             admittedPanels.RemoveWhere(key => ReferenceEquals(key.Workspace, workspace));
-            schedule = AdmitLocked(new RemoveWorkspaceIngress(workspace, replacement));
+            registrationOrder = registry.SnapshotRegistrationOrder();
+            CaptureCommandSnapshotLocked(registrationOrder);
+            schedule = AdmitLocked(new RemoveWorkspaceIngress(
+                workspace,
+                replacement,
+                registrationOrder));
         }
         ScheduleDrain(schedule);
     }
@@ -140,7 +168,10 @@ internal sealed class UiHost : IUiInputSink
             ArgumentException.ThrowIfNullOrWhiteSpace(title);
             ArgumentNullException.ThrowIfNull(content);
             if (switchToWorkspace)
+            {
                 registry.SwitchTo(workspace);
+                commandSnapshot = commandSnapshot with { CurrentWorkspace = workspace };
+            }
             admittedPanels.Add((workspace, key));
             schedule = AdmitLocked(new SetPanelIngress(
                 new(
@@ -198,27 +229,40 @@ internal sealed class UiHost : IUiInputSink
         TimeSpan? ttl,
         UiShortcut[] shortcuts)
     {
-        bool schedule;
+        ArgumentNullException.ThrowIfNull(text);
+        ArgumentNullException.ThrowIfNull(shortcuts);
         lock (ingressGate)
         {
             EnsureAvailableLocked();
             if (workspace is not null)
                 registry.EnsureLive(workspace);
-            ArgumentNullException.ThrowIfNull(text);
-            ArgumentNullException.ThrowIfNull(shortcuts);
-            if (shortcuts.Length > 0)
-            {
-                throw new InvalidOperationException(
-                    "Notification shortcuts 的 owner-aware admission seam 尚未接入，当前请求未被接受。");
-            }
-            var expiresAt = UiNotification.ExpiresAtFromNow(severity, ttl);
-            schedule = AdmitLocked(new NotifyIngress(
-                workspace,
-                text,
-                severity,
-                expiresAt));
         }
-        ScheduleDrain(schedule);
+
+        var expiresAt = UiNotification.ExpiresAtFromNow(severity, ttl);
+        var shortcutRegistrationId =
+            HotkeyManager.RegisterNotificationShortcuts(expiresAt, shortcuts);
+        try
+        {
+            bool schedule;
+            lock (ingressGate)
+            {
+                EnsureAvailableLocked();
+                if (workspace is not null)
+                    registry.EnsureLive(workspace);
+                schedule = AdmitLocked(new NotifyIngress(
+                    workspace,
+                    text,
+                    severity,
+                    expiresAt,
+                    shortcutRegistrationId));
+            }
+            ScheduleDrain(schedule);
+        }
+        catch
+        {
+            HotkeyManager.UnregisterNotificationShortcuts(shortcutRegistrationId);
+            throw;
+        }
     }
 
     internal void SwitchWorkspace(Workspace workspace)
@@ -228,6 +272,7 @@ internal sealed class UiHost : IUiInputSink
         {
             EnsureAvailableLocked();
             registry.SwitchTo(workspace);
+            commandSnapshot = commandSnapshot with { CurrentWorkspace = workspace };
             schedule = AdmitLocked(new SwitchWorkspaceIngress(workspace));
         }
         ScheduleDrain(schedule);
@@ -272,14 +317,73 @@ internal sealed class UiHost : IUiInputSink
         return completion.Task;
     }
 
+    internal Task HandleCommandAsync(string command)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        EnsureAvailable();
+        return ExecuteCommandAsync(command);
+    }
+
+    internal IReadOnlyList<string> CompleteCommand(string input)
+    {
+        HostCommands.Snapshot snapshot;
+        lock (ingressGate)
+        {
+            EnsureAvailableLocked();
+            snapshot = commandSnapshot;
+        }
+        return HostCommands.Complete(input, snapshot);
+    }
+
     internal void RequestShutdown()
+    {
+        if (Interlocked.Exchange(ref shutdownStarted, 1) != 0)
+            return;
+
+        Exception? failure = null;
+        try
+        {
+            ShutdownStarting?.Invoke();
+        }
+        catch (Exception ex)
+        {
+            failure = ex;
+        }
+        var pluginShutdown = PluginManager.ShutdownAsync();
+        _ = OrchestrateShutdownAsync(pluginShutdown, failure);
+    }
+
+    async Task OrchestrateShutdownAsync(Task pluginShutdown, Exception? failure)
+    {
+        try
+        {
+            await pluginShutdown;
+        }
+        catch (Exception ex)
+        {
+            failure = CombineFailure(failure, ex);
+        }
+
+        try
+        {
+            await BeginHostShutdownAsync();
+        }
+        catch (Exception ex)
+        {
+            failure = CombineFailure(failure, ex);
+        }
+
+        if (failure is null)
+            shutdownCompletion.TrySetResult();
+        else
+            shutdownCompletion.TrySetException(failure);
+    }
+
+    async Task BeginHostShutdownAsync()
     {
         bool schedule;
         lock (ingressGate)
         {
-            if (state >= StateStopping)
-                return;
-
             state = StateStopping;
             if (!events.Writer.TryWrite(new(new ShutdownIngress())))
                 throw new InvalidOperationException("UiHost shutdown event 无法写入 ingress channel。");
@@ -287,12 +391,29 @@ internal sealed class UiHost : IUiInputSink
             events.Writer.TryComplete();
             schedule = ArmDrainLocked();
         }
-        ScheduleDrain(schedule);
+
+        try
+        {
+            await Task.Run(DisconnectHotkeys);
+        }
+        finally
+        {
+            try
+            {
+                stopping.Cancel();
+            }
+            finally
+            {
+                ScheduleDrain(schedule);
+                OwnerContext.Post(
+                    static state => ((UiHost)state!).RequestApplicationStop(),
+                    this);
+            }
+        }
     }
 
     internal async Task RunAsync()
     {
-        bool schedule;
         lock (ingressGate)
         {
             if (runClaimed || state == StateStopped)
@@ -301,28 +422,85 @@ internal sealed class UiHost : IUiInputSink
             runClaimed = true;
             if (state == StateCreated)
                 state = StateRunning;
-            schedule = ArmDrainLocked();
         }
 
+        ExceptionDispatchInfo? primaryFailure = null;
         try
         {
-            CreateWindow();
-            ScheduleDrain(schedule);
-            popupTimer = Application.AddTimeout(
-                TimeSpan.FromMilliseconds(250),
-                RefreshExpiringOverlays);
-            await Application.RunAsync(window!, LifetimeToken);
-        }
-        finally
-        {
-            if (popupTimer is not null)
+            try
             {
-                Application.RemoveTimeout(popupTimer);
-                popupTimer = null;
+                CreateWindow();
             }
-            FinishRun();
-            DisposeWindow();
+            catch (Exception ex)
+            {
+                var rollbackFailure = FailRootCreation(ex);
+                if (rollbackFailure is not null)
+                    throw new AggregateException(ex, rollbackFailure);
+                throw;
+            }
+
+            bool schedule;
+            lock (ingressGate)
+            {
+                rootCreated = true;
+                schedule = ArmDrainLocked();
+            }
+            ScheduleDrain(schedule);
+            if (!shutdownRequested)
+            {
+                overlayTimer = Application.AddTimeout(
+                    TimeSpan.FromMilliseconds(250),
+                    RefreshExpiringOverlays);
+                await Application.RunAsync(window!, CancellationToken.None);
+            }
         }
+        catch (Exception ex)
+        {
+            primaryFailure = ExceptionDispatchInfo.Capture(ex);
+        }
+
+        RequestShutdown();
+        Exception? cleanupFailure = null;
+        try
+        {
+            await shutdownCompletion.Task;
+        }
+        catch (Exception ex)
+        {
+            cleanupFailure = ex;
+        }
+
+        void CaptureCleanup(Action cleanup)
+        {
+            try
+            {
+                cleanup();
+            }
+            catch (Exception ex)
+            {
+                cleanupFailure = CombineFailure(cleanupFailure, ex);
+            }
+        }
+
+        CaptureCleanup(() =>
+        {
+            if (overlayTimer is null)
+                return;
+            Application.RemoveTimeout(overlayTimer);
+            overlayTimer = null;
+        });
+        CaptureCleanup(DisconnectHotkeys);
+        CaptureCleanup(FinishRun);
+        CaptureCleanup(DisposeWindow);
+
+        if (primaryFailure is not null)
+        {
+            if (cleanupFailure is not null)
+                throw new AggregateException(primaryFailure.SourceException, cleanupFailure);
+            primaryFailure.Throw();
+        }
+        if (cleanupFailure is not null)
+            ExceptionDispatchInfo.Capture(cleanupFailure).Throw();
     }
 
     int IUiInputSink.PopupVisibleLineCount
@@ -336,8 +514,31 @@ internal sealed class UiHost : IUiInputSink
 
     Task<bool> IUiInputSink.TryHandleWorkspaceCommandAsync(Command command)
     {
-        EnsureAvailable();
-        return Task.FromResult(false);
+        if (command is not (
+            Command.Up or Command.Down or Command.PageUp or Command.PageDown or
+            Command.Start or Command.End))
+        {
+            return Task.FromResult(false);
+        }
+
+        if (Environment.CurrentManagedThreadId == Application.MainThreadId)
+        {
+            EnsureAvailable();
+            var viewport = workspaceViewport
+                ?? throw new InvalidOperationException("UiHost workspace viewport 尚未创建。");
+            return Task.FromResult(viewport.Navigate(command));
+        }
+
+        var completion = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        bool schedule;
+        lock (ingressGate)
+        {
+            EnsureAvailableLocked();
+            schedule = AdmitLocked(new NavigateWorkspaceIngress(command, completion));
+        }
+        ScheduleDrain(schedule);
+        return completion.Task;
     }
 
     void IUiInputSink.ShowPopup(HotkeyPopup popup, int generation)
@@ -357,7 +558,8 @@ internal sealed class UiHost : IUiInputSink
         bool schedule;
         lock (ingressGate)
         {
-            EnsureAvailableLocked();
+            if (state >= StateStopping || rootCreationFailure is not null)
+                return;
             schedule = AdmitLocked(new HidePopupIngress(generation));
         }
         ScheduleDrain(schedule);
@@ -365,11 +567,41 @@ internal sealed class UiHost : IUiInputSink
 
     void EnsureAvailableLocked()
     {
-        if (state >= StateStopping || LifetimeToken.IsCancellationRequested)
+        if (state >= StateStopping)
         {
             var lifecycle = state == StateStopped ? "stopped" : "stopping";
             throw new InvalidOperationException(
                 $"UiHost is {lifecycle}; new UI operations are not accepted.");
+        }
+        if (rootCreationFailure is not null)
+        {
+            throw new InvalidOperationException(
+                "UiHost root creation failed; new UI operations are not accepted.",
+                rootCreationFailure);
+        }
+    }
+
+    void CaptureCommandSnapshotLocked(
+        Workspace[]? registrationOrder = null,
+        IReadOnlyList<PluginRuntimeStatus>? plugins = null)
+    {
+        registrationOrder ??= registry.SnapshotRegistrationOrder();
+        commandSnapshot = new(
+            registrationOrder.Select(workspace => new HostCommands.WorkspaceItem(
+                workspace,
+                workspaceHotkeys.GetValueOrDefault(workspace)?.ShortcutText)).ToArray(),
+            registry.Current,
+            plugins ?? commandSnapshot.Plugins);
+    }
+
+    HostCommands.Snapshot RefreshCommandSnapshot()
+    {
+        var plugins = HostCommands.SnapshotPlugins();
+        lock (ingressGate)
+        {
+            EnsureAvailableLocked();
+            CaptureCommandSnapshotLocked(plugins: plugins);
+            return commandSnapshot;
         }
     }
 
@@ -384,6 +616,7 @@ internal sealed class UiHost : IUiInputSink
     bool ArmDrainLocked()
     {
         if (state is not (StateRunning or StateStopping) ||
+            !rootCreated ||
             drainRunning ||
             drainScheduled ||
             pendingEvents == 0)
@@ -398,7 +631,11 @@ internal sealed class UiHost : IUiInputSink
     void ScheduleDrain(bool schedule)
     {
         if (schedule)
-            Application.AddTimeout(TimeSpan.Zero, DrainPostedEvents);
+        {
+            OwnerContext.Post(
+                static state => _ = ((UiHost)state!).DrainPostedEvents(),
+                this);
+        }
     }
 
     bool DrainPostedEvents()
@@ -437,10 +674,7 @@ internal sealed class UiHost : IUiInputSink
                 if (batch.Shutdown)
                 {
                     shutdownRequested = true;
-                    if (window is not null)
-                        Application.RequestStop(window);
-                    else
-                        Application.RequestStop();
+                    RequestApplicationStop();
                 }
             }
         }
@@ -502,47 +736,71 @@ internal sealed class UiHost : IUiInputSink
         List<TaskCompletionSource> flushCompletions,
         ref bool shutdown)
     {
+        var viewport = workspaceViewport
+            ?? throw new InvalidOperationException("UiHost workspace viewport 尚未创建。");
         switch (uiEvent)
         {
             case RegisterWorkspaceIngress register:
-                RegisterWorkspaceState(register.Workspace);
-                return UiChange.All;
+                renderedWorkspaces = register.RegistrationOrder;
+                renderedWorkspace = register.CurrentWorkspace;
+                viewport.SetActiveWorkspace(renderedWorkspace);
+                return UiChange.Workspace;
             case RemoveWorkspaceIngress remove:
-                RemoveWorkspaceState(remove.Workspace, remove.Replacement);
+                viewport.RemoveWorkspace(remove.Workspace);
+                renderedWorkspaces = remove.RegistrationOrder;
+                renderedWorkspace = remove.Replacement;
+                viewport.SetActiveWorkspace(renderedWorkspace);
+                RemoveWorkspaceNotifications(remove.Workspace);
+                WorkspaceHotkey? removedHotkey;
+                lock (ingressGate)
+                {
+                    workspaceHotkeys.Remove(remove.Workspace, out removedHotkey);
+                    CaptureCommandSnapshotLocked();
+                }
+                if (removedHotkey is not null)
+                {
+                    HotkeyManager.Unregister(
+                        removedHotkey.Key,
+                        removedHotkey.Modifiers,
+                        removedHotkey.Entry);
+                }
                 return UiChange.All;
             case SetPanelIngress setPanel:
-                RegisterWorkspaceState(setPanel.Panel.Workspace);
-                panels[(setPanel.Panel.Workspace, setPanel.Panel.Key)] = setPanel.Panel;
+                viewport.SetPanel(setPanel.Panel);
                 if (setPanel.SwitchToWorkspace)
-                    activeWorkspace = setPanel.Panel.Workspace;
-                return UiChange.All;
+                {
+                    renderedWorkspace = setPanel.Panel.Workspace;
+                    viewport.SetActiveWorkspace(renderedWorkspace);
+                    return UiChange.All;
+                }
+                return UiChange.Workspace;
             case RemovePanelIngress removePanel:
-                panels.Remove((removePanel.Workspace, removePanel.Key));
+                viewport.RemovePanel(removePanel.Workspace, removePanel.Key);
                 return UiChange.Workspace;
             case LogIngress log:
-                if (log.Line.Workspace is not null)
-                    RegisterWorkspaceState(log.Line.Workspace);
-                AddLog(log.Line);
                 LogAdded?.Invoke(log.Line);
                 return UiChange.None;
             case NotifyIngress notify:
-                if (notify.Workspace is not null)
-                    RegisterWorkspaceState(notify.Workspace);
-                if (notify.ExpiresAt > DateTimeOffset.Now)
+                if (notify.ExpiresAt <= DateTimeOffset.Now)
+                {
+                    HotkeyManager.UnregisterNotificationShortcuts(
+                        notify.ShortcutRegistrationId);
+                }
+                else
                 {
                     notifications.Add(new(
                         notify.Workspace,
                         notify.Text,
                         notify.Severity,
-                        notify.ExpiresAt));
+                        notify.ExpiresAt,
+                        notify.ShortcutRegistrationId));
                 }
-                return UiChange.Overlays;
+                return UiChange.Notifications;
             case SwitchWorkspaceIngress switchWorkspace:
-                RegisterWorkspaceState(switchWorkspace.Workspace);
-                activeWorkspace = switchWorkspace.Workspace;
+                renderedWorkspace = switchWorkspace.Workspace;
+                viewport.SetActiveWorkspace(renderedWorkspace);
                 return UiChange.All;
             case BindWorkspaceHotkeyIngress bindHotkey:
-                RegisterWorkspaceState(bindHotkey.Workspace);
                 var entry = HotkeyManager.RegisterTracked(
                     bindHotkey.Key,
                     bindHotkey.Modifiers,
@@ -552,37 +810,45 @@ internal sealed class UiHost : IUiInputSink
                         bindHotkey.Workspace.SwitchTo();
                         return Task.CompletedTask;
                     });
-                var shortcutText = HotkeyManager.FormatKeyCombo(
+                var shortcut = HotkeyManager.FormatKeyCombo(
                     bindHotkey.Key,
                     bindHotkey.Modifiers);
-                var state = workspaces[bindHotkey.Workspace];
-                if (state.Hotkey is { } previous)
+                WorkspaceHotkey? previous;
+                lock (ingressGate)
+                {
+                    workspaceHotkeys.Remove(bindHotkey.Workspace, out previous);
+                    workspaceHotkeys.Add(bindHotkey.Workspace, new(
+                        bindHotkey.Key,
+                        bindHotkey.Modifiers,
+                        shortcut,
+                        entry));
+                    CaptureCommandSnapshotLocked();
+                }
+                if (previous is not null)
                 {
                     HotkeyManager.Unregister(
                         previous.Key,
                         previous.Modifiers,
                         previous.Entry);
                 }
-                workspaces[bindHotkey.Workspace] = state with
-                {
-                    ShortcutText = shortcutText,
-                    Hotkey = new(bindHotkey.Key, bindHotkey.Modifiers, entry)
-                };
-                return UiChange.All;
+                return UiChange.None;
+            case NavigateWorkspaceIngress navigate:
+                navigate.Completion.TrySetResult(viewport.Navigate(navigate.Command));
+                return UiChange.None;
             case ShowPopupIngress showPopup:
                 if (showPopup.Generation >= hotkeyPopupGeneration)
                 {
                     hotkeyPopup = showPopup.Popup;
                     hotkeyPopupGeneration = showPopup.Generation;
                 }
-                return UiChange.Overlays;
+                return UiChange.Hotkey;
             case HidePopupIngress hidePopup:
                 if (hidePopup.Generation >= hotkeyPopupGeneration)
                 {
                     hotkeyPopup = null;
                     hotkeyPopupGeneration = hidePopup.Generation;
                 }
-                return UiChange.Overlays;
+                return UiChange.Hotkey;
             case FlushIngress flush:
                 flushCompletions.Add(flush.Completion);
                 return UiChange.None;
@@ -595,63 +861,36 @@ internal sealed class UiHost : IUiInputSink
         }
     }
 
-    void RegisterWorkspaceState(Workspace workspace)
-    {
-        if (workspaces.ContainsKey(workspace))
-            return;
-
-        workspaces.Add(workspace, new(null, null));
-        activeWorkspace ??= workspace;
-    }
-
-    void RemoveWorkspaceState(Workspace workspace, Workspace? replacement)
-    {
-        if (workspaces.Remove(workspace, out var state) && state.Hotkey is { } hotkey)
-            HotkeyManager.Unregister(hotkey.Key, hotkey.Modifiers, hotkey.Entry);
-        foreach (var key in panels.Keys
-            .Where(key => ReferenceEquals(key.Workspace, workspace))
-            .ToArray())
-        {
-            panels.Remove(key);
-        }
-        workspaceLogs.Remove(workspace);
-        notifications.RemoveAll(
-            notification => ReferenceEquals(notification.Workspace, workspace));
-
-        if (ReferenceEquals(activeWorkspace, workspace))
-        {
-            activeWorkspace = replacement is not null && workspaces.ContainsKey(replacement)
-                ? replacement
-                : workspaces.Keys.FirstOrDefault();
-        }
-    }
-
-    void AddLog(UiLogLine line)
-    {
-        var bank = line.Workspace is null
-            ? globalLogs
-            : workspaceLogs.GetValueOrDefault(line.Workspace);
-        if (bank is null)
-        {
-            bank = [];
-            workspaceLogs.Add(line.Workspace!, bank);
-        }
-
-        bank.Add(line);
-        if (bank.Count > MaxLogLines)
-            bank.RemoveRange(0, bank.Count - MaxLogLines);
-    }
-
     void Reconcile(UiChange changes)
     {
         if (changes.HasFlag(UiChange.Workspace))
-            RebuildWorkspaceLayer();
-        if (changes.HasFlag(UiChange.Overlays))
-            RefreshOverlayLayers();
+        {
+            workspaceViewport?.Reconcile();
+            workspaceTaskbar?.Refresh(renderedWorkspaces, renderedWorkspace);
+            if (window is not null)
+            {
+                window.Title = renderedWorkspace is null
+                    ? "UmamusumeResponseAnalyzer"
+                    : $"UmamusumeResponseAnalyzer - {renderedWorkspace.Title}";
+                Volatile.Write(
+                    ref popupVisibleLineCount,
+                    Math.Max(1, window.Viewport.Height - 2));
+            }
+        }
+        if (changes.HasFlag(UiChange.Notifications))
+            RefreshNotificationOverlay();
+        if (changes.HasFlag(UiChange.Hotkey))
+            RefreshHotkeyOverlay();
     }
 
     void CreateWindow()
     {
+        var savedTaskbarTitleOrder = Config.WorkspaceTaskbarTitleOrder?.ToArray()
+            ?? throw new InvalidOperationException(
+                "Config.WorkspaceTaskbarTitleOrder must not be null.");
+        var plugins = HostCommands.SnapshotPlugins();
+        lock (ingressGate)
+            CaptureCommandSnapshotLocked(plugins: plugins);
         window = new MainWindow(RequestShutdown)
         {
             Title = "UmamusumeResponseAnalyzer",
@@ -659,164 +898,322 @@ internal sealed class UiHost : IUiInputSink
             Height = Dim.Fill(),
             BorderStyle = null
         };
-        workspaceLayer = new View
-        {
-            Width = Dim.Fill(),
-            Height = Dim.Fill(),
-            CanFocus = true,
-            TabStop = TabBehavior.TabGroup
-        };
-        notificationLayer = CreateOverlayLabel();
+        workspaceViewport = new();
+        commandMode = new(
+            command => TrackInputTask(HandleCommandAsync(command)),
+            CompleteCommand);
+        workspaceTaskbar = new(
+            () => commandMode.IsOpen,
+            SwitchWorkspace,
+            savedTaskbarTitleOrder,
+            titleOrder =>
+            {
+                Config.WorkspaceTaskbarTitleOrder = [.. titleOrder];
+                Config.Save();
+            });
+        notificationOverlay = new();
         hotkeyLayer = CreateOverlayLabel();
-        window.Add(workspaceLayer, notificationLayer, hotkeyLayer);
+        window.Add(
+            workspaceViewport,
+            workspaceTaskbar.BottomEdgeTrigger,
+            workspaceTaskbar,
+            notificationOverlay,
+            hotkeyLayer,
+            commandMode);
         window.Initialized += WindowInitialized;
         window.ViewportChanged += WindowViewportChanged;
+        window.KeyDownNotHandled += WindowKeyDownNotHandled;
+        window.MouseEvent += WindowMouseEvent;
+        commandMode.VisibleChanged += CommandModeVisibleChanged;
+        Application.Keyboard.KeyDown += ApplicationKeyDown;
+        Application.LayoutAndDrawComplete += ApplicationLayoutAndDrawComplete;
     }
 
     void WindowInitialized(object? sender, EventArgs e)
+        => Reconcile(UiChange.All);
+
+    void ApplicationLayoutAndDrawComplete(object? sender, EventArgs e)
     {
-        Reconcile(UiChange.All);
+        if (window is null || !ReferenceEquals(Application.TopRunnableView, window))
+            return;
+
+        Application.LayoutAndDrawComplete -= ApplicationLayoutAndDrawComplete;
         ready.TrySetResult();
     }
 
     void WindowViewportChanged(object? sender, DrawEventArgs e)
         => Reconcile(UiChange.All);
 
-    void RebuildWorkspaceLayer()
-    {
-        if (window is null || workspaceLayer is null)
-            return;
+    void CommandModeVisibleChanged(object? sender, EventArgs e)
+        => workspaceTaskbar?.CommandModeVisibilityChanged();
 
-        if (workspaceView is not null)
+    void ApplicationKeyDown(object? sender, Key key)
+    {
+        if (key.Handled || key.KeyCode == Key.C.WithCtrl.KeyCode)
+            return;
+        if (window is null ||
+            !ReferenceEquals(Application.TopRunnableView, window) ||
+            !HotkeyManager.HasPriorityPopup)
         {
-            workspaceLayer.Remove(workspaceView);
-            workspaceView.Dispose();
+            return;
         }
 
-        workspaceView = BuildWorkspaceView();
-        workspaceLayer.Add(workspaceView);
-        window.Title = activeWorkspace is null
-            ? "UmamusumeResponseAnalyzer"
-            : $"UmamusumeResponseAnalyzer - {WorkspaceLabel(activeWorkspace)}";
-        Volatile.Write(ref popupVisibleLineCount, Math.Max(1, window.Viewport.Height - 2));
-        workspaceLayer.SetNeedsLayout();
-        workspaceLayer.SetNeedsDraw();
+        key.Handled = true;
+        TrackInputTask(DispatchKeyAsync(key));
     }
 
-    View BuildWorkspaceView()
+    void WindowKeyDownNotHandled(object? sender, Key key)
     {
-        if (activeWorkspace is null)
-            return CreateMessageView("当前没有 workspace。");
-
-        var activePanels = panels.Values
-            .Where(panel => ReferenceEquals(panel.Workspace, activeWorkspace))
-            .OrderBy(panel => panel.Key, StringComparer.Ordinal)
-            .ToArray();
-        var fullBleed = activePanels
-            .Where(panel => panel.FullBleed)
-            .MaxBy(panel => panel.Sequence);
-        if (fullBleed is not null)
-            activePanels = [fullBleed];
-        if (activePanels.Length == 0)
-            return CreateMessageView($"{activeWorkspace.Title} 还没有输出。");
-
-        var root = new View
+        if (key.KeyCode == Key.C.WithCtrl.KeyCode)
+            return;
+        if (key.KeyCode == Key.Tab.KeyCode ||
+            key.KeyCode == Key.Tab.WithShift.KeyCode ||
+            key.KeyCode == Key.F6.KeyCode ||
+            key.KeyCode == Key.F6.WithShift.KeyCode)
         {
-            Width = Dim.Fill(),
-            Height = Dim.Fill(),
-            CanFocus = true,
-            TabStop = TabBehavior.TabGroup
-        };
-        View? previous = null;
-        for (var index = 0; index < activePanels.Length; index++)
+            return;
+        }
+        if (commandMode is { IsOpen: true })
         {
-            var panel = activePanels[index];
-            var content = panel.Content.CreateView();
-            content.X = 0;
-            content.Y = 0;
-            content.Width = Dim.Fill();
-            content.Height = Dim.Fill();
-            if (activePanels.Length == 1 && panel.FullBleed)
+            key.Handled = true;
+            return;
+        }
+
+        var opensCommandMode = commandMode is not null &&
+            ((!key.IsCtrl && !key.IsAlt &&
+              key.TryGetPrintableRune(out var rune) && rune.Value == '/') ||
+             key.KeyCode == Key.Enter.KeyCode);
+        var inputKey = new Key(key);
+        key.Handled = true;
+        TrackInputTask(opensCommandMode
+            ? DispatchKeyOrOpenCommandAsync(
+                inputKey,
+                inputKey.KeyCode == Key.Enter.KeyCode ? string.Empty : "/")
+            : DispatchKeyAsync(inputKey));
+    }
+
+    void WindowMouseEvent(object? sender, Mouse mouse)
+    {
+        workspaceTaskbar?.HandleMousePosition(mouse);
+        var flags = mouse.Flags;
+        var verticalDelta = flags.HasFlag(MouseFlags.WheeledUp)
+            ? 1
+            : flags.HasFlag(MouseFlags.WheeledDown) ? -1 : 0;
+        var horizontalDelta = flags.HasFlag(MouseFlags.WheeledLeft)
+            ? 1
+            : flags.HasFlag(MouseFlags.WheeledRight) ? -1 : 0;
+        if (verticalDelta == 0 && horizontalDelta == 0)
+            return;
+        if (commandMode is { IsOpen: true })
+        {
+            mouse.Handled = true;
+            return;
+        }
+
+        var hasModifiers =
+            flags.HasFlag(MouseFlags.Shift) ||
+            flags.HasFlag(MouseFlags.Ctrl) ||
+            flags.HasFlag(MouseFlags.Alt);
+        mouse.Handled = true;
+        TrackInputTask(DispatchMouseWheelAsync(
+            horizontalDelta != 0 ? horizontalDelta : verticalDelta,
+            hasModifiers,
+            horizontalDelta != 0));
+    }
+
+    static void TrackInputTask(Task task)
+        => _ = task.ContinueWith(
+            static completed => _ = completed.Exception,
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted |
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+
+    async Task DispatchKeyOrOpenCommandAsync(Key key, string initialText)
+    {
+        if (await DispatchKeyAsync(key))
+            return;
+
+        Application.Invoke(() =>
+        {
+            if (window is not null &&
+                commandMode is not null &&
+                ReferenceEquals(Application.TopRunnableView, window))
             {
-                root.Add(content);
-                continue;
+                commandMode.Open(initialText, window.MostFocused);
             }
+        });
+    }
 
-            var frame = new FrameView
-            {
-                Title = panel.Title,
-                X = 0,
-                Y = previous is null ? 0 : Pos.Bottom(previous),
-                Width = Dim.Fill(),
-                Height = index == activePanels.Length - 1
-                    ? Dim.Fill()
-                    : Dim.Percent(Math.Max(1, 100 / activePanels.Length))
-            };
-            frame.Add(content);
-            root.Add(frame);
-            previous = frame;
+    static async Task<bool> DispatchKeyAsync(Key key)
+    {
+        try
+        {
+            return await HotkeyManager.HandleKeyAsync(key);
         }
-        return root;
+        catch (Exception ex)
+        {
+            TerminalUi.LogException("URA", ex);
+            return true;
+        }
     }
 
-    string WorkspaceLabel(Workspace workspace)
+    static async Task DispatchMouseWheelAsync(
+        int delta,
+        bool hasModifiers,
+        bool horizontal)
     {
-        return workspaces.TryGetValue(workspace, out var state) &&
-               !string.IsNullOrEmpty(state.ShortcutText)
-            ? $"{state.ShortcutText} {workspace.Title}"
-            : workspace.Title;
+        try
+        {
+            await HotkeyManager.HandleMouseWheelAsync(delta, hasModifiers, horizontal);
+        }
+        catch (Exception ex)
+        {
+            TerminalUi.LogException("URA", ex);
+        }
     }
 
-    static View CreateMessageView(string text)
-        => new Label
-        {
-            Text = text,
-            X = 1,
-            Y = 1,
-            Width = Dim.Fill(1),
-            Height = 1
-        };
-
-    static Label CreateOverlayLabel()
-        => new()
-        {
-            CanFocus = false,
-            Enabled = false,
-            Visible = false,
-            ViewportSettings =
-                ViewportSettingsFlags.Transparent |
-                ViewportSettingsFlags.TransparentMouse
-        };
-
-    void RefreshOverlayLayers()
+    async Task ExecuteCommandAsync(string command)
     {
-        if (window is null || notificationLayer is null || hotkeyLayer is null)
+        HostCommands.Result? result = null;
+        Exception? failure = null;
+        try
+        {
+            var snapshot = RefreshCommandSnapshot();
+            result = await HostCommands.ExecuteAsync(
+                command,
+                snapshot,
+                stopping.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (stopping.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            failure = ex;
+        }
+        finally
+        {
+            try
+            {
+                await InvokeOnOwnerAsync(() =>
+                {
+                    EnsureAvailable();
+                    try
+                    {
+                        if (failure is not null)
+                            TerminalUi.LogException("Command", failure);
+                        if (result is not null)
+                            ApplyCommandResult(result);
+                    }
+                    finally
+                    {
+                        RefreshCommandSnapshot();
+                    }
+                }).ConfigureAwait(false);
+            }
+            catch (InvalidOperationException) when (stopping.IsCancellationRequested)
+            {
+            }
+        }
+    }
+
+    Task InvokeOnOwnerAsync(Action action)
+    {
+        if (Environment.CurrentManagedThreadId == Application.MainThreadId)
+        {
+            action();
+            return Task.CompletedTask;
+        }
+
+        var completion = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        OwnerContext.Post(_ =>
+        {
+            try
+            {
+                action();
+                completion.TrySetResult();
+            }
+            catch (Exception ex)
+            {
+                completion.TrySetException(ex);
+            }
+        }, null);
+        return completion.Task;
+    }
+
+    void ApplyCommandResult(HostCommands.Result result)
+    {
+        if (!string.IsNullOrEmpty(result.Message))
+        {
+            Log(
+                TerminalUi.DefaultExceptionWorkspace,
+                $"[Command] {result.Message}",
+                result.Severity);
+        }
+        if (result.Display is not null)
+            ShowCommandDisplay(result.Display);
+        if (result.SwitchWorkspace is not null)
+            SwitchWorkspace(result.SwitchWorkspace);
+    }
+
+    void ShowCommandDisplay(HostCommands.Display display)
+    {
+        var lines = new List<HotkeyPopupLine> { new(display.Title) };
+        lines.AddRange(display.Items.Select(item => new HotkeyPopupLine(item.Text)));
+        HotkeyPopupSelection? selection = null;
+        if (display.SelectedIndex is { } selectedIndex &&
+            selectedIndex >= 0 &&
+            selectedIndex < display.Items.Count)
+        {
+            var selectable = display.Items
+                .Select((item, index) => (item, index))
+                .Where(entry => entry.item.Workspace is not null)
+                .Select(entry => entry.index)
+                .ToArray();
+            var selected = Array.IndexOf(selectable, selectedIndex);
+            if (selected >= 0)
+            {
+                selection = new(
+                    selectable.Select(index => index + 1).ToArray(),
+                    selected,
+                    lineIndex =>
+                    {
+                        display.Items[lineIndex - 1].Workspace?.SwitchTo();
+                        return Task.CompletedTask;
+                    });
+            }
+        }
+        HotkeyManager.ShowPopup(new HotkeyPopup(lines, Selection: selection));
+    }
+
+    void RefreshNotificationOverlay()
+    {
+        if (window is null || notificationOverlay is null)
             return;
 
-        notificationLayer.Visible = false;
+        var now = DateTimeOffset.Now;
+        notificationOverlay.UpdateSnapshot(new(
+            notifications
+                .Where(notification =>
+                    notification.Workspace is null ||
+                    ReferenceEquals(notification.Workspace, renderedWorkspace))
+                .Select(notification => new NotificationOverlayItem(
+                    notification.Text,
+                    notification.Severity,
+                    notification.ExpiresAt))
+                .ToImmutableArray(),
+            now,
+            window.Viewport));
+    }
+
+    void RefreshHotkeyOverlay()
+    {
+        if (window is null || hotkeyLayer is null)
+            return;
+
         hotkeyLayer.Visible = false;
-
-        var visibleNotifications = notifications
-            .Where(notification =>
-                notification.Workspace is null ||
-                ReferenceEquals(notification.Workspace, activeWorkspace))
-            .OrderBy(notification => notification.ExpiresAt)
-            .TakeLast(3)
-            .ToArray();
-        if (visibleNotifications.Length > 0)
-        {
-            var lines = visibleNotifications
-                .Select(notification =>
-                    $"{SeverityText(notification.Severity)} {notification.Text}")
-                .ToArray();
-            notificationLayer.Text = string.Join(Environment.NewLine, lines);
-            notificationLayer.X = 1;
-            notificationLayer.Y = 1;
-            notificationLayer.Width = Dim.Fill(2);
-            notificationLayer.Height = lines.Length;
-            notificationLayer.Visible = true;
-        }
-
         if (hotkeyPopup is not null)
         {
             var lines = hotkeyPopup.Lines
@@ -834,8 +1231,6 @@ internal sealed class UiHost : IUiInputSink
             hotkeyLayer.Height = Math.Max(1, lines.Length);
             hotkeyLayer.Visible = true;
         }
-
-        notificationLayer.SetNeedsDraw();
         hotkeyLayer.SetNeedsDraw();
     }
 
@@ -845,30 +1240,85 @@ internal sealed class UiHost : IUiInputSink
             return false;
 
         var now = DateTimeOffset.Now;
-        var expired = notifications
+        foreach (var notification in notifications
             .Where(notification => notification.ExpiresAt <= now)
-            .ToArray();
-        if (expired.Length > 0)
+            .ToArray())
         {
-            notifications.RemoveAll(notification => notification.ExpiresAt <= now);
-            RefreshOverlayLayers();
+            HotkeyManager.UnregisterNotificationShortcuts(
+                notification.ShortcutRegistrationId);
         }
+        notifications.RemoveAll(notification => notification.ExpiresAt <= now);
+        RefreshNotificationOverlay();
         return Volatile.Read(ref state) == StateRunning && !shutdownRequested;
     }
 
-    static string SeverityText(UiSeverity severity)
-        => severity switch
+    void RemoveWorkspaceNotifications(Workspace workspace)
+    {
+        foreach (var notification in notifications
+            .Where(notification => ReferenceEquals(notification.Workspace, workspace))
+            .ToArray())
         {
-            UiSeverity.Trace => "TRACE",
-            UiSeverity.Info => "INFO",
-            UiSeverity.Success => "OK",
-            UiSeverity.Warning => "WARN",
-            UiSeverity.Error => "ERROR",
-            _ => throw new ArgumentOutOfRangeException(nameof(severity), severity, null)
-        };
+            HotkeyManager.UnregisterNotificationShortcuts(
+                notification.ShortcutRegistrationId);
+        }
+        notifications.RemoveAll(
+            notification => ReferenceEquals(notification.Workspace, workspace));
+    }
+
+    void DisconnectHotkeys()
+    {
+        if (!ReferenceEquals(HotkeyManager.OverlaySink, this))
+            return;
+
+        HotkeyManager.OverlaySink = null;
+        HotkeyManager.UnregisterAll();
+    }
+
+    void RequestApplicationStop()
+    {
+        if (!shutdownRequested ||
+            !stopping.IsCancellationRequested ||
+            applicationStopRequested)
+            return;
+
+        applicationStopRequested = true;
+        Application.RequestStop(window!);
+    }
+
+    Exception? FailRootCreation(Exception failure)
+    {
+        List<AdmittedUiEvent> abandoned = [];
+        lock (ingressGate)
+        {
+            rootCreationFailure = failure;
+            while (events.Reader.TryRead(out var admitted))
+            {
+                pendingEvents--;
+                abandoned.Add(admitted);
+            }
+        }
+
+        Exception? rollbackFailure = null;
+        foreach (var admitted in abandoned)
+        {
+            try
+            {
+                Abandon(admitted.MarkAbandoned());
+            }
+            catch (Exception ex)
+            {
+                rollbackFailure = CombineFailure(rollbackFailure, ex);
+            }
+        }
+        return rollbackFailure;
+    }
+
+    static Exception CombineFailure(Exception? failure, Exception next)
+        => failure is null ? next : new AggregateException(failure, next);
 
     void FinishRun()
     {
+        WorkspaceHotkey[] hotkeys;
         lock (ingressGate)
         {
             state = StateStopped;
@@ -876,27 +1326,42 @@ internal sealed class UiHost : IUiInputSink
             drainScheduled = false;
             pendingEvents = 0;
             events.Writer.TryComplete();
+            hotkeys = [.. workspaceHotkeys.Values];
+            workspaceHotkeys.Clear();
         }
 
+        if (!stopping.IsCancellationRequested)
+            stopping.Cancel();
         while (events.Reader.TryRead(out var admitted))
             Abandon(admitted.MarkAbandoned());
-        foreach (var state in workspaces.Values)
+        foreach (var notification in notifications)
         {
-            if (state.Hotkey is { } hotkey)
-                HotkeyManager.Unregister(hotkey.Key, hotkey.Modifiers, hotkey.Entry);
+            HotkeyManager.UnregisterNotificationShortcuts(
+                notification.ShortcutRegistrationId);
         }
+        notifications.Clear();
+        foreach (var hotkey in hotkeys)
+            HotkeyManager.Unregister(hotkey.Key, hotkey.Modifiers, hotkey.Entry);
         ready.TrySetCanceled();
         lifetimeRegistration.Dispose();
+        stopping.Dispose();
     }
 
     static void Abandon(IngressEvent uiEvent)
     {
         switch (uiEvent)
         {
+            case NotifyIngress notify:
+                HotkeyManager.UnregisterNotificationShortcuts(
+                    notify.ShortcutRegistrationId);
+                break;
+            case NavigateWorkspaceIngress navigate:
+                navigate.Completion.TrySetException(new InvalidOperationException(
+                    "UiHost stopped before the accepted navigation event was applied."));
+                break;
             case FlushIngress flush:
-                flush.Completion.TrySetException(
-                    new InvalidOperationException(
-                        "UiHost stopped before the accepted flush event was applied."));
+                flush.Completion.TrySetException(new InvalidOperationException(
+                    "UiHost stopped before the accepted flush event was applied."));
                 break;
         }
     }
@@ -906,29 +1371,43 @@ internal sealed class UiHost : IUiInputSink
         if (window is null)
             return;
 
+        Application.LayoutAndDrawComplete -= ApplicationLayoutAndDrawComplete;
+        Application.Keyboard.KeyDown -= ApplicationKeyDown;
+        if (commandMode is not null)
+            commandMode.VisibleChanged -= CommandModeVisibleChanged;
+        window.MouseEvent -= WindowMouseEvent;
+        window.KeyDownNotHandled -= WindowKeyDownNotHandled;
         window.ViewportChanged -= WindowViewportChanged;
         window.Initialized -= WindowInitialized;
         window.Dispose();
         window = null;
-        workspaceLayer = null;
-        workspaceView = null;
-        notificationLayer = null;
+        workspaceViewport = null;
+        workspaceTaskbar = null;
+        notificationOverlay = null;
         hotkeyLayer = null;
+        commandMode = null;
     }
 
-    static Channel<T> CreateUiChannel<T>()
-        => Channel.CreateUnbounded<T>(new UnboundedChannelOptions
+    static Label CreateOverlayLabel()
+        => new()
         {
-            SingleReader = true,
-            SingleWriter = false,
-            AllowSynchronousContinuations = false
-        });
+            CanFocus = false,
+            Enabled = false,
+            Visible = false,
+            ViewportSettings =
+                ViewportSettingsFlags.Transparent |
+                ViewportSettingsFlags.TransparentMouse
+        };
 
     abstract record IngressEvent;
-    sealed record RegisterWorkspaceIngress(Workspace Workspace) : IngressEvent;
+    sealed record RegisterWorkspaceIngress(
+        Workspace Workspace,
+        Workspace[] RegistrationOrder,
+        Workspace? CurrentWorkspace) : IngressEvent;
     sealed record RemoveWorkspaceIngress(
         Workspace Workspace,
-        Workspace? Replacement) : IngressEvent;
+        Workspace? Replacement,
+        Workspace[] RegistrationOrder) : IngressEvent;
     sealed record SetPanelIngress(
         WorkspacePanel Panel,
         bool SwitchToWorkspace) : IngressEvent;
@@ -940,13 +1419,17 @@ internal sealed class UiHost : IUiInputSink
         Workspace? Workspace,
         string Text,
         UiSeverity Severity,
-        DateTimeOffset ExpiresAt) : IngressEvent;
+        DateTimeOffset ExpiresAt,
+        long ShortcutRegistrationId) : IngressEvent;
     sealed record SwitchWorkspaceIngress(Workspace Workspace) : IngressEvent;
     sealed record BindWorkspaceHotkeyIngress(
         Workspace Workspace,
         ConsoleKey Key,
         ConsoleModifiers Modifiers,
         string Description) : IngressEvent;
+    sealed record NavigateWorkspaceIngress(
+        Command Command,
+        TaskCompletionSource<bool> Completion) : IngressEvent;
     sealed record ShowPopupIngress(
         HotkeyPopup Popup,
         int Generation) : IngressEvent;
@@ -978,11 +1461,15 @@ internal sealed class UiHost : IUiInputSink
     sealed record WorkspaceHotkey(
         ConsoleKey Key,
         ConsoleModifiers Modifiers,
+        string ShortcutText,
         HotkeyManager.HotkeyEntry Entry);
 
-    sealed record WorkspaceState(
-        string? ShortcutText,
-        WorkspaceHotkey? Hotkey);
+    sealed record NotificationState(
+        Workspace? Workspace,
+        string Text,
+        UiSeverity Severity,
+        DateTimeOffset ExpiresAt,
+        long ShortcutRegistrationId);
 
     sealed record DrainBatchResult(
         int Count,

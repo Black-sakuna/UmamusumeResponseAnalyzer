@@ -129,23 +129,20 @@ namespace UmamusumeResponseAnalyzer
             ShutdownCommandTarget? shutdownTarget = null;
             var pluginInitialization = Task.CompletedTask;
             var pluginUpdateCheck = Task.CompletedTask;
+            Task? uiTask = null;
             var shutdownBindingAdded = false;
             ExceptionDispatchInfo? workflowFailure = null;
             try
             {
+                Config.Initialize();
                 uiHost = new(
                     application,
                     synchronizationContext,
                     lifetimeCts.Token);
+                uiHost.ShutdownStarting += lifetimeCts.Cancel;
                 TerminalUi.Initialize(uiHost);
                 bootstrap = new(uiHost);
-                shutdownTarget = new(() =>
-                {
-                    lifetimeCts.Cancel();
-                    uiHost.RequestShutdown();
-                    if (application.TopRunnableView is not null)
-                        application.RequestStop();
-                });
+                shutdownTarget = new(lifetimeCts.Cancel);
                 application.Keyboard.KeyBindings.AddApp(
                     Terminal.Gui.Input.Key.C.WithCtrl,
                     shutdownTarget,
@@ -153,7 +150,6 @@ namespace UmamusumeResponseAnalyzer
                 shutdownBindingAdded = true;
                 HotkeyManager.OverlaySink = uiHost;
 
-                Config.Initialize();
                 await ResourceUpdater.TryUpdateProgram(cancellationToken: lifetimeCts.Token);
                 if (Config.Core.ShowFirstRunPrompt)
                 {
@@ -313,7 +309,7 @@ namespace UmamusumeResponseAnalyzer
 
                 // Terminal.Gui 2.4.17 的 RunAsync 会同步进入 run loop，必须先创建 startup waiter。
                 var startupTask = CompleteStartupAsync();
-                var uiTask = uiHost.RunAsync();
+                uiTask = uiHost.RunAsync();
                 _ = uiTask.ContinueWith(
                     static (_, state) => ((CancellationTokenSource)state!).Cancel(),
                     lifetimeCts,
@@ -346,10 +342,19 @@ namespace UmamusumeResponseAnalyzer
                             lifetimeCts.Cancel();
                             return ValueTask.CompletedTask;
                         },
-                        () =>
+                        async () =>
                         {
-                            uiHost?.RequestShutdown();
-                            return ValueTask.CompletedTask;
+                            if (uiHost is null || uiTask is not null)
+                                return;
+
+                            uiTask = uiHost.RunAsync();
+                            try
+                            {
+                                await uiTask;
+                            }
+                            catch (OperationCanceledException) when (lifetimeCts.IsCancellationRequested)
+                            {
+                            }
                         },
                         async () =>
                         {
@@ -374,16 +379,6 @@ namespace UmamusumeResponseAnalyzer
                         () =>
                         {
                             serverShutdown = Server.StopAsync();
-                            return ValueTask.CompletedTask;
-                        },
-                        () =>
-                        {
-                            HotkeyManager.UnregisterAll();
-                            return ValueTask.CompletedTask;
-                        },
-                        () =>
-                        {
-                            HotkeyManager.OverlaySink = null;
                             return ValueTask.CompletedTask;
                         },
                         () =>
@@ -413,7 +408,6 @@ namespace UmamusumeResponseAnalyzer
                             return ValueTask.CompletedTask;
                         },
                         async () => await serverShutdown,
-                        async () => await PluginManager.ShutdownAsync(),
                         () =>
                         {
                             lifetimeCts.Dispose();
@@ -527,34 +521,32 @@ namespace UmamusumeResponseAnalyzer
                 if (updates.Count == 0)
                     return;
 
-                uiHost.Notify(new UiNotification(
-                    Workspace: null,
-                    "URA",
-                    FormatPluginUpdateNotification(updates),
+                uiHost.Notify(
+                    null,
+                    $"[URA] {FormatPluginUpdateNotification(updates)}",
                     UiSeverity.Info,
-                    DateTimeOffset.Now.AddSeconds(12),
-                    []));
+                    TimeSpan.FromSeconds(12),
+                    []);
 
                 foreach (var update in updates)
                 {
-                    uiHost.Log(new UiLogLine(
-                        Workspace: null,
-                        "URA",
-                        $"插件 {update.DisplayName} 有新版本可用: {update.CurrentVersion} -> {update.LatestVersion}",
-                        UiSeverity.Info));
+                    uiHost.Log(
+                        null,
+                        $"[URA] 插件 {update.DisplayName} 有新版本可用: " +
+                        $"{update.CurrentVersion} -> {update.LatestVersion}",
+                        UiSeverity.Info);
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
             catch (Exception ex)
             {
                 TerminalUi.LogException("URA", ex, UiSeverity.Warning);
-                uiHost.Notify(new UiNotification(
-                    Workspace: null,
-                    "URA",
-                    $"插件更新检查失败: {ex.Message}",
+                uiHost.Notify(
+                    null,
+                    $"[URA] 插件更新检查失败: {ex.Message}",
                     UiSeverity.Warning,
-                    UiNotification.ExpiresAtFromNow(UiSeverity.Warning),
-                    []));
+                    ttl: null,
+                    []);
             }
         }
 

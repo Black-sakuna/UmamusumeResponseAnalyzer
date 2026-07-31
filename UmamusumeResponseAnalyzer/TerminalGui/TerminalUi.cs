@@ -1,5 +1,3 @@
-using Terminal.Gui.App;
-
 namespace UmamusumeResponseAnalyzer.TerminalGui;
 
 public static class TerminalUi
@@ -14,8 +12,6 @@ public static class TerminalUi
         set => Volatile.Write(ref defaultExceptionWorkspace, value);
     }
 
-    internal static IApplication Application => RequireHost().Application;
-
     internal static void Initialize(UiHost host)
     {
         ArgumentNullException.ThrowIfNull(host);
@@ -25,7 +21,6 @@ public static class TerminalUi
                 throw new InvalidOperationException("TerminalUi 已初始化；进程内不允许替换 UiHost。");
 
             host.EnsureAvailable();
-            ModalDialogs.BindOwner(host.Application, host.OwnerContext);
             Volatile.Write(ref uiHost, host);
         }
     }
@@ -43,26 +38,14 @@ public static class TerminalUi
         IEnumerable<T> choices,
         Func<T, string>? converter = null,
         CancellationToken cancellationToken = default)
-    {
-        var host = RequireHost();
-        return WithCancellation(
-            host.LifetimeToken,
-            cancellationToken,
-            token => ModalDialogs.Select(host.Application, title, choices, converter, token));
-    }
+        => ModalDialogs.Select(title, choices, converter, cancellationToken);
 
     internal static T Menu<T>(
         string title,
         IEnumerable<T> choices,
         Func<T, string>? converter = null,
         CancellationToken cancellationToken = default)
-    {
-        var host = RequireHost();
-        return WithCancellation(
-            host.LifetimeToken,
-            cancellationToken,
-            token => ModalDialogs.Menu(host.Application, title, choices, converter, token));
-    }
+        => ModalDialogs.Menu(title, choices, converter, cancellationToken);
 
     public static IReadOnlyList<T> MultiSelect<T>(
         string title,
@@ -70,104 +53,30 @@ public static class TerminalUi
         IEnumerable<T>? selected = null,
         Func<T, string>? converter = null,
         CancellationToken cancellationToken = default)
-    {
-        var host = RequireHost();
-        return WithCancellation(
-            host.LifetimeToken,
-            cancellationToken,
-            token => ModalDialogs.MultiSelect(
-                host.Application,
-                title,
-                choices,
-                selected,
-                converter,
-                token));
-    }
+        => ModalDialogs.MultiSelect(title, choices, selected, converter, cancellationToken);
 
     public static string Ask(
         string title,
         string? value = null,
         bool allowEmpty = false,
         CancellationToken cancellationToken = default)
-    {
-        var host = RequireHost();
-        return WithCancellation(
-            host.LifetimeToken,
-            cancellationToken,
-            token => ModalDialogs.Ask(host.Application, title, value, allowEmpty, token));
-    }
+        => ModalDialogs.Ask(title, value, allowEmpty, cancellationToken);
 
     public static bool Confirm(
         string title,
         bool defaultValue = false,
         CancellationToken cancellationToken = default)
-    {
-        var host = RequireHost();
-        return WithCancellation(
-            host.LifetimeToken,
-            cancellationToken,
-            token => ModalDialogs.Confirm(host.Application, title, defaultValue, token));
-    }
+        => ModalDialogs.Confirm(title, defaultValue, cancellationToken);
 
     public static bool Acknowledge(
         string title = "按 Enter 返回",
         CancellationToken cancellationToken = default)
-    {
-        var host = RequireHost();
-        return WithCancellation(
-            host.LifetimeToken,
-            cancellationToken,
-            token => ModalDialogs.Acknowledge(host.Application, title, token));
-    }
+        => ModalDialogs.Acknowledge(title, cancellationToken);
 
     internal static async Task RunProgressAsync(
         Func<IProgress<DownloadProgress>, CancellationToken, Task> action,
         CancellationToken cancellationToken = default)
-    {
-        var host = RequireHost();
-        await WithCancellationAsync(
-            host.LifetimeToken,
-            cancellationToken,
-            token => ModalDialogs.RunProgressAsync(host.Application, action, token));
-    }
-
-    static T WithCancellation<T>(
-        CancellationToken lifetimeToken,
-        CancellationToken cancellationToken,
-        Func<CancellationToken, T> action)
-    {
-        if (!lifetimeToken.CanBeCanceled)
-            return action(cancellationToken);
-        if (!cancellationToken.CanBeCanceled)
-            return action(lifetimeToken);
-
-        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
-            lifetimeToken,
-            cancellationToken);
-        return action(linkedCts.Token);
-    }
-
-    static async Task WithCancellationAsync(
-        CancellationToken lifetimeToken,
-        CancellationToken cancellationToken,
-        Func<CancellationToken, Task> action)
-    {
-        if (!lifetimeToken.CanBeCanceled)
-        {
-            await action(cancellationToken);
-            return;
-        }
-        if (!cancellationToken.CanBeCanceled)
-        {
-            await action(lifetimeToken);
-            return;
-        }
-
-        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
-            lifetimeToken,
-            cancellationToken);
-        await action(linkedCts.Token);
-    }
+        => await ModalDialogs.RunProgressAsync(action, cancellationToken);
 
     internal static void LogException(
         string source,

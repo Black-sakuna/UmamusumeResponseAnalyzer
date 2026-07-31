@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.ExceptionServices;
+using System.Text;
 using WatsonWebserver.Core;
 using WatsonWebserver.Lite;
 using Xunit;
@@ -55,6 +56,25 @@ public sealed class LifecycleTeardownTests
             thrown.InnerExceptions,
             ex => Assert.Equal("cleanup-1", ex.Message),
             ex => Assert.Equal("cleanup-2", ex.Message));
+    }
+
+    [Fact]
+    public async Task StopAsync_PublishesCompletionBeforeCancellationCallbacks()
+    {
+        const string scenario = "server-stop-reentrant";
+        if (TerminalUiLifecycleChildProcess.IsChild(scenario))
+        {
+            await RunReentrantServerStopAsync();
+            TerminalUiLifecycleChildProcess.WriteResult("ok");
+            return;
+        }
+
+        Assert.Equal(
+            "ok",
+            await TerminalUiLifecycleProcessTests.RunChildAsync(
+                scenario,
+                typeof(LifecycleTeardownTests),
+                nameof(StopAsync_PublishesCompletionBeforeCancellationCallbacks)));
     }
 
     [Fact]
@@ -113,6 +133,99 @@ public sealed class LifecycleTeardownTests
             release.TrySetResult();
             if (shutdown is null)
                 shutdown = Server.ShutdownCoreAsync(server, requests);
+            try
+            {
+                await shutdown.WaitAsync(TimeSpan.FromSeconds(5));
+            }
+            catch
+            {
+            }
+
+            if (request is not null)
+            {
+                try
+                {
+                    await request;
+                }
+                catch
+                {
+                }
+            }
+        }
+    }
+
+    static async Task RunReentrantServerStopAsync()
+    {
+        var port = GetFreePort();
+        Config.Initialize();
+        var callbackEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var releaseHandler = new ManualResetEventSlim();
+        var originalConfirmInstall = WebInstallApi.ConfirmInstall;
+        Task? request = null;
+        Task? shutdown = null;
+        Task? inlineShutdown = null;
+        Task? crossThreadShutdown = null;
+        var callbackCount = 0;
+        var crossThreadReturned = false;
+
+        try
+        {
+            WebInstallApi.ConfirmInstall = (_, _, _, cancellationToken) =>
+            {
+                using var registration = cancellationToken.Register(() =>
+                {
+                    Interlocked.Increment(ref callbackCount);
+                    inlineShutdown = Server.StopAsync();
+                    var thread = new Thread(() => crossThreadShutdown = Server.StopAsync())
+                    {
+                        IsBackground = true
+                    };
+                    thread.Start();
+                    crossThreadReturned = thread.Join(TimeSpan.FromSeconds(5));
+                    releaseHandler.Set();
+                });
+
+                callbackEntered.TrySetResult();
+                if (!releaseHandler.Wait(TimeSpan.FromSeconds(5)))
+                    throw new TimeoutException("Server shutdown did not cancel the active request.");
+                return false;
+            };
+
+            Server.Instance = new(
+                new WebserverSettings("127.0.0.1", port),
+                ctx => ctx.Response.Send(string.Empty));
+            Server.Start(CancellationToken.None);
+
+            using var client = new HttpClient();
+            using var message = new HttpRequestMessage(
+                System.Net.Http.HttpMethod.Post,
+                $"http://127.0.0.1:{port}/uracloud/install");
+            message.Headers.Add("Origin", "https://ura.shuise.net");
+            message.Content = new StringContent(
+                "{\"author\":\"test\",\"internalName\":\"test\",\"version\":\"1.0.0\"}",
+                Encoding.UTF8,
+                "application/json");
+            request = client.SendAsync(message, TestContext.Current.CancellationToken);
+            await callbackEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+            shutdown = Server.StopAsync();
+            await shutdown.WaitAsync(TimeSpan.FromSeconds(5));
+
+            Assert.True(crossThreadReturned);
+            Assert.Same(shutdown, inlineShutdown);
+            Assert.Same(shutdown, crossThreadShutdown);
+            Assert.Same(shutdown, Server.StopAsync());
+            Assert.Equal(1, Volatile.Read(ref callbackCount));
+            Assert.False(Server.Instance.IsListening);
+
+            using var rebound = new TcpListener(IPAddress.Loopback, port);
+            rebound.Start();
+        }
+        finally
+        {
+            releaseHandler.Set();
+            WebInstallApi.ConfirmInstall = originalConfirmInstall;
+            shutdown ??= Server.StopAsync();
             try
             {
                 await shutdown.WaitAsync(TimeSpan.FromSeconds(5));
