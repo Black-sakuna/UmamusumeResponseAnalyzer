@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using Terminal.Gui.App;
@@ -15,23 +16,91 @@ namespace UmamusumeResponseAnalyzer.Tests
 
     public sealed class PluginRuntimeFixture : IDisposable
     {
+        readonly string configPath;
+        readonly string originalConfigPath;
+        readonly PropertyInfo configCurrent;
+        readonly object? originalConfig;
+        readonly CultureInfo originalCulture;
+        readonly CultureInfo originalUiCulture;
+        readonly (FieldInfo Field, object? Value)[] originalResourceCultures;
         readonly Task run;
 
         public PluginRuntimeFixture()
         {
-            Terminal = new TerminalGuiTestApp();
+            originalConfigPath = Config.CONFIG_FILEPATH;
+            configCurrent = typeof(Config).GetProperty(
+                "Current",
+                BindingFlags.NonPublic | BindingFlags.Static)!;
+            originalConfig = configCurrent.GetValue(null);
+            originalCulture = Thread.CurrentThread.CurrentCulture;
+            originalUiCulture = Thread.CurrentThread.CurrentUICulture;
+            originalResourceCultures = typeof(Config).Assembly.GetTypes()
+                .Where(type => type.Namespace?.StartsWith(
+                    "UmamusumeResponseAnalyzer.Localization",
+                    StringComparison.Ordinal) == true)
+                .Select(type => type.GetField(
+                    "resourceCulture",
+                    BindingFlags.NonPublic | BindingFlags.Static))
+                .OfType<FieldInfo>()
+                .Select(field => (field, field.GetValue(null)))
+                .ToArray();
+
+            configPath = Path.Combine(
+                Path.GetTempPath(),
+                $"ura-plugin-runtime-{Guid.NewGuid():N}.yaml");
+
+            TerminalGuiTestApp? terminal = null;
             UiHost? host = null;
-            Terminal.RunOnOwnerThread(() =>
+            Task? startedRun = null;
+            try
             {
-                host = new UiHost(
-                    Terminal.Application,
-                    SynchronizationContext.Current!,
-                    CancellationToken.None);
-                TerminalUi.Initialize(host);
-            });
-            Host = host!;
-            HotkeyManager.OverlaySink = Host;
-            run = Terminal.StartAsync(Host).GetAwaiter().GetResult();
+                Config.CONFIG_FILEPATH = configPath;
+                Config.Initialize();
+
+                terminal = new TerminalGuiTestApp();
+                terminal.RunOnOwnerThread(() =>
+                {
+                    var createdHost = new UiHost(
+                        terminal.Application,
+                        SynchronizationContext.Current!,
+                        CancellationToken.None);
+                    TerminalUi.Initialize(createdHost);
+                    host = createdHost;
+                });
+                var initializedHost = host
+                    ?? throw new InvalidOperationException("UiHost fixture initialization did not complete.");
+                HotkeyManager.OverlaySink = initializedHost;
+                var activeRun = terminal.StartAsync(initializedHost).GetAwaiter().GetResult();
+                startedRun = activeRun;
+
+                Terminal = terminal;
+                Host = initializedHost;
+                run = activeRun;
+            }
+            catch
+            {
+                try
+                {
+                    if (terminal is not null)
+                    {
+                        try
+                        {
+                            if (host is not null && startedRun is not null)
+                                terminal.StopAsync(host, startedRun).GetAwaiter().GetResult();
+                        }
+                        finally
+                        {
+                            terminal.Dispose();
+                        }
+                    }
+                }
+                finally
+                {
+                    RestoreConfigState();
+                    File.Delete(configPath);
+                }
+                throw;
+            }
         }
 
         internal TerminalGuiTestApp Terminal { get; }
@@ -40,11 +109,34 @@ namespace UmamusumeResponseAnalyzer.Tests
 
         public void Dispose()
         {
-            HotkeyManager.UnregisterAll();
-            HotkeyManager.OverlaySink = null;
-            Terminal.StopAsync(Host, run).GetAwaiter().GetResult();
-            Terminal.Dispose();
+            try
+            {
+                try
+                {
+                    Terminal.StopAsync(Host, run).GetAwaiter().GetResult();
+                }
+                finally
+                {
+                    Terminal.Dispose();
+                }
+            }
+            finally
+            {
+                RestoreConfigState();
+                File.Delete(configPath);
+            }
         }
+
+        void RestoreConfigState()
+        {
+            Config.CONFIG_FILEPATH = originalConfigPath;
+            configCurrent.SetValue(null, originalConfig);
+            Thread.CurrentThread.CurrentCulture = originalCulture;
+            Thread.CurrentThread.CurrentUICulture = originalUiCulture;
+            foreach (var (field, value) in originalResourceCultures)
+                field.SetValue(null, value);
+        }
+
     }
 
     /// <summary>
@@ -66,7 +158,6 @@ namespace UmamusumeResponseAnalyzer.Tests
         public HotReloadTests(PluginRuntimeFixture runtime)
         {
             this.runtime = runtime;
-            SeedConfig(); // 触碰 PluginManager/LoadIntoContext 会读 Config.Repository.Targets，先注入一个 YamlConfig
             ResetPluginState();
             HotkeyManager.UnregisterAll();
             HotkeyManager.OverlaySink = runtime.Host;
@@ -616,12 +707,12 @@ namespace UmamusumeResponseAnalyzer.Tests
                         {
                             var workspace = Workspace.Create("Transient shortcut");
                             workspace.Notify(
-                                "{{marker}}",
+                                "{{marker}}-notification-visible",
                                 ttl: TimeSpan.FromMinutes(5),
                                 shortcuts: new UiShortcut(ConsoleKey.F8, HandleNotificationAsync));
                             HotkeyManager.Register(ConsoleKey.F7, "popup", popup =>
                             {
-                                popup.AddLine("{{marker}}")
+                                popup.AddLine("{{marker}}-popup-visible")
                                     .BindShortcut(new UiShortcut(ConsoleKey.F8, HandlePopupAsync));
                                 return Task.CompletedTask;
                             });
@@ -641,22 +732,6 @@ namespace UmamusumeResponseAnalyzer.Tests
                     }
                 }
                 """;
-        }
-
-        /// <summary>反射注入一个 YamlConfig 到 private static Config.Current（避开会写盘的 Config.Initialize）。</summary>
-        static void SeedConfig()
-        {
-            var current = typeof(Config).GetProperty("Current", BindingFlags.NonPublic | BindingFlags.Static)!;
-            if (current.GetValue(null) is null)
-                current.SetValue(null, new YamlConfig
-                {
-                    Core = new(),
-                    Repository = new(),
-                    Plugin = new(),
-                    Updater = new(),
-                    Language = new(),
-                    Misc = new(),
-                });
         }
 
         static void ResetPluginState()

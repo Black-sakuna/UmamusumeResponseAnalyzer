@@ -4,42 +4,8 @@ using Xunit;
 
 namespace UmamusumeResponseAnalyzer.Tests;
 
-[CollectionDefinition("ModalDialogs", DisableParallelization = true)]
-public sealed class ModalDialogsCollection : ICollectionFixture<ModalDialogsFixture> { }
-
-public sealed class ModalDialogsFixture : IDisposable
-{
-    readonly Task run;
-
-    public ModalDialogsFixture()
-    {
-        Terminal = new();
-        UiHost? host = null;
-        Terminal.RunOnOwnerThread(() =>
-        {
-            host = new(
-                Terminal.Application,
-                SynchronizationContext.Current!,
-                CancellationToken.None);
-            TerminalUi.Initialize(host);
-        });
-        Host = host!;
-        run = Terminal.StartAsync(Host).GetAwaiter().GetResult();
-        Host.Ready.WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
-    }
-
-    internal TerminalGuiTestApp Terminal { get; }
-    internal UiHost Host { get; }
-
-    public void Dispose()
-    {
-        Terminal.StopAsync(Host, run).GetAwaiter().GetResult();
-        Terminal.Dispose();
-    }
-}
-
-[Collection("ModalDialogs")]
-public sealed class ModalDialogsTests(ModalDialogsFixture fixture)
+[Collection("PluginReload")]
+public sealed class ModalDialogsTests(PluginRuntimeFixture fixture)
 {
     readonly TerminalGuiTestApp terminal = fixture.Terminal;
 

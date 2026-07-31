@@ -5,29 +5,20 @@ using Xunit;
 
 namespace UmamusumeResponseAnalyzer.Tests
 {
-    [Collection("ResourceUpdater")]
+    [Collection("PluginReload")]
     public sealed class ResourceUpdaterTests : IDisposable
     {
-        readonly string configPath = Path.Combine(Path.GetTempPath(), $"ura-test-{Guid.NewGuid():N}.yaml");
-        readonly string originalConfigPath;
         readonly HttpClient originalHttpClient;
 
-        public ResourceUpdaterTests()
+        public ResourceUpdaterTests(PluginRuntimeFixture fixture)
         {
-            originalConfigPath = Config.CONFIG_FILEPATH;
+            _ = fixture;
             originalHttpClient = ResourceUpdater.HttpClient;
-            Config.CONFIG_FILEPATH = configPath;
-            Config.Initialize();
         }
 
         public void Dispose()
         {
-            if (File.Exists(configPath))
-                File.Delete(configPath);
-
-            Config.CONFIG_FILEPATH = originalConfigPath;
             ResourceUpdater.HttpClient = originalHttpClient;
-            TerminalUi.UnbindForTests();
         }
 
         [Fact]
@@ -74,10 +65,5 @@ namespace UmamusumeResponseAnalyzer.Tests
                 return Task.FromResult(respond(request));
             }
         }
-    }
-
-    [CollectionDefinition("ResourceUpdater")]
-    public sealed class ResourceUpdaterCollection
-    {
     }
 }

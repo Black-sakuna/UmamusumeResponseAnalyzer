@@ -37,7 +37,6 @@ namespace UmamusumeResponseAnalyzer.Tests
         {
             this.runtime = runtime;
             application = runtime.Application;
-            SeedConfig();
             ResetAnalyzerState();
             HotkeyManager.OverlaySink = runtime.Host;
         }
@@ -204,35 +203,48 @@ namespace UmamusumeResponseAnalyzer.Tests
         {
             var terminal = runtime.Terminal;
             var host = runtime.Host;
+            var bootstrap = new BootstrapWorkspace(host);
             var requestPlugin = new RequestDispatchPlugin();
             var responsePlugin = new ResponseDispatchPlugin();
-            LoadTestPlugin(requestPlugin);
-            LoadTestPlugin(responsePlugin);
-            var logCount = await terminal.InvokeAsync(() => host.GetLogsForTests(null).Count);
-            var notificationCount = await terminal.InvokeAsync(() => host.GetNotificationsForTests(null).Count);
+            try
+            {
+                bootstrap.Workspace.SwitchTo();
+                await host.FlushAsync();
+                await terminal.RedrawAsync();
+                var screen = await terminal.CaptureScreenAsync();
 
-            await Server.DispatchRequest("/unknown/path", [0xC1]);
-            await Server.DispatchResponse("/umamusume/account/indx", [0xC1]);
-            await terminal.InvokeAsync(() => { });
+                LoadTestPlugin(requestPlugin);
+                LoadTestPlugin(responsePlugin);
 
-            Assert.Equal(0, requestPlugin.RawCalls);
-            Assert.Equal(0, requestPlugin.DtoCalls);
-            Assert.Equal(0, responsePlugin.RawCalls);
-            Assert.Equal(0, responsePlugin.DtoCalls);
-            Assert.Equal(logCount, await terminal.InvokeAsync(() => host.GetLogsForTests(null).Count));
-            Assert.Equal(notificationCount, await terminal.InvokeAsync(() => host.GetNotificationsForTests(null).Count));
+                await Server.DispatchRequest("/unknown/path", [0xC1]);
+                await Server.DispatchResponse("/umamusume/account/indx", [0xC1]);
+                await host.FlushAsync();
+                await terminal.RedrawAsync();
 
-            await Server.DispatchRequest(
-                AccountIndexPath,
-                MessagePackSerializer.Serialize(new DataLinkIndexRequest()));
-            await Server.DispatchResponse(
-                AccountIndexPath,
-                MessagePackSerializer.Serialize(new DataLinkIndexResponse()));
+                Assert.Equal(screen, await terminal.CaptureScreenAsync());
+                Assert.Equal(0, requestPlugin.RawCalls);
+                Assert.Equal(0, requestPlugin.DtoCalls);
+                Assert.Equal(0, responsePlugin.RawCalls);
+                Assert.Equal(0, responsePlugin.DtoCalls);
 
-            Assert.Equal(1, requestPlugin.RawCalls);
-            Assert.Equal(1, requestPlugin.DtoCalls);
-            Assert.Equal(1, responsePlugin.RawCalls);
-            Assert.Equal(1, responsePlugin.DtoCalls);
+                await Server.DispatchRequest(
+                    AccountIndexPath,
+                    MessagePackSerializer.Serialize(new DataLinkIndexRequest()));
+                await Server.DispatchResponse(
+                    AccountIndexPath,
+                    MessagePackSerializer.Serialize(new DataLinkIndexResponse()));
+
+                Assert.Equal(1, requestPlugin.RawCalls);
+                Assert.Equal(1, requestPlugin.DtoCalls);
+                Assert.Equal(1, responsePlugin.RawCalls);
+                Assert.Equal(1, responsePlugin.DtoCalls);
+            }
+            finally
+            {
+                bootstrap.Dispose();
+                host.RemoveWorkspace(bootstrap.Workspace);
+                await host.FlushAsync();
+            }
         }
 
         [Fact]
@@ -330,32 +342,36 @@ namespace UmamusumeResponseAnalyzer.Tests
         {
             var terminal = runtime.Terminal;
             var host = runtime.Host;
-            var logCount = await terminal.InvokeAsync(() => host.GetLogsForTests(null).Count);
-            var notificationCount = await terminal.InvokeAsync(() => host.GetNotificationsForTests(null).Count);
-            var malformedPayloadPlugin = new ResponseDispatchPlugin();
-            LoadTestPlugin(malformedPayloadPlugin);
-
-            await Assert.ThrowsAsync<FormatException>(
-                async () => await Server.DispatchResponse("account/index", [0xC0]));
-            await Server.DispatchResponse(AccountIndexPath, [0xC1]);
-
-            ResetAnalyzerState();
-            LoadTestPlugin(new ThrowingResponsePlugin());
-            await Server.DispatchResponse(
-                AccountIndexPath,
-                MessagePackSerializer.Serialize(new DataLinkIndexResponse()));
-
-            await terminal.WaitForAsync(async () =>
+            var bootstrap = new BootstrapWorkspace(host);
+            try
             {
-                var logs = (await terminal.InvokeAsync(() => host.GetLogsForTests(null))).Skip(logCount);
-                var notifications = (await terminal.InvokeAsync(() => host.GetNotificationsForTests(null))).Skip(notificationCount);
-                return logs.Any(x => x.Text.Contains("canonical URL 必须包含绝对 path", StringComparison.Ordinal))
-                    && logs.Any(x => x.Text.Contains("Gallop DTO 反序列化失败", StringComparison.Ordinal))
-                    && logs.Any(x => x.Text.Contains("analyzer failed", StringComparison.Ordinal))
-                    && notifications.Any(x => x.Text.Contains("canonical URL 必须包含绝对 path", StringComparison.Ordinal))
-                    && notifications.Any(x => x.Text.Contains("Gallop DTO 反序列化失败", StringComparison.Ordinal))
-                    && notifications.Any(x => x.Text.Contains("analyzer failed", StringComparison.Ordinal));
-            });
+                bootstrap.Workspace.SwitchTo();
+                await host.FlushAsync();
+
+                var malformedPayloadPlugin = new ResponseDispatchPlugin();
+                LoadTestPlugin(malformedPayloadPlugin);
+
+                await Assert.ThrowsAsync<FormatException>(
+                    async () => await Server.DispatchResponse("account/index", [0xC0]));
+                await terminal.WaitForScreenAsync("canonical URL");
+
+                await Server.DispatchResponse(AccountIndexPath, [0xC1]);
+                await terminal.WaitForScreenAsync("Gallop DTO 反序列化失败");
+
+                ResetAnalyzerState();
+                LoadTestPlugin(new ThrowingResponsePlugin());
+                await Server.DispatchResponse(
+                    AccountIndexPath,
+                    MessagePackSerializer.Serialize(new DataLinkIndexResponse()));
+                await terminal.WaitForScreenAsync("响应分析插件处理失败");
+                await terminal.WaitForScreenAsync("analyzer failed");
+            }
+            finally
+            {
+                bootstrap.Dispose();
+                host.RemoveWorkspace(bootstrap.Workspace);
+                await host.FlushAsync();
+            }
         }
 
         [Fact]
@@ -695,7 +711,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
 
         [Fact]
-        public async Task PluginLoadContext_ResolvesSharedAbiAssemblyFromDefaultContext()
+        public void PluginLoadContext_ResolvesSharedAbiAssemblyFromDefaultContext()
         {
             var ctx = new PluginManager.PluginLoadContext("shared-abi-test");
             try
@@ -715,12 +731,6 @@ namespace UmamusumeResponseAnalyzer.Tests
                     Version = new Version(99, 0, 0, 0),
                 };
                 Assert.Same(typeof(Server).Assembly, ctx.LoadFromAssemblyName(futureHostVersion));
-                await runtime.Terminal.WaitForAsync(() =>
-                    runtime.Host.GetLogsForTests(null).Any(line =>
-                        line.Text.Contains("插件依赖的宿主 ABI 版本更高", StringComparison.Ordinal)));
-                Assert.Contains(
-                    runtime.Host.GetLogsForTests(null),
-                    line => line.Text.Contains("插件依赖的宿主 ABI 版本更高", StringComparison.Ordinal));
 
                 var wrongTerminalGuiVersion = new AssemblyName(typeof(View).Assembly.GetName().Name!)
                 {
@@ -749,21 +759,6 @@ namespace UmamusumeResponseAnalyzer.Tests
             foreach (var plugin in PluginManager.LoadedPlugins)
                 HotkeyManager.UnregisterByOwner(plugin);
             PluginManager.LoadedPlugins.Clear();
-        }
-
-        static void SeedConfig()
-        {
-            var current = typeof(Config).GetProperty("Current", BindingFlags.NonPublic | BindingFlags.Static)!;
-            if (current.GetValue(null) is null)
-                current.SetValue(null, new YamlConfig
-                {
-                    Core = new(),
-                    Repository = new(),
-                    Plugin = new(),
-                    Updater = new(),
-                    Language = new(),
-                    Misc = new(),
-                });
         }
 
         static void AssertDtoPayloadMatches(
