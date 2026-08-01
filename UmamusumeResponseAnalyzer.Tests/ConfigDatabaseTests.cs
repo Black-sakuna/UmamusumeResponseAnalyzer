@@ -424,32 +424,17 @@ namespace UmamusumeResponseAnalyzer.Tests
     /// #1 回归:数据文件缺失时 <see cref="Database.Initialize"/> 必须优雅降级——不再对 null 调 .ToDictionary 而崩溃。
     /// 全新用户(还没下数据)选"启动"曾在此抛 ArgumentNullException 拖垮整个程序;修复后应正常完成、各属性保持安全空默认。
     /// 测试在当前 CWD(测试输出目录,无任何 .br)直接调真实 Initialize 走"文件缺失"路径——只 File.Exists 判断、不读真实数据、无文件写入。
-    /// 归入 "Database" collection 串行(会动 Database 静态状态)。
+    /// 归入 "PluginReload" collection，复用其唯一 Config 和 UiHost。
     /// </summary>
-    [Collection("Database")]
-    public class DatabaseInitializeMissingFilesTests
+    [Collection("PluginReload")]
+    public class DatabaseInitializeMissingFilesTests(PluginRuntimeFixture runtime)
     {
-        public DatabaseInitializeMissingFilesTests()
-        {
-            // 同 DatabaseStaticTableTests:注入 Config.Current,使 Database 静态字段初始化器读 Config.Updater 不 NRE
-            var currentProp = typeof(Config).GetProperty("Current", BindingFlags.NonPublic | BindingFlags.Static)!;
-            if (currentProp.GetValue(null) is null)
-                currentProp.SetValue(null, new YamlConfig
-                {
-                    Core = new(),
-                    Repository = new(),
-                    Plugin = new(),
-                    Updater = new(),
-                    Language = new(),
-                    Misc = new()
-                });
-        }
-
         [Fact]
         public async Task Initialize_WithMissingDataFiles_DoesNotThrowAndKeepsSafeDefaults()
         {
             // 不抛即过:修复前这里会因 events_*.br 缺失→eventsTask.Result 为 null→null.ToDictionary 抛 ArgumentNullException
             await Database.Initialize();
+            await runtime.Host.FlushAsync();
 
             Assert.True(Database.Initialized);
             // 缺文件时各属性保持非空安全默认,后续消费(如分析包/技能进化)不会 NPE
