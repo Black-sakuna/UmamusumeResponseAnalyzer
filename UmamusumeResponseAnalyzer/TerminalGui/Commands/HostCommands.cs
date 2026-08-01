@@ -38,11 +38,7 @@ internal static class HostCommands
         string? Message = null,
         UiSeverity Severity = UiSeverity.Info,
         Display? Display = null,
-        Workspace? SwitchWorkspace = null,
-        bool RefreshSnapshot = false);
-
-    internal static IReadOnlyList<PluginRuntimeStatus> SnapshotPlugins()
-        => PluginManager.SnapshotPluginStatuses();
+        Workspace? SwitchWorkspace = null);
 
     internal static async Task<Result?> ExecuteAsync(
         string command,
@@ -170,7 +166,7 @@ internal static class HostCommands
                         candidate.Title.Equals(title, StringComparison.OrdinalIgnoreCase));
                 return workspace is null
                     ? Warning($"workspace 不存在: {title}")
-                    : new(SwitchWorkspace: workspace, RefreshSnapshot: true);
+                    : new(SwitchWorkspace: workspace);
             }
             catch (FormatException ex)
             {
@@ -228,24 +224,20 @@ internal static class HostCommands
         };
         if (result.Outcome == PluginManager.PluginLifecycleOutcome.RestartRequired)
         {
-            return Warning(
-                $"插件 {plugin.InternalName} 需要重启才能{localizedAction}。",
-                refreshSnapshot: true);
+            return Warning($"插件 {plugin.InternalName} 需要重启才能{localizedAction}。");
         }
         if (result.Outcome == PluginManager.PluginLifecycleOutcome.Failed)
         {
             return new(
                 $"插件 {plugin.InternalName} {localizedAction}失败。",
-                UiSeverity.Error,
-                RefreshSnapshot: true);
+                UiSeverity.Error);
         }
 
         var message = $"插件 {plugin.InternalName} 已{localizedAction}。";
         return new(
             message,
             UiSeverity.Success,
-            new("Plugin command", [new($"{plugin.InternalName} 已{localizedAction}。")]),
-            RefreshSnapshot: true);
+            new("Plugin command", [new($"{plugin.InternalName} 已{localizedAction}。")]));
     }
 
     static Result ShowWorkspaces(Snapshot snapshot, bool selectable)
@@ -397,7 +389,7 @@ internal static class HostCommands
             .OrderBy(candidate => candidate, StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
-    static Result Warning(string message, bool refreshSnapshot = false)
-        => new(message, UiSeverity.Warning, RefreshSnapshot: refreshSnapshot);
+    static Result Warning(string message)
+        => new(message, UiSeverity.Warning);
 
 }

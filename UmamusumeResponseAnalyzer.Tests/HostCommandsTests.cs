@@ -105,7 +105,6 @@ public sealed class HostCommandsTests
         Assert.Equal(1, selectorDisplay.SelectedIndex);
         Assert.Same(second, switched.SwitchWorkspace);
         Assert.Null(switched.Message);
-        Assert.True(switched.RefreshSnapshot);
         Assert.Null(Assert.IsType<HostCommands.Display>(empty.Display).SelectedIndex);
         Assert.Equal(("workspace 不存在: Missing", UiSeverity.Warning),
             (missing.Message, missing.Severity));

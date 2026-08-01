@@ -596,7 +596,7 @@ internal sealed class UiHost : IUiInputSink
 
     HostCommands.Snapshot RefreshCommandSnapshot()
     {
-        var plugins = HostCommands.SnapshotPlugins();
+        var plugins = PluginManager.SnapshotPluginStatuses();
         lock (ingressGate)
         {
             EnsureAvailableLocked();
@@ -888,7 +888,7 @@ internal sealed class UiHost : IUiInputSink
         var savedTaskbarTitleOrder = Config.WorkspaceTaskbarTitleOrder?.ToArray()
             ?? throw new InvalidOperationException(
                 "Config.WorkspaceTaskbarTitleOrder must not be null.");
-        var plugins = HostCommands.SnapshotPlugins();
+        var plugins = PluginManager.SnapshotPluginStatuses();
         lock (ingressGate)
             CaptureCommandSnapshotLocked(plugins: plugins);
         window = new MainWindow(RequestShutdown)

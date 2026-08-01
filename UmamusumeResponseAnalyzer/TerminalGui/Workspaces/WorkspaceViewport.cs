@@ -231,7 +231,7 @@ internal sealed class WorkspaceViewport : View
             if (fullBleed)
             {
                 Add(realized.View);
-                panelLayouts.Add(new(panel, realized, null));
+                panelLayouts.Add(new(realized, null));
                 continue;
             }
 
@@ -246,7 +246,7 @@ internal sealed class WorkspaceViewport : View
             EnableFocusPath(frame);
             Add(frame);
             layoutViews.Add(frame);
-            panelLayouts.Add(new(panel, realized, frame));
+            panelLayouts.Add(new(realized, frame));
         }
     }
 
@@ -549,7 +549,6 @@ internal sealed class WorkspaceViewport : View
         bool FillsViewportHeight);
 
     sealed record PanelLayout(
-        WorkspacePanel Panel,
         RealizedPanel Realized,
         FrameView? Frame);
 }

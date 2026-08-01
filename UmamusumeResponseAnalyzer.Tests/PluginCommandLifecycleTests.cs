@@ -72,7 +72,7 @@ public sealed class PluginCommandLifecycleTests : IDisposable
         AssertInitializedAndOpen(pluginName);
         Assert.Equal(
             new Version(2, 0),
-            Assert.Single(HostCommands.SnapshotPlugins(), plugin =>
+            Assert.Single(PluginManager.SnapshotPluginStatuses(), plugin =>
                 plugin.InternalName == pluginName).Version);
     }
 
@@ -140,7 +140,6 @@ public sealed class PluginCommandLifecycleTests : IDisposable
 
         Assert.Equal($"插件 {pluginName} 加载失败。", result.Message);
         Assert.Equal(UiSeverity.Error, result.Severity);
-        Assert.True(result.RefreshSnapshot);
         Assert.DoesNotContain("重启", result.Message, StringComparison.Ordinal);
         Assert.DoesNotContain(
             PluginManager.SnapshotLoadedPlugins(),
@@ -163,7 +162,6 @@ public sealed class PluginCommandLifecycleTests : IDisposable
 
         Assert.Equal($"插件 {pluginName} 需要重启才能重载。", result.Message);
         Assert.Equal(UiSeverity.Warning, result.Severity);
-        Assert.True(result.RefreshSnapshot);
         Assert.Contains(
             PluginManager.SnapshotLoadedPlugins(),
             plugin => PluginManager.InternalName(plugin) == pluginName);
@@ -211,7 +209,7 @@ public sealed class PluginCommandLifecycleTests : IDisposable
     }
 
     HostCommands.Snapshot Snapshot()
-        => new([], null, HostCommands.SnapshotPlugins());
+        => new([], null, PluginManager.SnapshotPluginStatuses());
 
     static void AssertLifecycleSuccess(
         HostCommands.Result result,
@@ -220,7 +218,6 @@ public sealed class PluginCommandLifecycleTests : IDisposable
     {
         Assert.Equal($"插件 {pluginName} 已{action}。", result.Message);
         Assert.Equal(UiSeverity.Success, result.Severity);
-        Assert.True(result.RefreshSnapshot);
         Assert.Equal("Plugin command", result.Display?.Title);
         Assert.Equal(
             $"{pluginName} 已{action}。",
