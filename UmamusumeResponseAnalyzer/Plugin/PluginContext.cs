@@ -148,18 +148,9 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 }
                 catch (Exception ex)
                 {
-                    var exceptionType = ex.GetType().FullName ?? ex.GetType().Name;
-                    string message;
-                    try { message = ex.Message; }
-                    catch (Exception messageError)
-                    {
-                        var messageErrorType = messageError.GetType().FullName ?? messageError.GetType().Name;
-                        message = $"<读取 Message 失败: {messageErrorType}>";
-                    }
-
                     var failure = new InvalidOperationException(
                         $"插件事件处理错误: plugin={PluginManager.InternalName(Plugin)}, " +
-                        $"exception={exceptionType}, message={message}");
+                        PluginManager.DescribeException(ex));
                     _ = PluginManager.ReportPluginFailure("Plugin", failure);
                 }
             }

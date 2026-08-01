@@ -24,7 +24,6 @@ public sealed class UiHostRenderTests : IDisposable
 
     public void Dispose()
     {
-        TerminalUi.DefaultExceptionWorkspace = null;
         foreach (var workspace in ownedWorkspaces.AsEnumerable().Reverse())
         {
             host.RemoveWorkspace(workspace);
@@ -341,6 +340,215 @@ public sealed class UiHostRenderTests : IDisposable
     }
 
     [Fact]
+    public async Task WorkspaceHotkeysCaptureAdmissionOwnerAndCleanupExactMetadata()
+    {
+        var removed = CreateWorkspace("Owner hotkey removed");
+        var kept = CreateWorkspace("Owner hotkey kept");
+        var removedOwner = new object();
+        var keptOwner = new object();
+        using (HotkeyManager.RegisterScope(removedOwner))
+            removed.BindHotkey(ConsoleKey.F17, description: "removed owner workspace");
+        using (HotkeyManager.RegisterScope(keptOwner))
+            kept.BindHotkey(ConsoleKey.F18, description: "kept owner workspace");
+        await host.FlushAsync();
+
+        Assert.Same(
+            removedOwner,
+            HotkeyManager.Hotkeys[(ConsoleKey.F17, ConsoleModifiers.None)].Owner);
+        Assert.Same(
+            keptOwner,
+            HotkeyManager.Hotkeys[(ConsoleKey.F18, ConsoleModifiers.None)].Owner);
+
+        Assert.Equal(1, HotkeyManager.UnregisterByOwner(removedOwner));
+        Assert.DoesNotContain(
+            (ConsoleKey.F17, ConsoleModifiers.None),
+            HotkeyManager.Hotkeys.Keys);
+        Assert.Same(
+            keptOwner,
+            HotkeyManager.Hotkeys[(ConsoleKey.F18, ConsoleModifiers.None)].Owner);
+
+        await host.HandleCommandAsync("/workspace");
+        await terminal.RedrawAsync();
+        var screen = await terminal.CaptureScreenAsync();
+        Assert.Contains(removed.Title, screen, StringComparison.Ordinal);
+        Assert.DoesNotContain($"{removed.Title} [F17]", screen, StringComparison.Ordinal);
+        Assert.Contains($"{kept.Title} [F18]", screen, StringComparison.Ordinal);
+
+        Assert.Equal(1, HotkeyManager.UnregisterByOwner(keptOwner));
+    }
+
+    [Fact]
+    public async Task SameOwnerPendingCleanupDoesNotRestoreOldHotkeyAndAllowsNewBind()
+    {
+        var workspace = CreateWorkspace("Pending owner hotkey");
+        var owner = new object();
+        using (HotkeyManager.RegisterScope(owner))
+            workspace.BindHotkey(ConsoleKey.F13, description: "existing owner");
+        await host.FlushAsync();
+
+        var canceled = await terminal.InvokeAsync(() =>
+        {
+            using (HotkeyManager.RegisterScope(owner))
+                workspace.BindHotkey(ConsoleKey.F13, description: "pending owner");
+            return HotkeyManager.UnregisterByOwner(owner);
+        });
+
+        Assert.Equal(2, canceled);
+        await host.FlushAsync();
+        Assert.DoesNotContain(
+            (ConsoleKey.F13, ConsoleModifiers.None),
+            HotkeyManager.Hotkeys.Keys);
+        await host.HandleCommandAsync("/workspace");
+        await terminal.RedrawAsync();
+        Assert.DoesNotContain(
+            $"{workspace.Title} [F13]",
+            await terminal.CaptureScreenAsync(),
+            StringComparison.Ordinal);
+
+        await terminal.InvokeAsync(() =>
+        {
+            using (HotkeyManager.RegisterScope(owner))
+                workspace.BindHotkey(ConsoleKey.F13, description: "reused owner");
+        });
+        await host.FlushAsync();
+
+        Assert.Same(
+            owner,
+            HotkeyManager.Hotkeys[(ConsoleKey.F13, ConsoleModifiers.None)].Owner);
+        await host.HandleCommandAsync("/workspace");
+        await terminal.RedrawAsync();
+        Assert.Contains(
+            $"{workspace.Title} [F13]",
+            await terminal.CaptureScreenAsync(),
+            StringComparison.Ordinal);
+        Assert.Equal(1, HotkeyManager.UnregisterByOwner(owner));
+    }
+
+    [Fact]
+    public async Task WorkspaceHotkeyReplacementKeepsActualAndMetadataInSync()
+    {
+        var first = CreateWorkspace("Replacement first");
+        var second = CreateWorkspace("Replacement second");
+        var firstOwner = new object();
+        using (HotkeyManager.RegisterScope(firstOwner))
+            first.BindHotkey(ConsoleKey.F14, description: "first owner");
+        await host.FlushAsync();
+        var firstEntry = HotkeyManager.Hotkeys[
+            (ConsoleKey.F14, ConsoleModifiers.None)];
+
+        var rollbackOwner = new object();
+        HotkeyManager.HotkeyEntry rollbackEntry;
+        using (HotkeyManager.RegisterScope(rollbackOwner))
+        {
+            rollbackEntry = HotkeyManager.CaptureTracked(
+                "rollback owner",
+                () => Task.CompletedTask);
+        }
+        var displaced = HotkeyManager.RegisterTracked(
+            ConsoleKey.F14,
+            ConsoleModifiers.None,
+            rollbackEntry);
+        Assert.Equal(1, HotkeyManager.UnregisterByOwner(rollbackOwner));
+        HotkeyManager.RestoreTracked(
+            ConsoleKey.F14,
+            ConsoleModifiers.None,
+            rollbackEntry,
+            displaced);
+        Assert.Same(
+            firstEntry,
+            HotkeyManager.Hotkeys[(ConsoleKey.F14, ConsoleModifiers.None)]);
+
+        HotkeyManager.HotkeyEntry sameOwnerPublicationEntry;
+        using (HotkeyManager.RegisterScope(firstOwner))
+        {
+            sameOwnerPublicationEntry = HotkeyManager.CaptureTracked(
+                "same owner publication rollback",
+                () => Task.CompletedTask);
+        }
+        var sameOwnerPublicationDisplaced = HotkeyManager.RegisterTracked(
+            ConsoleKey.F14,
+            ConsoleModifiers.None,
+            sameOwnerPublicationEntry);
+        HotkeyManager.RestoreTracked(
+            ConsoleKey.F14,
+            ConsoleModifiers.None,
+            sameOwnerPublicationEntry,
+            sameOwnerPublicationDisplaced);
+        Assert.Same(
+            firstEntry,
+            HotkeyManager.Hotkeys[(ConsoleKey.F14, ConsoleModifiers.None)]);
+        await host.HandleCommandAsync("/workspace");
+        await terminal.RedrawAsync();
+        Assert.Contains(
+            $"{first.Title} [F14]",
+            await terminal.CaptureScreenAsync(),
+            StringComparison.Ordinal);
+
+        HotkeyManager.HotkeyEntry sameOwnerEntry;
+        using (HotkeyManager.RegisterScope(firstOwner))
+        {
+            sameOwnerEntry = HotkeyManager.CaptureTracked(
+                "same owner rollback",
+                () => Task.CompletedTask);
+        }
+        var sameOwnerDisplaced = HotkeyManager.RegisterTracked(
+            ConsoleKey.F14,
+            ConsoleModifiers.None,
+            sameOwnerEntry);
+        Assert.NotNull(sameOwnerDisplaced);
+        Assert.Equal(1, HotkeyManager.UnregisterByOwner(firstOwner));
+        HotkeyManager.RestoreTracked(
+            ConsoleKey.F14,
+            ConsoleModifiers.None,
+            sameOwnerEntry,
+            sameOwnerDisplaced);
+        Assert.DoesNotContain(
+            (ConsoleKey.F14, ConsoleModifiers.None),
+            HotkeyManager.Hotkeys.Keys);
+        await host.HandleCommandAsync("/workspace");
+        await terminal.RedrawAsync();
+        Assert.DoesNotContain(
+            $"{first.Title} [F14]",
+            await terminal.CaptureScreenAsync(),
+            StringComparison.Ordinal);
+
+        using (HotkeyManager.RegisterScope(firstOwner))
+            first.BindHotkey(ConsoleKey.F14, description: "same owner rebound");
+        await host.FlushAsync();
+        Assert.Same(
+            firstOwner,
+            HotkeyManager.Hotkeys[(ConsoleKey.F14, ConsoleModifiers.None)].Owner);
+
+        using (HotkeyManager.RegisterScope(new InactiveHotkeyOwner()))
+            second.BindHotkey(ConsoleKey.F14, description: "rejected owner");
+        await host.FlushAsync();
+        Assert.Same(
+            firstOwner,
+            HotkeyManager.Hotkeys[(ConsoleKey.F14, ConsoleModifiers.None)].Owner);
+
+        var secondOwner = new object();
+        using (HotkeyManager.RegisterScope(secondOwner))
+            second.BindHotkey(ConsoleKey.F14, description: "second owner");
+        await host.FlushAsync();
+        Assert.Same(
+            secondOwner,
+            HotkeyManager.Hotkeys[(ConsoleKey.F14, ConsoleModifiers.None)].Owner);
+
+        await host.HandleCommandAsync("/workspace");
+        await terminal.RedrawAsync();
+        var replacedScreen = await terminal.CaptureScreenAsync();
+        Assert.DoesNotContain($"{first.Title} [F14]", replacedScreen, StringComparison.Ordinal);
+        Assert.Contains($"{second.Title} [F14]", replacedScreen, StringComparison.Ordinal);
+
+        Assert.Equal(1, HotkeyManager.UnregisterByOwner(secondOwner));
+        await host.HandleCommandAsync("/workspace");
+        await terminal.RedrawAsync();
+        var cleanedScreen = await terminal.CaptureScreenAsync();
+        Assert.DoesNotContain($"{first.Title} [F14]", cleanedScreen, StringComparison.Ordinal);
+        Assert.DoesNotContain($"{second.Title} [F14]", cleanedScreen, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task WorkspaceCommand_CompletesAndSelectsCanonicalWorkspace()
     {
         var first = CreateWorkspace("Command First");
@@ -472,8 +680,80 @@ public sealed class UiHostRenderTests : IDisposable
         {
             bootstrap.Dispose();
         }
+    }
 
-        Assert.Null(TerminalUi.DefaultExceptionWorkspace);
+    [Fact]
+    public async Task GlobalAndWorkspaceLogsRetainLatestThreeHundredPerReferenceGeneration()
+    {
+        var workspace = CreateWorkspace("Log retention");
+        for (var index = 0; index < 302; index++)
+        {
+            TerminalUi.Log("Retention", $"global-{index:D3}");
+            workspace.Log($"scoped-{index:D3}", UiSeverity.Warning);
+        }
+        await host.FlushAsync();
+
+        var global = await terminal.InvokeAsync(() => host.GetLogsForTests(null));
+        var scoped = await terminal.InvokeAsync(() => host.GetLogsForTests(workspace));
+        Assert.Equal(300, global.Count);
+        Assert.Equal("[Retention] global-002", global[0].Text);
+        Assert.Equal("[Retention] global-301", global[^1].Text);
+        Assert.All(global, line => Assert.Null(line.Workspace));
+        Assert.Equal(300, scoped.Count);
+        Assert.Equal("scoped-002", scoped[0].Text);
+        Assert.Equal("scoped-301", scoped[^1].Text);
+        Assert.All(scoped, line => Assert.Same(workspace, line.Workspace));
+
+        host.RemoveWorkspace(workspace);
+        ownedWorkspaces.Remove(workspace);
+        await host.FlushAsync();
+        Assert.Empty(await terminal.InvokeAsync(() => host.GetLogsForTests(workspace)));
+    }
+
+    [Fact]
+    public async Task RemovedBootstrapStopsRenderingLaterGlobalDiagnostics()
+    {
+        using var bootstrap = new BootstrapWorkspace(host);
+        var survivor = CreateWorkspace("Bootstrap survivor");
+        host.SetPanel(
+            survivor,
+            "main",
+            "main",
+            WorkspaceContent.Text("BootstrapSurvivorBody"),
+            fullBleed: true,
+            switchToWorkspace: true);
+        await host.FlushAsync();
+
+        bootstrap.Workspace.Remove();
+        TerminalUi.Log("Bootstrap", "global-after-bootstrap-removal");
+        TerminalUi.LogException(
+            "Bootstrap",
+            new InvalidOperationException("error-after-bootstrap-removal"));
+        bootstrap.Log("Bootstrap", "bootstrap-facade-after-removal");
+        Assert.Throws<InvalidOperationException>(() =>
+            bootstrap.SetPhase("host", "宿主", UiSeverity.Error, "removed"));
+        await host.HandleCommandAsync("/workspace switch \"unterminated");
+        await host.FlushAsync();
+        await terminal.RedrawAsync();
+
+        Assert.Same(survivor, Workspace.Current);
+        var screen = await terminal.CaptureScreenAsync();
+        Assert.Contains("BootstrapSurvivorBody", screen, StringComparison.Ordinal);
+        Assert.DoesNotContain("after-bootstrap-removal", screen, StringComparison.Ordinal);
+        Assert.Contains(
+            await terminal.InvokeAsync(() => host.GetLogsForTests(null)),
+            line => line.Text.Contains("error-after-bootstrap-removal", StringComparison.Ordinal));
+
+        bootstrap.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => bootstrap.SetSettings([]));
+    }
+
+    sealed class InactiveHotkeyOwner : IPlugin
+    {
+        public string Name => nameof(InactiveHotkeyOwner);
+        public string Author => "Test";
+        public string[] Targets => [];
+        public void Initialize(IPluginContext context) { }
     }
 
     Workspace CreateWorkspace(string title)
@@ -568,6 +848,27 @@ public sealed class UiHostShutdownProcessTests
             "primary-and-shutdown-failure",
             nameof(PrimaryAndShutdownFailuresAreAggregated),
             RunAggregatedFailureAsync);
+
+    [Fact]
+    public Task ApplyFailureAbandonsAcceptedFlushAndStopsWithoutHanging()
+        => RunScenarioAsync(
+            "apply-failure-abandons-flush",
+            nameof(ApplyFailureAbandonsAcceptedFlushAndStopsWithoutHanging),
+            RunApplyFailureAsync);
+
+    [Fact]
+    public Task CommandPrimarySurvivesReportingFailureAndShutdown()
+        => RunScenarioAsync(
+            "command-primary-reporting-failure",
+            nameof(CommandPrimarySurvivesReportingFailureAndShutdown),
+            RunCommandPrimaryFailureAsync);
+
+    [Fact]
+    public Task PluginHotkeyPendingBeforeRunIsNotRegisteredAfterGenerationCloses()
+        => RunScenarioAsync(
+            "pending-plugin-hotkey-generation-close",
+            nameof(PluginHotkeyPendingBeforeRunIsNotRegisteredAfterGenerationCloses),
+            RunPendingPluginHotkeyAsync);
 
     static async Task RunScenarioAsync(
         string scenario,
@@ -760,6 +1061,120 @@ public sealed class UiHostShutdownProcessTests
                 StringComparison.Ordinal));
     }
 
+    static async Task RunApplyFailureAsync()
+    {
+        using var terminal = new TerminalGuiTestApp();
+        var host = TerminalUiLifecycleChildProcess.InitializeHost(terminal, CancellationToken.None);
+        var workspace = Workspace.Create("Apply failure");
+        var panelReconciled = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        host.SetPanel(
+            workspace,
+            "prefix",
+            "prefix",
+            new WorkspaceContent(() =>
+            {
+                panelReconciled.TrySetResult();
+                return new Label { Text = "reconciled-prefix" };
+            }),
+            fullBleed: true,
+            switchToWorkspace: true);
+        host.LogAdded += _ => throw new InvalidOperationException("apply-log-failure");
+        workspace.Log("will fail");
+        var flush = host.FlushAsync();
+        host.RequestShutdown();
+
+        var start = terminal.StartAsync(host);
+        var flushFailure = await Record.ExceptionAsync(async () =>
+            await flush.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.True(panelReconciled.Task.IsCompletedSuccessfully);
+        Assert.Contains(
+            "apply-log-failure",
+            Assert.IsType<InvalidOperationException>(flushFailure).Message);
+
+        var runFailure = await Record.ExceptionAsync(async () =>
+        {
+            var run = await start;
+            await run.WaitAsync(TimeSpan.FromSeconds(5));
+        });
+
+        Assert.Contains(
+            "apply-log-failure",
+            Assert.IsType<InvalidOperationException>(runFailure).Message);
+        Assert.Empty(host.GetLogsForTests(workspace));
+    }
+
+    static async Task RunCommandPrimaryFailureAsync()
+    {
+        var originalCwd = Directory.GetCurrentDirectory();
+        var tempDir = Path.Combine(
+            Path.GetTempPath(),
+            "ura-command-primary-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(tempDir, "Plugins"));
+        Directory.SetCurrentDirectory(tempDir);
+        try
+        {
+            const string pluginName = "CommandPrimaryFailure";
+            PluginCompiler.Compile(
+                CommandPrimaryFailurePluginSource(pluginName),
+                pluginName,
+                Path.Combine(tempDir, "Plugins", $"{pluginName}.dll"));
+
+            using var terminal = new TerminalGuiTestApp();
+            var host = TerminalUiLifecycleChildProcess.InitializeHost(
+                terminal,
+                CancellationToken.None);
+            PluginManager.Init();
+            PluginManager.InitializeLoadedPlugins();
+            var pluginType = Assert.Single(PluginManager.LoadedPlugins).GetType();
+            host.LogAdded += line =>
+            {
+                if (line.Text == "command-primary-trigger")
+                    throw new InvalidOperationException("command-primary-trigger");
+            };
+
+            var run = await terminal.StartAsync(host);
+            var command = host.HandleCommandAsync($"/plugin unload {pluginName}");
+            var disposeEntered = (bool)(await Task.Run(() => pluginType
+                .GetMethod("WaitUntilDisposing")!
+                .Invoke(null, null)))!;
+            pluginType.GetMethod("ReleaseDispose")!.Invoke(null, null);
+            Assert.True(disposeEntered);
+
+            var commandFailure = await Record.ExceptionAsync(async () =>
+                await command.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.False(commandFailure is TimeoutException);
+
+            var runFailure = await Record.ExceptionAsync(async () =>
+                await run.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.Equal("command-primary-trigger", runFailure?.Message);
+        }
+        finally
+        {
+            Directory.SetCurrentDirectory(originalCwd);
+            try { Directory.Delete(tempDir, recursive: true); } catch { }
+        }
+    }
+
+    static async Task RunPendingPluginHotkeyAsync()
+    {
+        using var terminal = new TerminalGuiTestApp();
+        var host = TerminalUiLifecycleChildProcess.InitializeHost(terminal, CancellationToken.None);
+        HotkeyManager.OverlaySink = host;
+        var workspace = Workspace.Create("Pending plugin hotkey");
+        var plugin = new PendingWorkspaceHotkeyPlugin(workspace);
+        PluginManager.LoadedPlugins.Add(plugin);
+        PluginManager.InitializePlugin(plugin);
+
+        host.RequestShutdown();
+        var run = await terminal.StartAsync(host);
+        await run.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.DoesNotContain(
+            (ConsoleKey.F19, ConsoleModifiers.None),
+            HotkeyManager.Hotkeys.Keys);
+    }
+
     static (UiHost Host, FirstPostSynchronizationContext OwnerContext)
         InitializeHostWithObservedPosts(TerminalGuiTestApp terminal)
     {
@@ -782,6 +1197,36 @@ public sealed class UiHostShutdownProcessTests
         });
         return (host!, ownerContext!);
     }
+
+    static string CommandPrimaryFailurePluginSource(string pluginName)
+        => $$"""
+            using System;
+            using System.Threading;
+            using UmamusumeResponseAnalyzer.Plugin;
+            using UmamusumeResponseAnalyzer.TerminalGui;
+
+            public sealed class {{pluginName}} : IPlugin
+            {
+                static readonly ManualResetEventSlim Disposing = new();
+                static readonly ManualResetEventSlim Release = new();
+
+                public string Name => "{{pluginName}}";
+                public string Author => "Test";
+                public string[] Targets => Array.Empty<string>();
+                public void Initialize(IPluginContext context) { }
+                public static bool WaitUntilDisposing()
+                    => Disposing.Wait(TimeSpan.FromSeconds(5));
+                public static void ReleaseDispose() => Release.Set();
+                public void Dispose()
+                {
+                    Disposing.Set();
+                    if (!Release.Wait(TimeSpan.FromSeconds(5)))
+                        throw new TimeoutException("Dispose was not released.");
+                    Workspace.Create("Command primary failure")
+                        .Log("command-primary-trigger");
+                }
+            }
+            """;
 
     sealed class ShutdownWorkspacePlugin(Workspace workspace) : IPlugin
     {
@@ -864,6 +1309,18 @@ public sealed class UiHostShutdownProcessTests
 
         public void Dispose()
             => throw new InvalidOperationException("shutdown-cleanup-failure");
+    }
+
+    sealed class PendingWorkspaceHotkeyPlugin(Workspace workspace) : IPlugin
+    {
+        public string Name => nameof(PendingWorkspaceHotkeyPlugin);
+        public string Author => "Test";
+        public string[] Targets => [];
+
+        public void Initialize(IPluginContext context)
+            => workspace.BindHotkey(
+                ConsoleKey.F19,
+                description: "pending plugin workspace");
     }
 
     sealed class FirstPostSynchronizationContext(SynchronizationContext owner)

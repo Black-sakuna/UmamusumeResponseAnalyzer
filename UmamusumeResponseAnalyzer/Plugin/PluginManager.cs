@@ -73,15 +73,6 @@ namespace UmamusumeResponseAnalyzer.Plugin
         }
     }
 
-    internal sealed record PluginRuntimeStatus(
-        string InternalName,
-        string DisplayName,
-        string Author,
-        Version? Version,
-        bool IsLoaded,
-        bool IsAvailable,
-        bool LoadInHost);
-
     sealed class PluginGeneration(IPlugin plugin)
     {
         readonly object gate = new();
@@ -382,18 +373,9 @@ namespace UmamusumeResponseAnalyzer.Plugin
             }
             catch (Exception ex)
             {
-                var exceptionType = ex.GetType().FullName ?? ex.GetType().Name;
-                string message;
-                try { message = ex.Message; }
-                catch (Exception messageError)
-                {
-                    var messageErrorType = messageError.GetType().FullName ?? messageError.GetType().Name;
-                    message = $"<读取 Message 失败: {messageErrorType}>";
-                }
-
                 var failure = new InvalidOperationException(
                     $"插件路由处理失败: plugin={PluginManager.InternalName(Plugin)}, path={Path}, " +
-                    $"exception={exceptionType}, message={message}");
+                    PluginManager.DescribeException(ex));
                 if (PluginManager.ReportPluginFailure("Plugin", failure) is { } diagnosticsError)
                     throw new AggregateException("插件路由处理及 diagnostics 失败。", failure, diagnosticsError);
                 throw failure;
@@ -451,6 +433,15 @@ namespace UmamusumeResponseAnalyzer.Plugin
         public sealed record PluginLifecycleResult(
             string PluginName,
             PluginLifecycleOutcome Outcome);
+
+        internal sealed record PluginRuntimeStatus(
+            string InternalName,
+            string DisplayName,
+            string Author,
+            Version? Version,
+            bool IsLoaded,
+            bool IsAvailable,
+            bool LoadInHost);
 
         internal static Dictionary<string, PluginMetadata> Metadatas { get; } = [];
         internal static Dictionary<string, PluginMetadata> AssemblyMetadatas { get; } = [];
@@ -520,6 +511,18 @@ namespace UmamusumeResponseAnalyzer.Plugin
             return inspection;
         }
 
+        internal static string DescribeException(Exception exception)
+        {
+            var exceptionType = exception.GetType().FullName ?? exception.GetType().Name;
+            string message;
+            try { message = exception.Message; }
+            catch (Exception error)
+            {
+                message = $"<读取 Message 失败: {error.GetType().FullName ?? error.GetType().Name}>";
+            }
+            return $"exception={exceptionType}, message={message}";
+        }
+
         internal static Exception? ReportPluginFailure(string source, InvalidOperationException failure)
         {
             Exception? notificationError = null;
@@ -549,16 +552,20 @@ namespace UmamusumeResponseAnalyzer.Plugin
             }
         }
 
-        internal static IDisposable EnterPluginRegistration(IPlugin plugin)
+        internal static IDisposable? TryEnterPluginRegistration(IPlugin plugin)
         {
             if (!IsShuttingDown() &&
                 PluginGenerations.TryGetValue(plugin, out var generation) &&
                 generation.TryEnterRegistration(out var registration))
                 return registration!;
 
-            throw new InvalidOperationException(
-                $"插件已卸载或 generation 不接受注册: {InternalName(plugin)}");
+            return null;
         }
+
+        internal static IDisposable EnterPluginRegistration(IPlugin plugin)
+            => TryEnterPluginRegistration(plugin)
+               ?? throw new InvalidOperationException(
+                   $"插件已卸载或 generation 不接受注册: {InternalName(plugin)}");
 
         static bool IsShuttingDown()
         {
@@ -593,7 +600,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
 
         internal static IReadOnlyList<PluginRuntimeStatus> SnapshotPluginStatuses()
         {
-            var scanned = ScanPluginMetadataForStatus();
+            var (scanned, _) = ScanPluginMetadata();
             IPlugin[] loaded;
             PluginMetadata[] known;
             EnterStateRead();
@@ -638,17 +645,8 @@ namespace UmamusumeResponseAnalyzer.Plugin
                         }
                         catch (Exception ex)
                         {
-                            var exceptionType = ex.GetType().FullName ?? ex.GetType().Name;
-                            string message;
-                            try { message = ex.Message; }
-                            catch (Exception messageError)
-                            {
-                                var messageErrorType = messageError.GetType().FullName ?? messageError.GetType().Name;
-                                message = $"<读取 Message 失败: {messageErrorType}>";
-                            }
-
                             var failure = new InvalidOperationException(
-                                $"读取插件状态失败: plugin={name}, exception={exceptionType}, message={message}");
+                                $"读取插件状态失败: plugin={name}, {DescribeException(ex)}");
                             _ = ReportPluginFailure("Plugin", failure);
                         }
                     }
@@ -1859,14 +1857,6 @@ namespace UmamusumeResponseAnalyzer.Plugin
             return (scanned, assemblies);
         }
 
-        static Dictionary<string, PluginMetadata> ScanPluginMetadataForStatus()
-        {
-            Dictionary<string, PluginMetadata> scanned = [];
-            Dictionary<string, PluginMetadata> assemblies = [];
-            ScanAll(scanned, assemblies);
-            return scanned;
-        }
-
         static List<string> BuildReloadOrder(IReadOnlyList<string> requested, IReadOnlyDictionary<string, PluginMetadata> scanned)
         {
             var ordered = new List<string>();
@@ -2440,18 +2430,9 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 }
                 catch (Exception ex)
                 {
-                    var exceptionType = ex.GetType().FullName ?? ex.GetType().Name;
-                    string message;
-                    try { message = ex.Message; }
-                    catch (Exception messageError)
-                    {
-                        var messageErrorType = messageError.GetType().FullName ?? messageError.GetType().Name;
-                        message = $"<读取 Message 失败: {messageErrorType}>";
-                    }
-
                     failures.Add(new InvalidOperationException(
                         $"插件清理失败: plugin={pluginName}, phase=Dispose, " +
-                        $"exception={exceptionType}, message={message}"));
+                        DescribeException(ex)));
                 }
             }
 

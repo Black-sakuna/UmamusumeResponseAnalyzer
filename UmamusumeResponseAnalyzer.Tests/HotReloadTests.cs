@@ -562,6 +562,13 @@ namespace UmamusumeResponseAnalyzer.Tests
             PluginManager.Init();
             Assert.False(Server.IsRunning, "前置条件:快捷键热重载发生在 HTTP server 启动前");
             PluginManager.InitializeLoadedPlugins();
+            var firstPlugin = Assert.Single(
+                PluginManager.SnapshotLoadedPlugins(),
+                plugin => PluginManager.InternalName(plugin) == pluginName);
+            await runtime.Host.FlushAsync();
+            Assert.Same(
+                firstPlugin,
+                HotkeyManager.Hotkeys[(ConsoleKey.F6, ConsoleModifiers.None)].Owner);
             var oldContext = new WeakReference(PluginManager.Contexts[pluginName]);
             HotkeyManager.HandleKeyAsync(Key.F8).GetAwaiter().GetResult();
             HotkeyManager.HandleKeyAsync(Key.F7).GetAwaiter().GetResult();
@@ -573,6 +580,13 @@ namespace UmamusumeResponseAnalyzer.Tests
             AssertLifecycleOutcome(await PluginManager.ReloadPluginsAsync(pluginName), pluginName, PluginManager.PluginLifecycleOutcome.Succeeded);
 
             await runtime.Host.FlushAsync();
+            var reloadedPlugin = Assert.Single(
+                PluginManager.SnapshotLoadedPlugins(),
+                plugin => PluginManager.InternalName(plugin) == pluginName);
+            Assert.NotSame(firstPlugin, reloadedPlugin);
+            Assert.Same(
+                reloadedPlugin,
+                HotkeyManager.Hotkeys[(ConsoleKey.F6, ConsoleModifiers.None)].Owner);
             await runtime.Terminal.WaitForScreenAsync("v2-notification-visible");
             HotkeyManager.HandleKeyAsync(Key.F8).GetAwaiter().GetResult();
             HotkeyManager.HandleKeyAsync(Key.F7).GetAwaiter().GetResult();
@@ -585,6 +599,9 @@ namespace UmamusumeResponseAnalyzer.Tests
             Assert.Equal(0, persistentInvocations);
 
             AssertLifecycleOutcome(await PluginManager.UnloadPluginsAsync(pluginName), pluginName, PluginManager.PluginLifecycleOutcome.Succeeded);
+            Assert.DoesNotContain(
+                (ConsoleKey.F6, ConsoleModifiers.None),
+                HotkeyManager.Hotkeys.Keys);
             HotkeyManager.HandleKeyAsync(Key.F8).GetAwaiter().GetResult();
             Assert.Equal(1, persistentInvocations);
             return oldContext;
@@ -706,6 +723,7 @@ namespace UmamusumeResponseAnalyzer.Tests
                         public void Initialize(IPluginContext context)
                         {
                             var workspace = Workspace.Create("Transient shortcut");
+                            workspace.BindHotkey(ConsoleKey.F6, description: "{{marker}} workspace");
                             workspace.Notify(
                                 "{{marker}}-notification-visible",
                                 ttl: TimeSpan.FromMinutes(5),

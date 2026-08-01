@@ -133,12 +133,52 @@ public static class HotkeyManager
         Func<HotkeyContext, Task> handler)
         => RegisterCore(key, 0, description, CreateContextHandler(handler));
 
-    internal static HotkeyEntry RegisterTracked(
-        ConsoleKey key,
-        ConsoleModifiers modifiers,
+    internal static HotkeyEntry CaptureTracked(
         string description,
         Func<Task> handler)
-        => RegisterCore(key, modifiers, description, handler);
+        => new(description, handler, registrationOwner.Value);
+
+    internal static HotkeyEntry? RegisterTracked(
+        ConsoleKey key,
+        ConsoleModifiers modifiers,
+        HotkeyEntry entry)
+    {
+        lock (stateGate)
+        {
+            var combo = (key, modifiers);
+            hotkeys.Remove(combo, out var replaced);
+            hotkeys.Add(combo, entry);
+            return replaced;
+        }
+    }
+
+    internal static void RestoreTracked(
+        ConsoleKey key,
+        ConsoleModifiers modifiers,
+        HotkeyEntry entry,
+        HotkeyEntry? replaced)
+    {
+        lock (stateGate)
+        {
+            var combo = (key, modifiers);
+            if (!hotkeys.TryGetValue(combo, out var registered))
+            {
+                if (replaced is not null &&
+                    !ReferenceEquals(replaced.Owner, entry.Owner))
+                {
+                    hotkeys.Add(combo, replaced);
+                }
+                return;
+            }
+            if (!ReferenceEquals(registered, entry))
+                return;
+
+            if (replaced is null)
+                hotkeys.Remove(combo);
+            else
+                hotkeys[combo] = replaced;
+        }
+    }
 
     static Func<Task> CreateContextHandler(Func<HotkeyContext, Task> handler)
     {
@@ -209,9 +249,13 @@ public static class HotkeyManager
 
     public static int UnregisterByOwner(object owner)
     {
+        UiHost? host;
+        lock (stateGate)
+            host = overlaySink as UiHost;
+
+        var count = host?.RemoveWorkspaceHotkeysByOwner(owner) ?? 0;
         lock (stateGate)
         {
-            var count = 0;
             foreach (var combo in hotkeys
                 .Where(x => ReferenceEquals(x.Value.Owner, owner))
                 .Select(x => x.Key)
@@ -243,9 +287,9 @@ public static class HotkeyManager
                     PopupTransitionKind.ReplaceShortcuts,
                     shortcuts: popupShortcuts);
             }
-
-            return count;
         }
+
+        return count;
     }
 
     public static IReadOnlyDictionary<(ConsoleKey Key, ConsoleModifiers Modifiers), HotkeyEntry> Hotkeys

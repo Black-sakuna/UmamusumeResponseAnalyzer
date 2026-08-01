@@ -13,11 +13,15 @@ namespace UmamusumeResponseAnalyzer.Tests;
 [Collection("PluginReload")]
 public sealed class PluginCommandLifecycleTests : IDisposable
 {
+    readonly TerminalGuiTestApp terminal;
+    readonly UiHost host;
     readonly string originalCwd;
     readonly string tempDir;
 
     public PluginCommandLifecycleTests(PluginRuntimeFixture runtime)
     {
+        terminal = runtime.Terminal;
+        host = runtime.Host;
         SeedConfig();
         ResetPluginState();
         HotkeyManager.UnregisterAll();
@@ -168,6 +172,64 @@ public sealed class PluginCommandLifecycleTests : IDisposable
     }
 
     [Fact]
+    public async Task BlockingPluginCommandKeepsOwnerResponsiveAndPublishesInOrder()
+    {
+        const string pluginName = "BlockingCommand";
+        PluginCompiler.Compile(
+            BlockingPluginSource(pluginName),
+            pluginName,
+            Path.Combine(tempDir, "Plugins", $"{pluginName}.dll"));
+        PluginManager.Init();
+        PluginManager.InitializeLoadedPlugins();
+        var plugin = Assert.Single(
+            PluginManager.SnapshotLoadedPlugins(),
+            candidate => PluginManager.InternalName(candidate) == pluginName);
+        var pluginType = plugin.GetType();
+        pluginType.GetMethod("BlockStatus")!.Invoke(null, null);
+
+        var list = host.HandleCommandAsync("/plugin list");
+        Assert.True((bool)pluginType.GetMethod("WaitUntilBlocked")!.Invoke(
+            null,
+            [TimeSpan.FromSeconds(5)])!);
+        var switchWorkspace = host.HandleCommandAsync(
+            "/workspace switch \"Queued snapshot target\"");
+        Assert.False(switchWorkspace.IsCompleted);
+        var target = Workspace.Create("Queued snapshot target");
+        var workspace = Workspace.Create("Responsive command owner");
+        try
+        {
+            await terminal.InvokeAsync(() => workspace.SetPanel(
+                "responsive",
+                "responsive",
+                WorkspaceContent.Text("OwnerResponsiveWhileCommandBlocked"),
+                fullBleed: true,
+                switchToWorkspace: true));
+            await host.FlushAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            await terminal.WaitForScreenAsync("OwnerResponsiveWhileCommandBlocked");
+
+            pluginType.GetMethod("ReleaseStatus")!.Invoke(null, null);
+            await Task.WhenAll(list, switchWorkspace).WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Same(target, Workspace.Current);
+
+            await host.HandleCommandAsync($"/plugin unload {pluginName}")
+                .WaitAsync(TimeSpan.FromSeconds(5));
+            await host.FlushAsync();
+            await terminal.WaitForScreenAsync($"{pluginName} 已卸载");
+        }
+        finally
+        {
+            pluginType.GetMethod("ReleaseStatus")!.Invoke(null, null);
+            workspace.Remove();
+            target.Remove();
+            await host.FlushAsync();
+        }
+
+        Assert.DoesNotContain(
+            PluginManager.SnapshotLoadedPlugins(),
+            plugin => PluginManager.InternalName(plugin) == pluginName);
+    }
+
+    [Fact]
     public async Task StartedPhaseDeliversOnceAcrossPreGlobalLoadAndPostGlobalReload()
     {
         const string pluginName = "StartedPhasePlugin";
@@ -295,6 +357,40 @@ public sealed class PluginCommandLifecycleTests : IDisposable
             }
             """;
     }
+
+    static string BlockingPluginSource(string pluginName)
+        => $$"""
+            using System;
+            using System.Threading;
+            using UmamusumeResponseAnalyzer.Plugin;
+
+            public sealed class {{pluginName}} : IPlugin
+            {
+                static readonly ManualResetEventSlim Entered = new();
+                static readonly ManualResetEventSlim Release = new();
+                static volatile bool block;
+
+                public string Name
+                {
+                    get
+                    {
+                        if (block)
+                        {
+                            Entered.Set();
+                            Release.Wait();
+                        }
+                        return "{{pluginName}}";
+                    }
+                }
+                public string Author => "Test";
+                public string[] Targets => Array.Empty<string>();
+
+                public void Initialize(IPluginContext context) { }
+                public static void BlockStatus() => block = true;
+                public static bool WaitUntilBlocked(TimeSpan timeout) => Entered.Wait(timeout);
+                public static void ReleaseStatus() => Release.Set();
+            }
+            """;
 
     static void ResetPluginState()
     {

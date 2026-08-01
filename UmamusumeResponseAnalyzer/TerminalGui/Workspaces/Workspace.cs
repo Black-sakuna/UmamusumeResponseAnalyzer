@@ -12,6 +12,8 @@ public sealed class Workspace
 
     public string Title { get; }
 
+    internal bool IsRemoved { get; set; }
+
     public static Workspace? Current => TerminalUi.RequireHost().GetCurrentWorkspace();
 
     public static Workspace Create(string title)

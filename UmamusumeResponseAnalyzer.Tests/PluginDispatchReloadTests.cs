@@ -156,7 +156,7 @@ public sealed class PluginDispatchReloadTests : IDisposable
         Exception? observationError = null;
         Exception? lateDispatchError = null;
         string[] callbacksWhileDisposing = [];
-        PluginRuntimeStatus? statusWhileDisposing = null;
+        PluginManager.PluginRuntimeStatus? statusWhileDisposing = null;
         string[] statusGettersWhileDisposing = [];
         try
         {

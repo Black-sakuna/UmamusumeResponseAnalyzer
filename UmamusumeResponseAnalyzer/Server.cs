@@ -446,19 +446,10 @@ namespace UmamusumeResponseAnalyzer
             catch (Exception e)
             {
                 var root = e is TargetInvocationException { InnerException: { } inner } ? inner : e;
-                var exceptionType = root.GetType().FullName ?? root.GetType().Name;
-                string message;
-                try { message = root.Message; }
-                catch (Exception messageError)
-                {
-                    var messageErrorType = messageError.GetType().FullName ?? messageError.GetType().Name;
-                    message = $"<读取 Message 失败: {messageErrorType}>";
-                }
-
                 var label = kind == AnalyzerKind.Request ? "请求" : "响应";
                 var failure = new InvalidOperationException(
                     $"{label}分析插件处理失败: plugin={PluginManager.InternalName(registration.Plugin)}, " +
-                    $"exception={exceptionType}, message={message}");
+                    PluginManager.DescribeException(root));
                 _ = PluginManager.ReportPluginFailure(
                     registration.Method?.DeclaringType?.Name ?? registration.Source,
                     failure);

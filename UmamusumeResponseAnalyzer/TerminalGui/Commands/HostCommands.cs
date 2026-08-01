@@ -20,7 +20,7 @@ internal static class HostCommands
     internal sealed record Snapshot(
         IReadOnlyList<WorkspaceItem> Workspaces,
         Workspace? CurrentWorkspace,
-        IReadOnlyList<PluginRuntimeStatus> Plugins)
+        IReadOnlyList<PluginManager.PluginRuntimeStatus> Plugins)
     {
         internal static Snapshot Empty { get; } = new([], null, []);
     }
@@ -267,7 +267,7 @@ internal static class HostCommands
         return new(Display: new("Workspaces", items, selectedIndex));
     }
 
-    static Result ShowPlugins(IReadOnlyList<PluginRuntimeStatus> plugins)
+    static Result ShowPlugins(IReadOnlyList<PluginManager.PluginRuntimeStatus> plugins)
     {
         if (plugins.Count == 0)
             return new(Display: new("Plugins", [new("（没有已知插件）")]));
@@ -353,7 +353,7 @@ internal static class HostCommands
 
     static IReadOnlyList<string> CompletePluginCommand(
         string rest,
-        IReadOnlyList<PluginRuntimeStatus> plugins)
+        IReadOnlyList<PluginManager.PluginRuntimeStatus> plugins)
     {
         var subcommandSpaceIndex = rest.IndexOf(' ');
         if (subcommandSpaceIndex < 0)

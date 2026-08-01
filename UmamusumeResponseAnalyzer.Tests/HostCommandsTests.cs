@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using UmamusumeResponseAnalyzer.Commands;
 using UmamusumeResponseAnalyzer.Plugin;
 using UmamusumeResponseAnalyzer.TerminalGui;
@@ -111,6 +112,29 @@ public sealed class HostCommandsTests
     }
 
     [Fact]
+    public void RemovedWorkspaceIsNotRetainedByRegistry()
+    {
+        var registry = new WorkspaceRegistry();
+        var removed = CreateAndRemoveWorkspace(registry);
+
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+
+        Assert.False(removed.IsAlive);
+        GC.KeepAlive(registry);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static WeakReference CreateAndRemoveWorkspace(WorkspaceRegistry registry)
+    {
+        var (workspace, _) = registry.Create("Removed");
+        Assert.True(registry.Remove(workspace, out _));
+        Assert.False(registry.Remove(workspace, out _));
+        return new(workspace);
+    }
+
+    [Fact]
     public async Task WorkspaceCommand_PreservesUnquotedInternalSpacesAndQuoteErrors()
     {
         var registry = new WorkspaceRegistry();
@@ -131,7 +155,7 @@ public sealed class HostCommandsTests
     [Fact]
     public async Task PluginListAndNotFound_UseSnapshotDisplayModel()
     {
-        var plugins = new PluginRuntimeStatus[]
+        var plugins = new PluginManager.PluginRuntimeStatus[]
         {
             new("Internal", "显示名", "Author", new(1, 2, 3), true, true, true),
             new("Plain", "Plain", string.Empty, null, false, true, false),
@@ -168,8 +192,8 @@ public sealed class HostCommandsTests
             [new(quoted), new(alpha), new(slash)],
             alpha,
             [
-                new PluginRuntimeStatus("Zulu", "Zulu", string.Empty, null, false, true, false),
-                new PluginRuntimeStatus(
+                new PluginManager.PluginRuntimeStatus("Zulu", "Zulu", string.Empty, null, false, true, false),
+                new PluginManager.PluginRuntimeStatus(
                     "alpha-plugin",
                     "alpha-plugin",
                     string.Empty,

@@ -4,13 +4,6 @@ public static class TerminalUi
 {
     static readonly object initializationGate = new();
     static UiHost? uiHost;
-    static Workspace? defaultExceptionWorkspace;
-
-    internal static Workspace? DefaultExceptionWorkspace
-    {
-        get => Volatile.Read(ref defaultExceptionWorkspace);
-        set => Volatile.Write(ref defaultExceptionWorkspace, value);
-    }
 
     internal static void Initialize(UiHost host)
     {
@@ -85,7 +78,7 @@ public static class TerminalUi
     {
         ArgumentNullException.ThrowIfNull(ex);
         RequireHost().Log(
-            DefaultExceptionWorkspace,
+            null,
             $"[{source}] {FormatExceptionLogMessage(ex)}",
             severity,
             ex.ToString());

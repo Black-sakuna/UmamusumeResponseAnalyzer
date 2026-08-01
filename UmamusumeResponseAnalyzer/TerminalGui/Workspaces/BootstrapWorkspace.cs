@@ -35,7 +35,6 @@ internal sealed class BootstrapWorkspace : IDisposable
         Workspace = global::UmamusumeResponseAnalyzer.TerminalGui.Workspace.Create("启动");
         Workspace.BindHotkey(ConsoleKey.B, ConsoleModifiers.Control, "启动信息");
         uiHost.LogAdded += OnLogAdded;
-        TerminalUi.DefaultExceptionWorkspace = Workspace;
         Refresh();
     }
 
@@ -45,6 +44,7 @@ internal sealed class BootstrapWorkspace : IDisposable
     {
         lock (gate)
         {
+            ThrowIfDisposed();
             settings.Clear();
             settings.AddRange(values);
         }
@@ -54,7 +54,10 @@ internal sealed class BootstrapWorkspace : IDisposable
     public void SetPhase(string key, string label, UiSeverity severity, string detail)
     {
         lock (gate)
+        {
+            ThrowIfDisposed();
             phases[key] = new(label, severity, detail);
+        }
         Refresh();
     }
 
@@ -62,6 +65,7 @@ internal sealed class BootstrapWorkspace : IDisposable
     {
         lock (gate)
         {
+            ThrowIfDisposed();
             plugins.Clear();
             plugins.AddRange(values);
         }
@@ -69,27 +73,47 @@ internal sealed class BootstrapWorkspace : IDisposable
     }
 
     public void Log(string source, string text, UiSeverity severity = UiSeverity.Info)
-        => Workspace.Log($"[{source}] {text}", severity);
+    {
+        lock (gate)
+            ThrowIfDisposed();
+        TerminalUi.Log(source, text, severity);
+    }
 
     void OnLogAdded(UiLogLine line)
     {
-        if (line.Workspace is not null && !ReferenceEquals(line.Workspace, Workspace))
-            return;
-
         lock (gate)
         {
+            if (disposed)
+                return;
+            if (Workspace.IsRemoved)
+            {
+                Dispose();
+                return;
+            }
+            if (line.Workspace is not null && !ReferenceEquals(line.Workspace, Workspace))
+                return;
+
             logs.Add(new(
                 SeverityLabel(line.Severity),
                 line.Text,
                 line.ExceptionDetails));
             if (logs.Count > MaxLogRows)
                 logs.RemoveRange(0, logs.Count - MaxLogRows);
+            try
+            {
+                Refresh();
+            }
+            catch (InvalidOperationException) when (Workspace.IsRemoved)
+            {
+                Dispose();
+            }
         }
-        Refresh();
     }
 
     void Refresh()
     {
+        lock (gate)
+            ThrowIfDisposed();
         Workspace.SetPanel(
             "status",
             "启动状态",
@@ -119,14 +143,18 @@ internal sealed class BootstrapWorkspace : IDisposable
 
     public void Dispose()
     {
-        if (disposed)
-            return;
+        lock (gate)
+        {
+            if (disposed)
+                return;
+            disposed = true;
+        }
 
-        disposed = true;
         uiHost.LogAdded -= OnLogAdded;
-        if (ReferenceEquals(TerminalUi.DefaultExceptionWorkspace, Workspace))
-            TerminalUi.DefaultExceptionWorkspace = null;
     }
+
+    void ThrowIfDisposed()
+        => ObjectDisposedException.ThrowIf(disposed, this);
 
     internal static string SeverityLabel(UiSeverity severity) => severity switch
     {
@@ -150,7 +178,10 @@ internal sealed record BootstrapPluginRow(
     string Status,
     string Result)
 {
-    public BootstrapPluginRow(PluginRuntimeStatus plugin, bool initialized, bool failed)
+    public BootstrapPluginRow(
+        PluginManager.PluginRuntimeStatus plugin,
+        bool initialized,
+        bool failed)
         : this(
             plugin.DisplayName == plugin.InternalName
                 ? plugin.DisplayName

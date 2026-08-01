@@ -546,6 +546,66 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
 
         [Fact]
+        public void PluginLifecyclePublicApiMatchesTargetManifest()
+        {
+            var outcomeType = typeof(PluginManager.PluginLifecycleOutcome);
+            Assert.True(outcomeType.IsNestedPublic);
+            Assert.True(outcomeType.IsEnum);
+            Assert.Equal(typeof(int), Enum.GetUnderlyingType(outcomeType));
+            Assert.Equal(
+                new[] { "Failed", "Succeeded", "RestartRequired" },
+                Enum.GetNames<PluginManager.PluginLifecycleOutcome>());
+            Assert.Equal(
+                new[] { 0, 1, 2 },
+                Enum.GetValues<PluginManager.PluginLifecycleOutcome>()
+                    .Select(value => (int)value)
+                    .ToArray());
+
+            var resultType = typeof(PluginManager.PluginLifecycleResult);
+            Assert.True(resultType.IsNestedPublic);
+            Assert.True(resultType.IsClass);
+            Assert.True(resultType.IsSealed);
+            Assert.Equal(typeof(object), resultType.BaseType);
+            Assert.Equal(
+                new[] { typeof(IEquatable<PluginManager.PluginLifecycleResult>) },
+                resultType.GetInterfaces());
+            Assert.Empty(resultType.GetEvents(PublicDeclared));
+            Assert.Empty(resultType.GetFields(PublicDeclared));
+            var constructor = Assert.Single(resultType.GetConstructors(
+                BindingFlags.Public | BindingFlags.Instance));
+            var constructorParameters = constructor.GetParameters();
+            Assert.Equal(2, constructorParameters.Length);
+            AssertParameter(constructorParameters[0], "PluginName", typeof(string));
+            AssertParameter(
+                constructorParameters[1],
+                "Outcome",
+                typeof(PluginManager.PluginLifecycleOutcome));
+            var properties = resultType.GetProperties(PublicDeclared);
+            Assert.Equal(
+                new[] { "Outcome", "PluginName" },
+                properties.Select(property => property.Name).Order(StringComparer.Ordinal).ToArray());
+            AssertReadWriteProperty(properties, "PluginName", typeof(string));
+            AssertReadWriteProperty(
+                properties,
+                "Outcome",
+                typeof(PluginManager.PluginLifecycleOutcome));
+
+            var reload = Assert.Single(
+                typeof(PluginManager).GetMethods(PublicDeclared),
+                method => method.Name == nameof(PluginManager.ReloadPluginsAsync));
+            Assert.True(reload.IsPublic);
+            Assert.True(reload.IsStatic);
+            Assert.False(reload.IsGenericMethod);
+            Assert.Equal(
+                typeof(Task<IReadOnlyList<PluginManager.PluginLifecycleResult>>),
+                reload.ReturnType);
+            AssertParamsParameter(
+                Assert.Single(reload.GetParameters()),
+                "pluginNames",
+                typeof(string[]));
+        }
+
+        [Fact]
         public void TerminalUiLifecycleIsOneShot()
         {
             var hostAssembly = typeof(TerminalUi).Assembly;
@@ -610,9 +670,6 @@ namespace UmamusumeResponseAnalyzer.Tests
                         new[]
                         {
                             $"WorkspaceTitlePrefix={WorkspaceTitle.StartsWith("Synthetic Future Workspace ", StringComparison.Ordinal)}",
-                            $"Panel={PanelKey}|{PanelTitle}|{PanelText}",
-                            $"Log={LogText}",
-                            $"Notification={NotificationText}",
                             $"CanonicalReference={CanonicalReference}",
                             $"CurrentReference={CurrentReference}",
                             $"SharedPanelRemoved={SharedPanelRemoved}",
@@ -702,7 +759,7 @@ namespace UmamusumeResponseAnalyzer.Tests
                         SyntheticPanelWriterA.Write(recreated, panelKey, "First caller final", "first caller final content");
                         SyntheticPanelWriterB.Write(recreated, panelKey, finalPanelTitle, finalPanelText);
                         recreated.Log(sharedLogText, UiSeverity.Success);
-                        recreated.Notify(sharedNotificationText, UiSeverity.Info, TimeSpan.Zero, shortcut);
+                        recreated.Notify(sharedNotificationText, UiSeverity.Info, TimeSpan.FromMinutes(1), shortcut);
 
                         return new(
                             recreated, workspaceTitle,
@@ -881,9 +938,6 @@ namespace UmamusumeResponseAnalyzer.Tests
                     Environment.NewLine,
                     [
                         "WorkspaceTitlePrefix=True",
-                        "Panel=shared|Second caller final|second caller final content",
-                        "Log=synthetic shared log",
-                        "Notification=synthetic shared notification",
                         "CanonicalReference=True",
                         "CurrentReference=True",
                         "SharedPanelRemoved=True",
@@ -892,7 +946,10 @@ namespace UmamusumeResponseAnalyzer.Tests
                         "RecreatedGeneration=True",
                         "RecreatedCanonicalReference=True",
                         "RecreatedCurrentReference=True",
-                        "TombstoneFailureCount=6"
+                        "TombstoneFailureCount=6",
+                        "RuntimePanelObserved=True",
+                        "RuntimeLogObserved=True",
+                        "RuntimeNotificationObserved=True"
                     ]),
                 formatted);
         }
@@ -939,6 +996,46 @@ namespace UmamusumeResponseAnalyzer.Tests
                     result.GetType().GetProperty("Workspace")!.GetValue(result));
                 formatted = Assert.IsType<string>(
                     result.GetType().GetMethod("Format", PublicDeclared)!.Invoke(result, null));
+                var panelText = Assert.IsType<string>(
+                    result.GetType().GetProperty("PanelText")!.GetValue(result));
+                var logText = Assert.IsType<string>(
+                    result.GetType().GetProperty("LogText")!.GetValue(result));
+                var notificationText = Assert.IsType<string>(
+                    result.GetType().GetProperty("NotificationText")!.GetValue(result));
+
+                var logs = terminal.InvokeAsync(() => host.GetLogsForTests(exercisedWorkspace))
+                    .GetAwaiter().GetResult();
+                var logObserved = logs.Any(line =>
+                    ReferenceEquals(line.Workspace, exercisedWorkspace) &&
+                    line.Text == logText &&
+                    line.Severity == UiSeverity.Success);
+                var notifications = terminal.InvokeAsync(() =>
+                        host.GetNotificationsForTests(exercisedWorkspace))
+                    .GetAwaiter().GetResult();
+                var notificationObserved = notifications.Any(notification =>
+                    ReferenceEquals(notification.Workspace, exercisedWorkspace) &&
+                    notification.Text == notificationText &&
+                    notification.Severity == UiSeverity.Info);
+
+                exercisedWorkspace.SwitchTo();
+                host.FlushAsync().WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+                terminal.RedrawAsync().GetAwaiter().GetResult();
+                var screen = terminal.CaptureScreenAsync().GetAwaiter().GetResult();
+                var panelObserved =
+                    screen.Contains(panelText, StringComparison.Ordinal) &&
+                    !screen.Contains("first caller final content", StringComparison.Ordinal);
+
+                Assert.True(panelObserved);
+                Assert.True(logObserved);
+                Assert.True(notificationObserved);
+                formatted = string.Join(
+                    Environment.NewLine,
+                    [
+                        formatted,
+                        $"RuntimePanelObserved={panelObserved}",
+                        $"RuntimeLogObserved={logObserved}",
+                        $"RuntimeNotificationObserved={notificationObserved}"
+                    ]);
             }
             finally
             {
