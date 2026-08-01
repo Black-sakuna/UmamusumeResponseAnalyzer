@@ -17,6 +17,17 @@
 
 	<ItemGroup>
 		<InternalsVisibleTo Include="UmamusumeResponseAnalyzer.Tests" />
+		<InternalsVisibleTo Include="AIRedirectorSmoke" />
+		<InternalsVisibleTo Include="LegendScenarioAnalyzerSmoke" />
+		<InternalsVisibleTo Include="PluginReplaySmoke" />
+		<InternalsVisibleTo Include="PluginRuntimeSmoke" />
+		<InternalsVisibleTo Include="PluginSmokeTests" />
+		<InternalsVisibleTo Include="PluginWorkspaceLifecycleSmoke" />
+		<InternalsVisibleTo Include="RamenScenarioAnalyzerPatchDslSmoke" />
+		<InternalsVisibleTo Include="SendGameStatusPluginSmoke" />
+		<InternalsVisibleTo Include="SkillEffectPluginSmoke" />
+		<InternalsVisibleTo Include="SkillTipsResponseAnalyzerSmoke" />
+		<InternalsVisibleTo Include="WinSaddleAnalyzerSmoke" />
 	</ItemGroup>
 
 	<ItemGroup>
