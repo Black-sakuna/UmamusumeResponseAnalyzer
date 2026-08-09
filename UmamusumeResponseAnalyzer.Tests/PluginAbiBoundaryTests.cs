@@ -932,6 +932,9 @@ namespace UmamusumeResponseAnalyzer.Tests
             object? result = null;
             Workspace? exercisedWorkspace = null;
             string? formatted = null;
+            List<UiLogLine> logs = [];
+            void ObserveLog(UiLogLine line) => logs.Add(line);
+            host.LogAdded += ObserveLog;
             try
             {
                 PluginCompiler.Compile(
@@ -961,8 +964,6 @@ namespace UmamusumeResponseAnalyzer.Tests
                 var notificationText = Assert.IsType<string>(
                     result.GetType().GetProperty("NotificationText")!.GetValue(result));
 
-                var logs = terminal.InvokeAsync(host.GetLogsForTests)
-                    .GetAwaiter().GetResult();
                 var logObserved = logs.Any(line =>
                     line.Text == $"[Synthetic] {logText}" &&
                     line.Severity == UiSeverity.Success);
@@ -996,6 +997,7 @@ namespace UmamusumeResponseAnalyzer.Tests
             }
             finally
             {
+                host.LogAdded -= ObserveLog;
                 try
                 {
                     if (assembly is not null && result is not null)

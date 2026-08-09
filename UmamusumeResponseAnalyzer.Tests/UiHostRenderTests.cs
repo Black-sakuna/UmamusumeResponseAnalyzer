@@ -633,44 +633,54 @@ public sealed class UiHostRenderTests : IDisposable
     {
         const string messageOnly = "command-message-only-sentinel";
         const string messageWithDisplay = "command-message-with-display-sentinel";
+        List<UiLogLine> logs = [];
+        void ObserveLog(UiLogLine line) => logs.Add(line);
 
-        await WaitForGlobalNotificationsToExpireAsync();
-        await terminal.InvokeAsync(() => host.ApplyCommandResult(
-            new HostCommands.Result(messageOnly, UiSeverity.Info)));
-        await host.FlushAsync();
+        host.LogAdded += ObserveLog;
+        try
+        {
+            await WaitForGlobalNotificationsToExpireAsync();
+            await terminal.InvokeAsync(() => host.ApplyCommandResult(
+                new HostCommands.Result(messageOnly, UiSeverity.Info)));
+            await host.FlushAsync();
 
-        Assert.Contains(
-            host.GetLogsForTests(),
-            line => line.Text == $"[Command] {messageOnly}"
-                && line.Severity == UiSeverity.Info);
-        Assert.Single(
-            host.GetNotificationsForTests(workspace: null),
-            notification => notification.Text == $"[Command] {messageOnly}"
-                && notification.Severity == UiSeverity.Info);
+            Assert.Contains(
+                logs,
+                line => line.Text == $"[Command] {messageOnly}"
+                    && line.Severity == UiSeverity.Info);
+            Assert.Single(
+                host.GetNotificationsForTests(workspace: null),
+                notification => notification.Text == $"[Command] {messageOnly}"
+                    && notification.Severity == UiSeverity.Info);
 
-        await terminal.InvokeAsync(() => host.ApplyCommandResult(new HostCommands.Result(
-            messageWithDisplay,
-            UiSeverity.Success,
-            new HostCommands.Display(
-                "Command result display",
-                [new("command-display-item-sentinel")]))));
-        await host.FlushAsync();
-        await terminal.WaitForScreenAsync("command-display-item-sentinel");
+            await terminal.InvokeAsync(() => host.ApplyCommandResult(new HostCommands.Result(
+                messageWithDisplay,
+                UiSeverity.Success,
+                new HostCommands.Display(
+                    "Command result display",
+                    [new("command-display-item-sentinel")]))));
+            await host.FlushAsync();
+            await terminal.WaitForScreenAsync("command-display-item-sentinel");
 
-        Assert.Contains(
-            host.GetLogsForTests(),
-            line => line.Text == $"[Command] {messageWithDisplay}"
-                && line.Severity == UiSeverity.Success);
-        Assert.DoesNotContain(
-            host.GetNotificationsForTests(workspace: null),
-            notification => notification.Text.Contains(messageWithDisplay, StringComparison.Ordinal));
+            Assert.Contains(
+                logs,
+                line => line.Text == $"[Command] {messageWithDisplay}"
+                    && line.Severity == UiSeverity.Success);
+            Assert.DoesNotContain(
+                host.GetNotificationsForTests(workspace: null),
+                notification => notification.Text.Contains(messageWithDisplay, StringComparison.Ordinal));
 
-        await terminal.InjectAsync(Key.Esc);
-        await terminal.WaitForAsync(async () =>
-            !(await terminal.CaptureScreenAsync()).Contains(
-                "command-display-item-sentinel",
-                StringComparison.Ordinal));
-        await WaitForGlobalNotificationsToExpireAsync();
+            await terminal.InjectAsync(Key.Esc);
+            await terminal.WaitForAsync(async () =>
+                !(await terminal.CaptureScreenAsync()).Contains(
+                    "command-display-item-sentinel",
+                    StringComparison.Ordinal));
+            await WaitForGlobalNotificationsToExpireAsync();
+        }
+        finally
+        {
+            host.LogAdded -= ObserveLog;
+        }
     }
 
     [Fact]
@@ -726,19 +736,6 @@ public sealed class UiHostRenderTests : IDisposable
     }
 
     [Fact]
-    public async Task GlobalLogsRetainLatestThreeHundred()
-    {
-        for (var index = 0; index < 302; index++)
-            TerminalUi.Log("Retention", $"global-{index:D3}");
-        await host.FlushAsync();
-
-        var global = await terminal.InvokeAsync(host.GetLogsForTests);
-        Assert.Equal(300, global.Count);
-        Assert.Equal("[Retention] global-002", global[0].Text);
-        Assert.Equal("[Retention] global-301", global[^1].Text);
-    }
-
-    [Fact]
     public async Task RemovedBootstrapStopsRenderingLaterGlobalDiagnostics()
     {
         using var bootstrap = new BootstrapWorkspace(host);
@@ -752,25 +749,35 @@ public sealed class UiHostRenderTests : IDisposable
             switchToWorkspace: true);
         await host.FlushAsync();
 
-        bootstrap.Workspace.Remove();
-        TerminalUi.Log("Bootstrap", "global-after-bootstrap-removal");
-        TerminalUi.LogException(
-            "Bootstrap",
-            new InvalidOperationException("error-after-bootstrap-removal"));
-        bootstrap.Log("Bootstrap", "bootstrap-facade-after-removal");
-        Assert.Throws<InvalidOperationException>(() =>
-            bootstrap.SetPhase("host", "宿主", UiSeverity.Error, "removed"));
-        await host.HandleCommandAsync("/workspace switch \"unterminated");
-        await host.FlushAsync();
-        await terminal.RedrawAsync();
+        List<UiLogLine> logs = [];
+        void ObserveLog(UiLogLine line) => logs.Add(line);
+        host.LogAdded += ObserveLog;
+        try
+        {
+            bootstrap.Workspace.Remove();
+            TerminalUi.Log("Bootstrap", "global-after-bootstrap-removal");
+            TerminalUi.LogException(
+                "Bootstrap",
+                new InvalidOperationException("error-after-bootstrap-removal"));
+            bootstrap.Log("Bootstrap", "bootstrap-facade-after-removal");
+            Assert.Throws<InvalidOperationException>(() =>
+                bootstrap.SetPhase("host", "宿主", UiSeverity.Error, "removed"));
+            await host.HandleCommandAsync("/workspace switch \"unterminated");
+            await host.FlushAsync();
+            await terminal.RedrawAsync();
 
-        Assert.Same(survivor, Workspace.Current);
-        var screen = await terminal.CaptureScreenAsync();
-        Assert.Contains("BootstrapSurvivorBody", screen, StringComparison.Ordinal);
-        Assert.DoesNotContain("after-bootstrap-removal", screen, StringComparison.Ordinal);
-        Assert.Contains(
-            await terminal.InvokeAsync(host.GetLogsForTests),
-            line => line.Text.Contains("error-after-bootstrap-removal", StringComparison.Ordinal));
+            Assert.Same(survivor, Workspace.Current);
+            var screen = await terminal.CaptureScreenAsync();
+            Assert.Contains("BootstrapSurvivorBody", screen, StringComparison.Ordinal);
+            Assert.DoesNotContain("after-bootstrap-removal", screen, StringComparison.Ordinal);
+            Assert.Contains(
+                logs,
+                line => line.Text.Contains("error-after-bootstrap-removal", StringComparison.Ordinal));
+        }
+        finally
+        {
+            host.LogAdded -= ObserveLog;
+        }
 
         bootstrap.Dispose();
         Assert.Throws<ObjectDisposedException>(() => bootstrap.SetSettings([]));
@@ -899,6 +906,13 @@ public sealed class UiHostShutdownProcessTests
             "apply-failure-abandons-flush",
             nameof(ApplyFailureAbandonsAcceptedFlushAndStopsWithoutHanging),
             RunApplyFailureAsync);
+
+    [Fact]
+    public Task ApplyFailureBeforeBatchBoundaryFailsLaterAcceptedFlush()
+        => RunScenarioAsync(
+            "apply-failure-before-batch-boundary",
+            nameof(ApplyFailureBeforeBatchBoundaryFailsLaterAcceptedFlush),
+            RunCrossBatchApplyFailureAsync);
 
     [Fact]
     public Task CommandPrimarySurvivesReportingFailureAndShutdown()
@@ -1145,7 +1159,31 @@ public sealed class UiHostShutdownProcessTests
         Assert.Contains(
             "apply-log-failure",
             Assert.IsType<InvalidOperationException>(runFailure).Message);
-        Assert.Empty(host.GetLogsForTests());
+    }
+
+    static async Task RunCrossBatchApplyFailureAsync()
+    {
+        using var terminal = new TerminalGuiTestApp();
+        var host = TerminalUiLifecycleChildProcess.InitializeHost(terminal, CancellationToken.None);
+        host.LogAdded += line =>
+        {
+            if (line.Text == "first-batch-failure")
+                throw new InvalidOperationException("first-batch-failure");
+        };
+        host.Log("first-batch-failure", UiSeverity.Error);
+        for (var index = 0; index < 255; index++)
+            host.Log($"abandoned-{index}", UiSeverity.Info);
+        host.Log("later-batch", UiSeverity.Info);
+        var flush = host.FlushAsync();
+
+        var run = await terminal.StartAsync(host);
+        var flushFailure = await Record.ExceptionAsync(async () =>
+            await flush.WaitAsync(TimeSpan.FromSeconds(5)));
+        var runFailure = await Record.ExceptionAsync(async () =>
+            await run.WaitAsync(TimeSpan.FromSeconds(5)));
+
+        Assert.Contains("first-batch-failure", flushFailure?.ToString());
+        Assert.Contains("first-batch-failure", runFailure?.ToString());
     }
 
     static async Task RunCommandPrimaryFailureAsync()
