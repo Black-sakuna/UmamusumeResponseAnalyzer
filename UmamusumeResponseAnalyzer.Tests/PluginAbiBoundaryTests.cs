@@ -82,7 +82,6 @@ namespace UmamusumeResponseAnalyzer.Tests
                 {
                     "BindHotkey",
                     "Create",
-                    "Log",
                     "Notify",
                     "Remove",
                     "RemovePanel",
@@ -94,7 +93,6 @@ namespace UmamusumeResponseAnalyzer.Tests
             {
                 ("BindHotkey", false, typeof(void), 3),
                 ("Create", true, typeof(Workspace), 1),
-                ("Log", false, typeof(void), 2),
                 ("Notify", false, typeof(void), 4),
                 ("Remove", false, typeof(void), 0),
                 ("RemovePanel", false, typeof(bool), 1),
@@ -120,10 +118,6 @@ namespace UmamusumeResponseAnalyzer.Tests
                 Assert.Single(methods["RemovePanel"].GetParameters()),
                 "key",
                 typeof(string));
-
-            var logParameters = methods["Log"].GetParameters();
-            AssertParameter(logParameters[0], "text", typeof(string));
-            AssertParameter(logParameters[1], "severity", typeof(UiSeverity), UiSeverity.Info);
 
             var notifyParameters = methods["Notify"].GetParameters();
             AssertParameter(notifyParameters[0], "text", typeof(string));
@@ -728,7 +722,7 @@ namespace UmamusumeResponseAnalyzer.Tests
                         Func<View> createView = directContent.CreateView;
                         _ = createView;
 
-                        workspace.Log("live", UiSeverity.Success);
+                        TerminalUi.Log("Synthetic", "live", UiSeverity.Success);
                         workspace.Notify("live", UiSeverity.Info, TimeSpan.Zero, shortcut);
                         workspace.BindHotkey(ConsoleKey.F20, description: "Synthetic workspace");
 
@@ -736,7 +730,7 @@ namespace UmamusumeResponseAnalyzer.Tests
                         {
                             workspace.SetPanel("background", "Background", WorkspaceContent.Text("background"), fullBleed: true, switchToWorkspace: false);
                             var removed = workspace.RemovePanel("background");
-                            workspace.Log("background", UiSeverity.Trace);
+                            TerminalUi.Log("Synthetic", "background", UiSeverity.Trace);
                             workspace.Notify("background", UiSeverity.Warning, TimeSpan.Zero, Array.Empty<UiShortcut>());
                             workspace.SwitchTo();
                             workspace.BindHotkey(ConsoleKey.F21, ConsoleModifiers.Shift, "Synthetic background workspace");
@@ -758,7 +752,7 @@ namespace UmamusumeResponseAnalyzer.Tests
 
                         SyntheticPanelWriterA.Write(recreated, panelKey, "First caller final", "first caller final content");
                         SyntheticPanelWriterB.Write(recreated, panelKey, finalPanelTitle, finalPanelText);
-                        recreated.Log(sharedLogText, UiSeverity.Success);
+                        TerminalUi.Log("Synthetic", sharedLogText, UiSeverity.Success);
                         recreated.Notify(sharedNotificationText, UiSeverity.Info, TimeSpan.FromMinutes(1), shortcut);
 
                         return new(
@@ -867,7 +861,6 @@ namespace UmamusumeResponseAnalyzer.Tests
                         {
                             ("RemovePanel", () => { removed.RemovePanel("missing"); }),
                             ("SetPanel", () => removed.SetPanel("removed", "Removed", WorkspaceContent.Text("removed"))),
-                            ("Log", () => removed.Log("removed")),
                             ("Notify", () => removed.Notify("removed")),
                             ("SwitchTo", removed.SwitchTo),
                             ("BindHotkey", () => removed.BindHotkey(ConsoleKey.F22))
@@ -946,7 +939,7 @@ namespace UmamusumeResponseAnalyzer.Tests
                         "RecreatedGeneration=True",
                         "RecreatedCanonicalReference=True",
                         "RecreatedCurrentReference=True",
-                        "TombstoneFailureCount=6",
+                        "TombstoneFailureCount=5",
                         "RuntimePanelObserved=True",
                         "RuntimeLogObserved=True",
                         "RuntimeNotificationObserved=True"
@@ -1003,11 +996,10 @@ namespace UmamusumeResponseAnalyzer.Tests
                 var notificationText = Assert.IsType<string>(
                     result.GetType().GetProperty("NotificationText")!.GetValue(result));
 
-                var logs = terminal.InvokeAsync(() => host.GetLogsForTests(exercisedWorkspace))
+                var logs = terminal.InvokeAsync(host.GetLogsForTests)
                     .GetAwaiter().GetResult();
                 var logObserved = logs.Any(line =>
-                    ReferenceEquals(line.Workspace, exercisedWorkspace) &&
-                    line.Text == logText &&
+                    line.Text == $"[Synthetic] {logText}" &&
                     line.Severity == UiSeverity.Success);
                 var notifications = terminal.InvokeAsync(() =>
                         host.GetNotificationsForTests(exercisedWorkspace))

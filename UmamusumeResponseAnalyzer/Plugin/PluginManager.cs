@@ -501,6 +501,15 @@ namespace UmamusumeResponseAnalyzer.Plugin
             return generationLease;
         }
 
+        internal static IDisposable EnterPluginConfiguration(
+            IPlugin plugin,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return TryEnterPluginInspection(plugin) ?? throw new InvalidOperationException(
+                $"插件已卸载或 generation 已关闭，拒绝打开设置: {InternalName(plugin)}");
+        }
+
         static IDisposable? TryEnterPluginInspection(IPlugin plugin)
         {
             if (IsShuttingDown() ||
@@ -550,6 +559,21 @@ namespace UmamusumeResponseAnalyzer.Plugin
                     ? logError
                     : new AggregateException("插件 diagnostics sinks 均失败。", notificationError, logError);
             }
+        }
+
+        static void ReportPluginDiagnostic(Exception exception)
+        {
+            TerminalUi.LogException("Plugin", exception);
+            TerminalUi.Notify(
+                "Plugin",
+                TerminalUi.FormatExceptionLogMessage(exception),
+                UiSeverity.Error);
+        }
+
+        static void ReportPluginDiagnostic(string message, UiSeverity severity)
+        {
+            TerminalUi.Log("Plugin", message, severity);
+            TerminalUi.Notify("Plugin", message, severity);
         }
 
         internal static IDisposable? TryEnterPluginRegistration(IPlugin plugin)
@@ -720,7 +744,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 }
                 catch (Exception ex)
                 {
-                    TerminalUi.LogException("Plugin", ex);
+                    ReportPluginDiagnostic(ex);
                     if (!FailedPlugins.Contains(dll.FullName)) FailedPlugins.Add(dll.FullName);
                 }
             }
@@ -769,7 +793,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                         }
                         catch (Exception ex)
                         {
-                            TerminalUi.LogException("Plugin", ex);
+                            ReportPluginDiagnostic(ex);
                             var pluginPath = $"{zip}|{entry.FullName}";
                             if (!FailedPlugins.Contains(pluginPath)) FailedPlugins.Add(pluginPath);
                         }
@@ -783,7 +807,9 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 }
 
                 if (!hasMainPlugin)
-                    TerminalUi.Log("Plugin", $"插件包 {Path.GetFileName(zip)} 未找到主插件 DLL {pluginName}.dll，已跳过。", UiSeverity.Warning);
+                    ReportPluginDiagnostic(
+                        $"插件包 {Path.GetFileName(zip)} 未找到主插件 DLL {pluginName}.dll，已跳过。",
+                        UiSeverity.Warning);
 
                 // 关联卫星资源到对应的程序集元数据
                 foreach (var entry in satelliteEntries)
@@ -801,7 +827,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
             }
             catch (Exception ex)
             {
-                TerminalUi.LogException("Plugin", ex);
+                ReportPluginDiagnostic(ex);
                 if (!FailedPlugins.Contains(zip)) FailedPlugins.Add(zip);
             }
         }
@@ -898,7 +924,9 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 foreach (var name in group)
                     if (Metadatas.TryGetValue(name, out var present))
                     {
-                        TerminalUi.Log("Plugin", $"插件 {name} 加载失败: 依赖的共享上下文插件 {string.Join("、", missing)} 未安装。", UiSeverity.Error);
+                        ReportPluginDiagnostic(
+                            $"插件 {name} 加载失败: 依赖的共享上下文插件 {string.Join("、", missing)} 未安装。",
+                            UiSeverity.Error);
                         if (!FailedPlugins.Contains(present.FilePath)) FailedPlugins.Add(present.FilePath);
                     }
                 return;
@@ -952,7 +980,9 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 var type = assembly.GetExportedTypes().FirstOrDefault(x => typeof(IPlugin).IsAssignableFrom(x));
                 if (type == null)
                 {
-                    TerminalUi.Log("Plugin", $"插件 {m.PluginName} 加载失败: 未找到实现 {nameof(IPlugin)} 的公开类型。", UiSeverity.Error);
+                    ReportPluginDiagnostic(
+                        $"插件 {m.PluginName} 加载失败: 未找到实现 {nameof(IPlugin)} 的公开类型。",
+                        UiSeverity.Error);
                     FailedPlugins.Add(m.FilePath);
                     return false;
                 }
@@ -960,7 +990,9 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 phase = "创建插件实例";
                 if (Activator.CreateInstance(type) is not IPlugin createdPlugin)
                 {
-                    TerminalUi.Log("Plugin", $"插件 {m.PluginName} 加载失败: 无法创建插件实例。type={type.FullName ?? type.Name}", UiSeverity.Error);
+                    ReportPluginDiagnostic(
+                        $"插件 {m.PluginName} 加载失败: 无法创建插件实例。type={type.FullName ?? type.Name}",
+                        UiSeverity.Error);
                     FailedPlugins.Add(m.FilePath);
                     return false;
                 }
@@ -1002,7 +1034,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 if (plugin is not null)
                 {
                     try { CompleteFailedPluginLoadAsync(plugin, flush: false).GetAwaiter().GetResult(); }
-                    catch (Exception cleanupEx) { TerminalUi.LogException("Plugin", cleanupEx); }
+                    catch (Exception cleanupEx) { ReportPluginDiagnostic(cleanupEx); }
                 }
 
                 if (assemblyName is not null)
@@ -1010,7 +1042,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 if (assembly is not null)
                     Assemblies.Remove(assembly);
 
-                TerminalUi.LogException("Plugin", PluginLoadException(m, phase, ex));
+                ReportPluginDiagnostic(PluginLoadException(m, phase, ex));
                 FailedPlugins.Add(m.FilePath);
                 return false;
             }
@@ -1033,7 +1065,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                          .ToList())
             {
                 try { CompleteFailedPluginLoadAsync(plugin, flush: false).GetAwaiter().GetResult(); }
-                catch (Exception ex) { TerminalUi.LogException("Plugin", ex); }
+                catch (Exception ex) { ReportPluginDiagnostic(ex); }
             }
 
             foreach (var name in group)
@@ -1046,7 +1078,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
             }
 
             try { ctx.Unload(); }
-            catch (Exception ex) { TerminalUi.LogException("Plugin", ex); }
+            catch (Exception ex) { ReportPluginDiagnostic(ex); }
         }
 
         internal static Assembly? ResolveSharedAssembly(AssemblyName requested)
@@ -1080,8 +1112,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
             if (string.Equals(name, HostAssemblyName, StringComparison.Ordinal))
             {
                 if (actual.Version is not null && requested.Version > actual.Version)
-                    TerminalUi.Log(
-                        "Plugin",
+                    ReportPluginDiagnostic(
                         $"插件依赖的宿主 ABI 版本更高，请更新 UmamusumeResponseAnalyzer: 插件请求 {requested.FullName}，当前宿主 {actual.FullName}。",
                         UiSeverity.Warning);
                 return;
@@ -1475,15 +1506,14 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 var failedPlugin = Metadatas.TryGetValue(internalName, out var metadata)
                     ? metadata.FilePath
                     : plugin.Name;
-                TerminalUi.LogException(
-                    "Plugin",
+                ReportPluginDiagnostic(
                     new InvalidOperationException($"插件初始化失败: plugin={plugin.Name} ({internalName})", ex));
                 if (!FailedPlugins.Contains(failedPlugin))
                     FailedPlugins.Add(failedPlugin);
                 if (committed)
                 {
                     try { CompleteFailedPluginLoadAsync(plugin, flush: true).GetAwaiter().GetResult(); }
-                    catch (Exception cleanupEx) { TerminalUi.LogException("Plugin", cleanupEx); }
+                    catch (Exception cleanupEx) { ReportPluginDiagnostic(cleanupEx); }
                 }
                 return false;
             }
@@ -1656,7 +1686,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 catch (Exception ex)
                 {
                     outcomes[name] = PluginLifecycleOutcome.Failed;
-                    TerminalUi.LogException("Plugin", ex);
+                    ReportPluginDiagnostic(ex);
 #if DEBUG
                     throw;
 #endif
@@ -1671,7 +1701,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 }
                 catch (Exception ex)
                 {
-                    TerminalUi.LogException("Plugin", ex);
+                    ReportPluginDiagnostic(ex);
 #if DEBUG
                     throw;
 #endif
@@ -1730,7 +1760,9 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 }
                 if (!item.Available)
                 {
-                    TerminalUi.Log("Plugin", $"插件 {item.Raw} 不存在，无法加载。", UiSeverity.Warning);
+                    ReportPluginDiagnostic(
+                        $"插件 {item.Raw} 不存在，无法加载。",
+                        UiSeverity.Warning);
                     outcomes[item.Name] = PluginLifecycleOutcome.Failed;
                     continue;
                 }
@@ -2147,7 +2179,9 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 foreach (var name in group)
                     if (Metadatas.TryGetValue(name, out var present))
                     {
-                        TerminalUi.Log("Plugin", $"插件 {name} 加载失败: 依赖的共享上下文插件 {string.Join("、", missing)} 未安装。", UiSeverity.Error);
+                        ReportPluginDiagnostic(
+                            $"插件 {name} 加载失败: 依赖的共享上下文插件 {string.Join("、", missing)} 未安装。",
+                            UiSeverity.Error);
                         if (!FailedPlugins.Contains(present.FilePath)) FailedPlugins.Add(present.FilePath);
                     }
                 return null;
@@ -2187,7 +2221,9 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 var type = assembly.GetExportedTypes().FirstOrDefault(x => typeof(IPlugin).IsAssignableFrom(x));
                 if (type is null)
                 {
-                    TerminalUi.Log("Plugin", $"插件 {metadata.PluginName} 加载失败: 未找到实现 {nameof(IPlugin)} 的公开类型。", UiSeverity.Error);
+                    ReportPluginDiagnostic(
+                        $"插件 {metadata.PluginName} 加载失败: 未找到实现 {nameof(IPlugin)} 的公开类型。",
+                        UiSeverity.Error);
                     FailedPlugins.Add(metadata.FilePath);
                     return false;
                 }
@@ -2195,7 +2231,9 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 phase = "创建插件实例";
                 if (Activator.CreateInstance(type) is not IPlugin createdPlugin)
                 {
-                    TerminalUi.Log("Plugin", $"插件 {metadata.PluginName} 加载失败: 无法创建插件实例。type={type.FullName ?? type.Name}", UiSeverity.Error);
+                    ReportPluginDiagnostic(
+                        $"插件 {metadata.PluginName} 加载失败: 无法创建插件实例。type={type.FullName ?? type.Name}",
+                        UiSeverity.Error);
                     FailedPlugins.Add(metadata.FilePath);
                     return false;
                 }
@@ -2214,10 +2252,10 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 if (plugin is not null)
                 {
                     try { await CompleteFailedPluginLoadAsync(plugin, flush: false); }
-                    catch (Exception cleanupEx) { TerminalUi.LogException("Plugin", cleanupEx); }
+                    catch (Exception cleanupEx) { ReportPluginDiagnostic(cleanupEx); }
                 }
 
-                TerminalUi.LogException("Plugin", PluginLoadException(metadata, phase, ex));
+                ReportPluginDiagnostic(PluginLoadException(metadata, phase, ex));
                 FailedPlugins.Add(metadata.FilePath);
                 return false;
             }

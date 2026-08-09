@@ -27,4 +27,5 @@ public class DebugRaceSimulateRequest : RequestBase<DebugRaceSimulateResponse>
     [Key("challenge_match_retry_count")] public int challenge_match_retry_count; // 0xD8
     [Key("unlock_flags")] public int unlock_flags; // 0xDC
     [Key("is_record_interval_simulate")] public int is_record_interval_simulate; // 0xE0
+    [Key("debug_param")] public DebugRaceSimulateAPIParam debug_param; // 0xE8
 }

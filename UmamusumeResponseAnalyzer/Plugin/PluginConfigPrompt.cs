@@ -6,7 +6,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
     {
         public static async Task RunAsync(IPlugin plugin, CancellationToken cancellationToken = default)
         {
-            using var generation = PluginManager.EnterPluginCallback(plugin, cancellationToken);
+            using var generation = PluginManager.EnterPluginConfiguration(plugin, cancellationToken);
             using var callback = PluginManager.EnterPluginCallbackScope();
             using var owner = HotkeyManager.RegisterScope(plugin);
 

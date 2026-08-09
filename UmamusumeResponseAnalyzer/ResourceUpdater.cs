@@ -78,7 +78,8 @@ namespace UmamusumeResponseAnalyzer
                 }
                 if (string.IsNullOrEmpty(output))
                 {
-                    TerminalUi.Log("URA", I18N_UpdatedFileCorrupted);
+                    TerminalUi.Log("URA", I18N_UpdatedFileCorrupted, UiSeverity.Error);
+                    TerminalUi.Notify("URA", I18N_UpdatedFileCorrupted, UiSeverity.Error);
                     File.Delete(Path.Combine(Path.GetTempPath(), "latest-UmamusumeResponseAnalyzer.exe"));
                     return;
                 }

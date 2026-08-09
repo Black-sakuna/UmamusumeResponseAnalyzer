@@ -27,7 +27,10 @@ internal sealed class GallopMessagePackFormatter<T> : IMessagePackFormatter<T?>
         foreach (var field in metadata.Fields)
         {
             writer.Write(field.Key);
-            MessagePackSerializer.Serialize(field.Type, ref writer, field.Get(value), options);
+            if (field.Type == typeof(bool))
+                writer.Write((bool)field.Get(value)!);
+            else
+                MessagePackSerializer.Serialize(field.Type, ref writer, field.Get(value), options);
         }
     }
 
@@ -53,7 +56,11 @@ internal sealed class GallopMessagePackFormatter<T> : IMessagePackFormatter<T?>
             if (reader.TryReadNil())
                 continue;
 
-            field.Set(value, MessagePackSerializer.Deserialize(field.Type, ref reader, options));
+            field.Set(value, field.Type == typeof(bool)
+                ? reader.NextCode is 0x00 or 0x01
+                    ? reader.ReadInt32() != 0
+                    : reader.ReadBoolean()
+                : MessagePackSerializer.Deserialize(field.Type, ref reader, options));
         }
 
         return value;

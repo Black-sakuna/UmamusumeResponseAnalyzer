@@ -56,7 +56,6 @@ internal sealed record WorkspacePanel(
     bool FullBleed = false);
 
 internal sealed record UiLogLine(
-    Workspace? Workspace,
     string Text,
     UiSeverity Severity,
     string? ExceptionDetails = null);

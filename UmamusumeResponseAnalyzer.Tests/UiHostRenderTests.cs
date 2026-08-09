@@ -2,6 +2,7 @@ using System.Drawing;
 using System.Reflection;
 using Terminal.Gui.Input;
 using Terminal.Gui.Views;
+using UmamusumeResponseAnalyzer.Commands;
 using UmamusumeResponseAnalyzer.Plugin;
 using UmamusumeResponseAnalyzer.TerminalGui;
 using Xunit;
@@ -244,6 +245,7 @@ public sealed class UiHostRenderTests : IDisposable
     [Fact]
     public async Task Notifications_FilterByWorkspaceAndKeepShortcutLifetime()
     {
+        await WaitForGlobalNotificationsToExpireAsync();
         var first = CreateWorkspace("Notification First");
         var second = CreateWorkspace("Notification Second");
         host.SetPanel(
@@ -299,6 +301,7 @@ public sealed class UiHostRenderTests : IDisposable
     [Fact]
     public async Task Notification_TtlRemovesFramebufferAndShortcut()
     {
+        await WaitForGlobalNotificationsToExpireAsync();
         var workspace = CreateWorkspace("TTL workspace");
         host.SetPanel(
             workspace,
@@ -626,7 +629,52 @@ public sealed class UiHostRenderTests : IDisposable
     }
 
     [Fact]
-    public async Task BootstrapGlobalAndFailureLogsRemainScopedUntilWorkspaceSwitch()
+    public async Task CommandResultsAlwaysLogAndOnlyMessageWithoutDisplayNotifies()
+    {
+        const string messageOnly = "command-message-only-sentinel";
+        const string messageWithDisplay = "command-message-with-display-sentinel";
+
+        await WaitForGlobalNotificationsToExpireAsync();
+        await terminal.InvokeAsync(() => host.ApplyCommandResult(
+            new HostCommands.Result(messageOnly, UiSeverity.Info)));
+        await host.FlushAsync();
+
+        Assert.Contains(
+            host.GetLogsForTests(),
+            line => line.Text == $"[Command] {messageOnly}"
+                && line.Severity == UiSeverity.Info);
+        Assert.Single(
+            host.GetNotificationsForTests(workspace: null),
+            notification => notification.Text == $"[Command] {messageOnly}"
+                && notification.Severity == UiSeverity.Info);
+
+        await terminal.InvokeAsync(() => host.ApplyCommandResult(new HostCommands.Result(
+            messageWithDisplay,
+            UiSeverity.Success,
+            new HostCommands.Display(
+                "Command result display",
+                [new("command-display-item-sentinel")]))));
+        await host.FlushAsync();
+        await terminal.WaitForScreenAsync("command-display-item-sentinel");
+
+        Assert.Contains(
+            host.GetLogsForTests(),
+            line => line.Text == $"[Command] {messageWithDisplay}"
+                && line.Severity == UiSeverity.Success);
+        Assert.DoesNotContain(
+            host.GetNotificationsForTests(workspace: null),
+            notification => notification.Text.Contains(messageWithDisplay, StringComparison.Ordinal));
+
+        await terminal.InjectAsync(Key.Esc);
+        await terminal.WaitForAsync(async () =>
+            !(await terminal.CaptureScreenAsync()).Contains(
+                "command-display-item-sentinel",
+                StringComparison.Ordinal));
+        await WaitForGlobalNotificationsToExpireAsync();
+    }
+
+    [Fact]
+    public async Task BootstrapGlobalAndFailureLogsRemainHiddenUntilWorkspaceSwitch()
     {
         var bootstrap = new BootstrapWorkspace(host);
         Own(bootstrap.Workspace);
@@ -645,7 +693,6 @@ public sealed class UiHostRenderTests : IDisposable
                 fullBleed: true,
                 switchToWorkspace: true);
             TerminalUi.Log("ABI", "global-log-sentinel", UiSeverity.Warning);
-            other.Log("other-workspace-log-sentinel", UiSeverity.Warning);
             TerminalUi.LogException(
                 "URA",
                 new InvalidOperationException("bootstrap-error-sentinel"));
@@ -671,10 +718,6 @@ public sealed class UiHostRenderTests : IDisposable
                 "Quoted workspace title 缺少结束双引号。",
                 bootstrapScreen,
                 StringComparison.Ordinal);
-            Assert.DoesNotContain(
-                "other-workspace-log-sentinel",
-                bootstrapScreen,
-                StringComparison.Ordinal);
         }
         finally
         {
@@ -683,31 +726,16 @@ public sealed class UiHostRenderTests : IDisposable
     }
 
     [Fact]
-    public async Task GlobalAndWorkspaceLogsRetainLatestThreeHundredPerReferenceGeneration()
+    public async Task GlobalLogsRetainLatestThreeHundred()
     {
-        var workspace = CreateWorkspace("Log retention");
         for (var index = 0; index < 302; index++)
-        {
             TerminalUi.Log("Retention", $"global-{index:D3}");
-            workspace.Log($"scoped-{index:D3}", UiSeverity.Warning);
-        }
         await host.FlushAsync();
 
-        var global = await terminal.InvokeAsync(() => host.GetLogsForTests(null));
-        var scoped = await terminal.InvokeAsync(() => host.GetLogsForTests(workspace));
+        var global = await terminal.InvokeAsync(host.GetLogsForTests);
         Assert.Equal(300, global.Count);
         Assert.Equal("[Retention] global-002", global[0].Text);
         Assert.Equal("[Retention] global-301", global[^1].Text);
-        Assert.All(global, line => Assert.Null(line.Workspace));
-        Assert.Equal(300, scoped.Count);
-        Assert.Equal("scoped-002", scoped[0].Text);
-        Assert.Equal("scoped-301", scoped[^1].Text);
-        Assert.All(scoped, line => Assert.Same(workspace, line.Workspace));
-
-        host.RemoveWorkspace(workspace);
-        ownedWorkspaces.Remove(workspace);
-        await host.FlushAsync();
-        Assert.Empty(await terminal.InvokeAsync(() => host.GetLogsForTests(workspace)));
     }
 
     [Fact]
@@ -741,7 +769,7 @@ public sealed class UiHostRenderTests : IDisposable
         Assert.Contains("BootstrapSurvivorBody", screen, StringComparison.Ordinal);
         Assert.DoesNotContain("after-bootstrap-removal", screen, StringComparison.Ordinal);
         Assert.Contains(
-            await terminal.InvokeAsync(() => host.GetLogsForTests(null)),
+            await terminal.InvokeAsync(host.GetLogsForTests),
             line => line.Text.Contains("error-after-bootstrap-removal", StringComparison.Ordinal));
 
         bootstrap.Dispose();
@@ -794,6 +822,22 @@ public sealed class UiHostRenderTests : IDisposable
     {
         foreach (var character in text)
             await terminal.InjectAsync(new Key(character));
+    }
+
+    async Task WaitForGlobalNotificationsToExpireAsync()
+    {
+        var notifications = host.GetNotificationsForTests(workspace: null);
+        if (notifications.Count == 0)
+            return;
+
+        var delay = notifications.Max(notification => notification.ExpiresAt)
+            - DateTimeOffset.Now
+            + TimeSpan.FromMilliseconds(100);
+        if (delay > TimeSpan.Zero)
+            await Task.Delay(delay, TestContext.Current.CancellationToken);
+        terminal.Time.Advance(TimeSpan.FromSeconds(1));
+        await terminal.WaitForAsync(() =>
+            host.GetNotificationsForTests(workspace: null).Count == 0);
     }
 
 }
@@ -1080,7 +1124,7 @@ public sealed class UiHostShutdownProcessTests
             fullBleed: true,
             switchToWorkspace: true);
         host.LogAdded += _ => throw new InvalidOperationException("apply-log-failure");
-        workspace.Log("will fail");
+        TerminalUi.Log("Test", "will fail");
         var flush = host.FlushAsync();
         host.RequestShutdown();
 
@@ -1101,7 +1145,7 @@ public sealed class UiHostShutdownProcessTests
         Assert.Contains(
             "apply-log-failure",
             Assert.IsType<InvalidOperationException>(runFailure).Message);
-        Assert.Empty(host.GetLogsForTests(workspace));
+        Assert.Empty(host.GetLogsForTests());
     }
 
     static async Task RunCommandPrimaryFailureAsync()
@@ -1129,7 +1173,7 @@ public sealed class UiHostShutdownProcessTests
             var pluginType = Assert.Single(PluginManager.LoadedPlugins).GetType();
             host.LogAdded += line =>
             {
-                if (line.Text == "command-primary-trigger")
+                if (line.Text == "[Command] command-primary-trigger")
                     throw new InvalidOperationException("command-primary-trigger");
             };
 
@@ -1222,8 +1266,7 @@ public sealed class UiHostShutdownProcessTests
                     Disposing.Set();
                     if (!Release.Wait(TimeSpan.FromSeconds(5)))
                         throw new TimeoutException("Dispose was not released.");
-                    Workspace.Create("Command primary failure")
-                        .Log("command-primary-trigger");
+                    TerminalUi.Log("Command", "command-primary-trigger");
                 }
             }
             """;

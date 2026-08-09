@@ -78,7 +78,6 @@ public static class TerminalUi
     {
         ArgumentNullException.ThrowIfNull(ex);
         RequireHost().Log(
-            null,
             $"[{source}] {FormatExceptionLogMessage(ex)}",
             severity,
             ex.ToString());
@@ -183,7 +182,7 @@ public static class TerminalUi
         string source,
         string text,
         UiSeverity severity = UiSeverity.Info)
-        => RequireHost().Log(null, $"[{source}] {text}", severity);
+        => RequireHost().Log($"[{source}] {text}", severity);
 
     public static void Notify(
         string source,

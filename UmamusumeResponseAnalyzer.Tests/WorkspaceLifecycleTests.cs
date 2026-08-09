@@ -70,21 +70,19 @@ public sealed class WorkspaceLifecycleTests(PluginRuntimeFixture fixture) : IDis
     }
 
     [Fact]
-    public async Task WorkspaceLogsRenderInAdmissionOrderWithoutHiddenSource()
+    public async Task GlobalLogsRenderInAdmissionOrderWithSource()
     {
         await terminal.ResizeAsync(120, 30);
         using var bootstrap = new BootstrapWorkspace(host);
         Own(bootstrap.Workspace);
-        var caseAlias = Workspace.Create(bootstrap.Workspace.Title.ToUpperInvariant());
         var run = Guid.NewGuid().ToString("N")[..8];
         var expected = Enumerable.Range(0, 4)
             .Select(index => $"L{run}-{index}")
             .ToArray();
 
-        Assert.Same(bootstrap.Workspace, caseAlias);
         bootstrap.Workspace.SwitchTo();
         for (var index = 0; index < expected.Length; index++)
-            (index % 2 == 0 ? bootstrap.Workspace : caseAlias).Log(expected[index]);
+            TerminalUi.Log("Admission", expected[index]);
         await host.FlushAsync();
 
         await terminal.WaitForScreenAsync(expected[^1]);
@@ -94,10 +92,7 @@ public sealed class WorkspaceLifecycleTests(PluginRuntimeFixture fixture) : IDis
             .ToArray();
         Assert.All(positions, position => Assert.True(position >= 0));
         Assert.True(positions.SequenceEqual(positions.Order()));
-        Assert.All(expected, text => Assert.DoesNotContain(
-            $"] {text}",
-            screen,
-            StringComparison.Ordinal));
+        Assert.Contains("[Admission]", screen, StringComparison.Ordinal);
     }
 
     [Fact]

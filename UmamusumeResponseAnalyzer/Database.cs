@@ -91,11 +91,17 @@ namespace UmamusumeResponseAnalyzer
         }
         private static readonly JsonSerializer _serializer = new JsonSerializer();
 
+        static void ReportWarning(string message)
+        {
+            TerminalUi.Log("Database", message, UiSeverity.Warning);
+            TerminalUi.Notify("Database", message, UiSeverity.Warning);
+        }
+
         static async Task<T?> DeserializeAsync<T>(string filepath, JsonSerializerSettings? settings = null)
         {
             if (!File.Exists(filepath))
             {
-                TerminalUi.Log("Database", string.Format(I18N_NotExist, Path.GetFileName(filepath)), UiSeverity.Warning);
+                ReportWarning(string.Format(I18N_NotExist, Path.GetFileName(filepath)));
                 return default;
             }
 
@@ -110,15 +116,15 @@ namespace UmamusumeResponseAnalyzer
                 if (serializer.Deserialize<T>(jsonReader) is { } value)
                     return value;
 
-                TerminalUi.Log("Database", string.Format(I18N_LoadFail, Path.GetFileName(filepath)), UiSeverity.Warning);
+                ReportWarning(string.Format(I18N_LoadFail, Path.GetFileName(filepath)));
             }
             catch (InvalidDataException)
             {
-                TerminalUi.Log("Database", string.Format(I18N_DecompressError, Path.GetFileName(filepath)), UiSeverity.Warning);
+                ReportWarning(string.Format(I18N_DecompressError, Path.GetFileName(filepath)));
             }
             catch (Exception)
             {
-                TerminalUi.Log("Database", string.Format(I18N_LoadFail, Path.GetFileName(filepath)), UiSeverity.Warning);
+                ReportWarning(string.Format(I18N_LoadFail, Path.GetFileName(filepath)));
             }
             return default;
         }

@@ -419,7 +419,8 @@ namespace UmamusumeResponseAnalyzer
 
         internal static async Task RunCleanupAsync(
             ExceptionDispatchInfo? workflowFailure,
-            IReadOnlyList<Func<ValueTask>> cleanupActions)
+            IReadOnlyList<Func<ValueTask>> cleanupActions,
+            string aggregateMessage = "Host cleanup 失败。")
         {
             List<Exception>? cleanupFailures = null;
             foreach (var cleanup in cleanupActions)
@@ -438,7 +439,7 @@ namespace UmamusumeResponseAnalyzer
             if (cleanupFailures is [var cleanupFailure])
                 ExceptionDispatchInfo.Capture(cleanupFailure).Throw();
             if (cleanupFailures is { Count: > 1 })
-                throw new AggregateException("Host cleanup 失败。", cleanupFailures);
+                throw new AggregateException(aggregateMessage, cleanupFailures);
         }
 
         static Task StartPluginInitializationAsync(BootstrapWorkspace bootstrap)
@@ -531,7 +532,6 @@ namespace UmamusumeResponseAnalyzer
                 foreach (var update in updates)
                 {
                     uiHost.Log(
-                        null,
                         $"[URA] 插件 {update.DisplayName} 有新版本可用: " +
                         $"{update.CurrentVersion} -> {update.LatestVersion}",
                         UiSeverity.Info);

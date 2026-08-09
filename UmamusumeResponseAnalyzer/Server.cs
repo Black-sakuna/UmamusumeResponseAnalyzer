@@ -2,7 +2,6 @@
 using Gallop.Endpoints;
 using Newtonsoft.Json.Linq;
 using System.Reflection;
-using System.Runtime.ExceptionServices;
 using UmamusumeResponseAnalyzer.TerminalGui;
 using UmamusumeResponseAnalyzer.Plugin;
 using WatsonWebserver.Core;
@@ -15,17 +14,13 @@ namespace UmamusumeResponseAnalyzer
     {
         readonly object gate = new();
         readonly CancellationTokenSource lifetime = CancellationTokenSource.CreateLinkedTokenSource(hostCancellationToken);
-        TaskCompletionSource? drained;
+        readonly TaskCompletionSource drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
         int inFlight;
         bool stopping;
 
         internal CancellationToken Token => lifetime.Token;
 
-        internal Func<HttpContextBase, Task> Wrap(Func<HttpContextBase, CancellationToken, Task> handler)
-        {
-            ArgumentNullException.ThrowIfNull(handler);
-            return ctx => InvokeAsync(ctx, handler);
-        }
+        internal Func<HttpContextBase, Task> Wrap(Func<HttpContextBase, CancellationToken, Task> handler) => ctx => InvokeAsync(ctx, handler);
 
         async Task InvokeAsync(HttpContextBase ctx, Func<HttpContextBase, CancellationToken, Task> handler)
         {
@@ -57,32 +52,26 @@ namespace UmamusumeResponseAnalyzer
             {
                 lock (gate)
                 {
-                    if (--inFlight == 0)
-                        drained?.TrySetResult();
+                    if (--inFlight == 0 && stopping)
+                        drained.TrySetResult();
                 }
             }
         }
 
         internal Task StopAsync()
         {
-            Task wait;
-            var cancel = false;
             lock (gate)
             {
-                if (!stopping)
-                {
-                    stopping = true;
-                    cancel = true;
-                }
+                if (stopping)
+                    return drained.Task;
 
-                wait = inFlight == 0
-                    ? Task.CompletedTask
-                    : (drained ??= new(TaskCreationOptions.RunContinuationsAsynchronously)).Task;
+                stopping = true;
+                if (inFlight == 0)
+                    drained.TrySetResult();
             }
 
-            if (cancel)
-                lifetime.Cancel();
-            return wait;
+            lifetime.Cancel();
+            return drained.Task;
         }
 
         public void Dispose() => lifetime.Dispose();
@@ -95,20 +84,11 @@ namespace UmamusumeResponseAnalyzer
         GameHttpHeaders headers)
     {
         object? dto;
-        bool dtoInitialized;
 
         public byte[] Payload { get; } = payload;
         public GameHttpHeaders Headers { get; } = headers;
 
-        public object GetDto()
-        {
-            if (dtoInitialized)
-                return dto!;
-
-            dto = DeserializeDto();
-            dtoInitialized = true;
-            return dto;
-        }
+        public object GetDto() => dto ??= DeserializeDto();
 
         object DeserializeDto()
         {
@@ -128,22 +108,16 @@ namespace UmamusumeResponseAnalyzer
         }
     }
 
-    public static class Server
+    internal static class Server
     {
         const string GameEndpointPathPrefix = "/umamusume";
-        internal const string CanonicalUrlHeaderName = "X-Hachimi-Game-Url";
-        internal const string SidHeaderName = "X-Hachimi-sid";
-        internal const string AppVerHeaderName = "X-Hachimi-app-ver";
-        internal const string ResVerHeaderName = "X-Hachimi-res-ver";
-        internal const string ViewerIdHeaderName = "X-Hachimi-viewerid";
-        internal const string DeviceHeaderName = "X-Hachimi-device";
-        internal const string DeviceSubtypeHeaderName = "X-Hachimi-device-subtype";
+        const string CanonicalUrlHeaderName = "X-Hachimi-Game-Url";
         static readonly object DebugPacketCleanupLock = new();
         static readonly object LifecycleLock = new();
         static ServerRequestBarrier? requests;
         static Task? shutdownTask;
-        internal static WebserverLite Instance = new(new WebserverSettings(Config.Core.ListenAddress, Config.Core.ListenPort), (ctx) => { return ctx.Response.Send(string.Empty); });
-        public static bool IsRunning => Instance.IsListening;
+        internal static WebserverLite Instance = new(new WebserverSettings(Config.Core.ListenAddress, Config.Core.ListenPort), ctx => ctx.Response.Send(string.Empty));
+        internal static bool IsRunning => Instance.IsListening;
         internal static void Start(CancellationToken hostCancellationToken)
         {
             lock (LifecycleLock)
@@ -156,35 +130,19 @@ namespace UmamusumeResponseAnalyzer
             Instance.Routes.PreAuthentication.Static.Add(
                 WatsonWebserver.Core.HttpMethod.POST,
                 "/notify/response",
-                requests.Wrap(async (ctx, cancellationToken) =>
-                {
-                    var buffer = ctx.Request.DataAsBytes;
-                    var canonicalUrl = ReadCanonicalUrl(ctx);
-                    var headers = ReadGameHttpHeaders(ctx);
-                    await DispatchResponse(canonicalUrl, buffer, headers);
-                    cancellationToken.ThrowIfCancellationRequested();
-                    await ctx.Response.Send(string.Empty);
-                }));
+                requests.Wrap((ctx, cancellationToken) => HandleNotificationAsync(AnalyzerKind.Response, ctx, cancellationToken)));
             Instance.Routes.PreAuthentication.Static.Add(
                 WatsonWebserver.Core.HttpMethod.POST,
                 "/notify/request",
-                requests.Wrap(async (ctx, cancellationToken) =>
-                {
-                    var buffer = ctx.Request.DataAsBytes;
-                    var canonicalUrl = ReadCanonicalUrl(ctx);
-                    var headers = ReadGameHttpHeaders(ctx);
-                    await DispatchRequest(canonicalUrl, buffer, headers);
-                    cancellationToken.ThrowIfCancellationRequested();
-                    await ctx.Response.Send(string.Empty);
-                }));
+                requests.Wrap((ctx, cancellationToken) => HandleNotificationAsync(AnalyzerKind.Request, ctx, cancellationToken)));
             Instance.Routes.PreAuthentication.Static.Add(
                 WatsonWebserver.Core.HttpMethod.GET,
                 "/notify/ping",
-                requests.Wrap(async (ctx, cancellationToken) =>
+                requests.Wrap((ctx, cancellationToken) =>
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     TerminalUi.Log("Server", I18N_PingReceived, UiSeverity.Trace);
-                    await ctx.Response.Send("pong");
+                    return ctx.Response.Send("pong");
                 }));
             WebInstallApi.Register(Instance, requests);
             Instance.Start(requests.Token);
@@ -218,115 +176,81 @@ namespace UmamusumeResponseAnalyzer
             try
             {
                 await ShutdownCoreAsync(server, requestBarrier);
+                completion.SetResult();
             }
             catch (OperationCanceledException ex)
             {
                 completion.SetCanceled(ex.CancellationToken);
-                return;
             }
             catch (Exception ex)
             {
                 completion.SetException(ex);
-                return;
             }
-
-            completion.SetResult();
         }
 
-        internal static async Task ShutdownCoreAsync(WebserverLite server, ServerRequestBarrier? requestBarrier)
+        internal static Task ShutdownCoreAsync(WebserverLite server, ServerRequestBarrier? requestBarrier)
         {
-            List<Exception>? failures = null;
-            Task drained = Task.CompletedTask;
-
-            if (requestBarrier is not null)
-            {
-                try
-                {
-                    drained = requestBarrier.StopAsync();
-                }
-                catch (Exception ex)
-                {
-                    (failures ??= []).Add(ex);
-                }
-            }
-
-            try
-            {
-                if (server.IsListening)
-                    server.Stop();
-            }
-            catch (Exception ex)
-            {
-                (failures ??= []).Add(ex);
-            }
-
-            try
-            {
-                await drained;
-            }
-            catch (Exception ex)
-            {
-                (failures ??= []).Add(ex);
-            }
-
-            try
-            {
-                server.Dispose();
-            }
-            catch (Exception ex)
-            {
-                (failures ??= []).Add(ex);
-            }
-
-            try
-            {
-                requestBarrier?.Dispose();
-            }
-            catch (Exception ex)
-            {
-                (failures ??= []).Add(ex);
-            }
-
-            if (failures is [var failure])
-                ExceptionDispatchInfo.Capture(failure).Throw();
-            if (failures is { Count: > 1 })
-                throw new AggregateException("HTTP server shutdown 失败。", failures);
+            var drained = Task.CompletedTask;
+            return UmamusumeResponseAnalyzer.RunCleanupAsync(
+                null,
+                [
+                    () =>
+                    {
+                        drained = requestBarrier?.StopAsync() ?? Task.CompletedTask;
+                        return ValueTask.CompletedTask;
+                    },
+                    () =>
+                    {
+                        if (server.IsListening)
+                            server.Stop();
+                        return ValueTask.CompletedTask;
+                    },
+                    () => new ValueTask(drained),
+                    () =>
+                    {
+                        server.Dispose();
+                        return ValueTask.CompletedTask;
+                    },
+                    () =>
+                    {
+                        requestBarrier?.Dispose();
+                        return ValueTask.CompletedTask;
+                    },
+                ],
+                "HTTP server shutdown 失败。");
         }
-        internal static string ReadCanonicalUrl(HttpContextBase ctx)
+
+        static async Task HandleNotificationAsync(
+            AnalyzerKind kind,
+            HttpContextBase ctx,
+            CancellationToken cancellationToken)
         {
+            var buffer = ctx.Request.DataAsBytes;
             var canonicalUrl = ctx.Request.Headers[CanonicalUrlHeaderName];
             if (string.IsNullOrWhiteSpace(canonicalUrl))
                 throw new InvalidOperationException($"缺少 canonical URL header: {CanonicalUrlHeaderName}");
-            return canonicalUrl;
-        }
 
-        internal static GameHttpHeaders ReadGameHttpHeaders(HttpContextBase ctx)
-            => new(
-                ctx.Request.Headers[SidHeaderName],
-                ctx.Request.Headers[AppVerHeaderName],
-                ctx.Request.Headers[ResVerHeaderName],
-                ctx.Request.Headers[ViewerIdHeaderName],
-                ctx.Request.Headers[DeviceHeaderName],
-                ctx.Request.Headers[DeviceSubtypeHeaderName]);
+            var headers = new GameHttpHeaders(
+                ctx.Request.Headers["X-Hachimi-sid"],
+                ctx.Request.Headers["X-Hachimi-app-ver"],
+                ctx.Request.Headers["X-Hachimi-res-ver"],
+                ctx.Request.Headers["X-Hachimi-viewerid"],
+                ctx.Request.Headers["X-Hachimi-device"],
+                ctx.Request.Headers["X-Hachimi-device-subtype"]);
+            await DispatchPacket(kind, canonicalUrl, buffer, headers);
+            cancellationToken.ThrowIfCancellationRequested();
+            await ctx.Response.Send(string.Empty);
+        }
 
         internal static bool TryResolveEndpoint(string canonicalUrl, out GameEndpointDescriptor descriptor)
         {
             var path = ExtractEndpointPath(canonicalUrl);
-            var triedPaths = ResolveEndpointPathCandidates(path);
-            foreach (var triedPath in triedPaths)
-            {
-                if (GameEndpointCatalog.ByPath.TryGetValue(triedPath, out descriptor!))
-                    return true;
-            }
-
-            descriptor = null!;
-            return false;
+            var prefixed = path.StartsWith(GameEndpointPathPrefix + "/", StringComparison.Ordinal);
+            var firstPath = prefixed ? path : GameEndpointPathPrefix + path;
+            var secondPath = prefixed ? path[GameEndpointPathPrefix.Length..] : path;
+            return GameEndpointCatalog.ByPath.TryGetValue(firstPath, out descriptor!)
+                || GameEndpointCatalog.ByPath.TryGetValue(secondPath, out descriptor!);
         }
-
-        static string[] ResolveEndpointPathCandidates(string path)
-            => path.StartsWith(GameEndpointPathPrefix + "/", StringComparison.Ordinal)
-                ? [path, path[GameEndpointPathPrefix.Length..]]
-                : [GameEndpointPathPrefix + path, path];
 
         static string ExtractEndpointPath(string canonicalUrl)
         {
@@ -361,11 +285,19 @@ namespace UmamusumeResponseAnalyzer
 
                 SaveDebugPacket(kind, canonicalUrl, buffer);
 
-                await DispatchPacketLocked(kind, descriptor, buffer, headers);
+                using var registrations = PluginManager.SnapshotAnalyzerRegistrations(kind, descriptor.EndpointType);
+                if (registrations.Count == 0)
+                    return;
+
+                var context = new AnalyzerDispatchContext(kind, descriptor, buffer, headers);
+                for (var i = 0; i < registrations.Count; i++)
+                    await InvokeAnalyzer(kind, registrations[i], context);
             }
             catch (Exception e)
             {
-                ReportDispatchError(kind, e);
+                var label = kind == AnalyzerKind.Request ? "请求分析失败" : I18N_ResponseAnalyzeFail;
+                TerminalUi.Notify("Server", $"{label}: {e.Message}", UiSeverity.Error);
+                TerminalUi.LogException("Server", e);
                 throw;
             }
         }
@@ -375,15 +307,14 @@ namespace UmamusumeResponseAnalyzer
             if (!Config.Misc.SaveResponseForDebug)
                 return;
 
-            if (!Directory.Exists("packets"))
-                Directory.CreateDirectory("packets");
+            Directory.CreateDirectory("packets");
 
             CleanupOldDebugPackets();
 
             var suffix = kind == AnalyzerKind.Request ? "Q" : "R";
             var timestamp = DateTime.Now.ToString("yy-MM-dd HH-mm-ss-fff");
-            var endpointName = FormatDebugPacketEndpoint(canonicalUrl);
-            File.WriteAllBytes($"packets/{timestamp}{suffix}-{endpointName}.msgpack", buffer);
+            var endpointName = ExtractEndpointPath(canonicalUrl)[1..].Replace('/', '-');
+            File.WriteAllBytes($"packets/{timestamp}-{Guid.CreateVersion7():N}{suffix}-{endpointName}.msgpack", buffer);
 #if DEBUG
             var debugJson = new JObject
             {
@@ -401,38 +332,19 @@ namespace UmamusumeResponseAnalyzer
                 foreach (var i in Directory.GetFiles("packets"))
                 {
                     var fileInfo = new FileInfo(i);
-                    if (fileInfo.CreationTime.AddDays(1) < DateTime.Now)
+                    if (fileInfo.CreationTime.AddDays(1) >= DateTime.Now)
+                        continue;
+
+                    try
                     {
-                        try
-                        {
-                            fileInfo.Delete();
-                        }
-                        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-                        {
-                            TerminalUi.Log("Server", $"debug packet 旧文件清理失败，已跳过 {Path.GetFileName(i)}: {ex.Message}", UiSeverity.Warning);
-                        }
+                        fileInfo.Delete();
+                    }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                    {
+                        TerminalUi.Log("Server", $"debug packet 旧文件清理失败，已跳过 {Path.GetFileName(i)}: {ex.Message}", UiSeverity.Warning);
                     }
                 }
             }
-        }
-
-        static string FormatDebugPacketEndpoint(string canonicalUrl)
-        {
-            var endpointPath = ExtractEndpointPath(canonicalUrl);
-            if (endpointPath.StartsWith('/'))
-                endpointPath = endpointPath[1..];
-            return endpointPath.Replace('/', '-');
-        }
-
-        static async ValueTask DispatchPacketLocked(AnalyzerKind kind, GameEndpointDescriptor descriptor, byte[] buffer, GameHttpHeaders headers)
-        {
-            using var registrations = PluginManager.SnapshotAnalyzerRegistrations(kind, descriptor.EndpointType);
-            if (registrations.Count == 0)
-                return;
-
-            var context = new AnalyzerDispatchContext(kind, descriptor, buffer, headers);
-            for (var i = 0; i < registrations.Count; i++)
-                await InvokeAnalyzer(kind, registrations[i], context);
         }
 
         static async ValueTask InvokeAnalyzer(AnalyzerKind kind, AnalyzerRegistration registration, AnalyzerDispatchContext context)
@@ -456,12 +368,6 @@ namespace UmamusumeResponseAnalyzer
             }
         }
 
-        static void ReportDispatchError(AnalyzerKind kind, Exception ex)
-        {
-            var label = kind == AnalyzerKind.Request ? "请求分析失败" : I18N_ResponseAnalyzeFail;
-            TerminalUi.Notify("Server", $"{label}: {ex.Message}", UiSeverity.Error);
-            TerminalUi.LogException("Server", ex);
-        }
     }
 
 }

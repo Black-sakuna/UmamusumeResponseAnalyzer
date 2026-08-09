@@ -422,13 +422,13 @@ namespace UmamusumeResponseAnalyzer.Tests
                 var packetsDir = Path.Combine(tempDir, "packets");
                 var msgpack = Assert.Single(Directory.GetFiles(packetsDir, "*.msgpack"));
                 var msgpackName = Path.GetFileName(msgpack);
-                Assert.Matches(@"^\d{2}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}-\d{3}R-umamusume-single_mode_ramen-check_event\.msgpack$", msgpackName);
-                Assert.DoesNotContain("https", msgpackName, StringComparison.OrdinalIgnoreCase);
-                Assert.DoesNotContain("api.games.umamusume.jp", msgpackName, StringComparison.Ordinal);
-                Assert.DoesNotContain("%2F", msgpackName, StringComparison.OrdinalIgnoreCase);
-                Assert.DoesNotContain(Path.DirectorySeparatorChar.ToString(), msgpackName, StringComparison.Ordinal);
-                Assert.DoesNotContain(Path.AltDirectorySeparatorChar.ToString(), msgpackName, StringComparison.Ordinal);
+                Assert.Matches(@"^\d{2}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}-\d{3}-[0-9a-f]{32}R-umamusume-single_mode_ramen-check_event\.msgpack$", msgpackName);
+                var responseMarker = msgpackName.IndexOf("R-", StringComparison.Ordinal);
+                Assert.Equal(7, Guid.ParseExact(msgpackName[(responseMarker - 32)..responseMarker], "N").Version);
                 Assert.Equal(payload, File.ReadAllBytes(msgpack));
+                Assert.True(PacketCorpus.TryGetCanonicalUrl(msgpack, out var packetKind, out var packetUrl));
+                Assert.Equal(AnalyzerKind.Response, packetKind);
+                Assert.Equal("/umamusume/single_mode_ramen/check_event", packetUrl);
 
 #if DEBUG
                 var jsonPath = Assert.Single(Directory.GetFiles(packetsDir, "*.json"));

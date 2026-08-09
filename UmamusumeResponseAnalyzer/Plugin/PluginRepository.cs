@@ -310,7 +310,9 @@ namespace UmamusumeResponseAnalyzer.Plugin
             {
                 if (conflictingNames.Contains(plugin.InternalName))
                 {
-                    TerminalUi.Log("URA", $"{Bracketed(plugin.InternalName)} 被多个作者同时选中，跳过；请一次只安装其中一个 fork");
+                    var message = $"{Bracketed(plugin.InternalName)} 被多个作者同时选中，跳过；请一次只安装其中一个 fork";
+                    TerminalUi.Log("URA", message, UiSeverity.Warning);
+                    TerminalUi.Notify("URA", message, UiSeverity.Warning);
                     continue;
                 }
 
@@ -319,7 +321,9 @@ namespace UmamusumeResponseAnalyzer.Plugin
                         && !string.Equals(p.Author, plugin.Author, StringComparison.OrdinalIgnoreCase));
                 if (installedFork != null)
                 {
-                    TerminalUi.Log("URA", $"{Bracketed(DisplayLabel(plugin))} 与已安装的 {installedFork.Author}/{plugin.InternalName} 冲突，跳过");
+                    var message = $"{Bracketed(DisplayLabel(plugin))} 与已安装的 {installedFork.Author}/{plugin.InternalName} 冲突，跳过";
+                    TerminalUi.Log("URA", message, UiSeverity.Warning);
+                    TerminalUi.Notify("URA", message, UiSeverity.Warning);
                     continue;
                 }
 
@@ -342,7 +346,9 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
                 {
-                    TerminalUi.Log("URA", $"{Bracketed(DisplayLabel(plugin))} 安装失败: {ex.Message}");
+                    var message = $"{Bracketed(DisplayLabel(plugin))} 安装失败: {ex.Message}";
+                    TerminalUi.Log("URA", message, UiSeverity.Error);
+                    TerminalUi.Notify("URA", message, UiSeverity.Error);
                 }
             }
             return installed;

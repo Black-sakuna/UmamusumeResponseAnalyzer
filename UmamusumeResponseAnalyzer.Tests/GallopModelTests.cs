@@ -91,5 +91,89 @@ namespace UmamusumeResponseAnalyzer.Tests
             Assert.NotNull(dto);
             Assert.Null(dto!.start_dress_info);
         }
+
+        [Theory]
+        [InlineData("00", false)]
+        [InlineData("01", true)]
+        [InlineData("C2", false)]
+        [InlineData("C3", true)]
+        public void BoolField_DeserializesGameWireEncodings(string hex, bool expected)
+        {
+            var dto = MessagePackSerializer.Deserialize<StoryEventCharaBonus>(BoolFieldPayload(hex));
+
+            Assert.NotNull(dto);
+            Assert.Equal(expected, dto!.is_rental);
+        }
+
+        [Theory]
+        [InlineData("02")]
+        [InlineData("CC00")]
+        [InlineData("D001")]
+        public void BoolField_RejectsUnsupportedIntegerEncodings(string hex)
+        {
+            Assert.Throws<MessagePackSerializationException>(() =>
+                MessagePackSerializer.Deserialize<StoryEventCharaBonus>(BoolFieldPayload(hex)));
+        }
+
+        [Theory]
+        [InlineData(false, MessagePackCode.False)]
+        [InlineData(true, MessagePackCode.True)]
+        public void BoolField_SerializesAsMessagePackBoolean(bool value, byte expectedCode)
+        {
+            var payload = MessagePackSerializer.Serialize(new StoryEventCharaBonus { is_rental = value });
+
+            Assert.Equal(expectedCode, ReadFieldCode(payload, "is_rental"));
+        }
+
+        [Fact]
+        public void LegendLoadPacket_DeserializesNumericAndBooleanFields()
+        {
+            var path = Environment.GetEnvironmentVariable("URA_LEGEND_LOAD_PACKET");
+            Assert.SkipWhen(string.IsNullOrWhiteSpace(path), "未配置固定 Legend Load fixture 的 URA_LEGEND_LOAD_PACKET");
+            Assert.True(File.Exists(path), $"URA_LEGEND_LOAD_PACKET 指向的文件不存在: {path}");
+            var payload = File.ReadAllBytes(path!);
+            Assert.Equal(
+                "C643813F7F99D3261B0623B2E708E3D7A40F8CC35F9F595012FAAA209AB8853E",
+                Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(payload)));
+
+            var dto = MessagePackSerializer.Deserialize<SingleModeLegendLoadResponse>(payload);
+
+            Assert.NotNull(dto);
+            Assert.NotNull(dto!.data);
+            Assert.NotNull(dto.data.single_mode_load_common);
+            Assert.NotNull(dto.data.single_mode_load_common.story_event_chara_bonus_list);
+            Assert.Equal(4, dto.data.single_mode_load_common.story_event_chara_bonus_list.Length);
+            Assert.All(dto.data.single_mode_load_common.story_event_chara_bonus_list, bonus => Assert.False(bonus.is_rental));
+            Assert.True(dto.data.single_mode_load_common.is_umaplan);
+            Assert.NotNull(dto.data.legend_data_set);
+            Assert.False(dto.data.legend_data_set.is_appear_legend);
+        }
+
+        private static byte[] BoolFieldPayload(string hex)
+        {
+            var buffer = new System.Buffers.ArrayBufferWriter<byte>();
+            var writer = new MessagePackWriter(buffer);
+            writer.WriteMapHeader(1);
+            writer.Write("is_rental");
+            writer.WriteRaw(Convert.FromHexString(hex));
+            writer.Flush();
+            return buffer.WrittenSpan.ToArray();
+        }
+
+        private static byte ReadFieldCode(byte[] payload, string fieldName)
+        {
+            var reader = new MessagePackReader(payload.AsMemory());
+            var count = reader.ReadMapHeader();
+            for (var i = 0; i < count; i++)
+            {
+                var key = reader.ReadString();
+                if (key == fieldName)
+                    return reader.NextCode;
+
+                reader.Skip();
+            }
+
+            throw new InvalidOperationException($"Serialized payload did not contain {fieldName}.");
+        }
     }
 }

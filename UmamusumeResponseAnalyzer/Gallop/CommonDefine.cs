@@ -147,4 +147,5 @@ public class CommonDefine
     [Key("practice_race_recommend_condition_open_date")] public string practice_race_recommend_condition_open_date; // 0x308
     [Key("idle_single_mode_open_date")] public string idle_single_mode_open_date; // 0x310
     [Key("gacha_pickup_ssr_direction_open_date")] public string gacha_pickup_ssr_direction_open_date; // 0x318
+    [Key("save_announce_open_date")] public string save_announce_open_date; // 0x320
 }

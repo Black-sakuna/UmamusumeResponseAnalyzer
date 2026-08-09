@@ -90,9 +90,6 @@ internal sealed class BootstrapWorkspace : IDisposable
                 Dispose();
                 return;
             }
-            if (line.Workspace is not null && !ReferenceEquals(line.Workspace, Workspace))
-                return;
-
             logs.Add(new(
                 SeverityLabel(line.Severity),
                 line.Text,

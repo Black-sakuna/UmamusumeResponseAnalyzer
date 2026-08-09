@@ -185,6 +185,26 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
 
         [Fact]
+        public async Task PluginConfigPrompt_RunAsync_AllowsLoadedPluginBeforeInitialization()
+        {
+            using var fixture = new CompiledSettingsPluginFixture();
+            PluginManager.Init();
+            var plugin = Assert.Single(
+                PluginManager.SnapshotLoadedPlugins(),
+                plugin => plugin.Name == "SettingsPlugin");
+            var initialized = plugin.GetType().GetProperty("Initialized")!;
+            var configPromptCalls = plugin.GetType().GetProperty("ConfigPromptCalls")!;
+            Assert.False((bool)initialized.GetValue(plugin)!);
+
+            await PluginConfigPrompt.RunAsync(plugin, TestContext.Current.CancellationToken);
+
+            Assert.Equal(1, (int)configPromptCalls.GetValue(plugin)!);
+            Assert.False((bool)initialized.GetValue(plugin)!);
+            PluginManager.InitializeLoadedPlugins();
+            Assert.True((bool)initialized.GetValue(plugin)!);
+        }
+
+        [Fact]
         public async Task PluginConfigPrompt_RunAsync_NoCustomPromptReturnsWithoutHostEditor()
         {
             var plugin = new NoConfigPromptPlugin();
@@ -453,8 +473,19 @@ namespace UmamusumeResponseAnalyzer.Tests
                         public string[] Targets => System.Array.Empty<string>();
 
                         public int Value { get; set; } = 1;
+                        public bool Initialized { get; private set; }
+                        public int ConfigPromptCalls { get; private set; }
 
-                        public void Initialize(IPluginContext context) { }
+                        public void Initialize(IPluginContext context)
+                            => Initialized = true;
+
+                        public Task ConfigPromptAsync(
+                            Terminal.Gui.App.IApplication application,
+                            System.Threading.CancellationToken cancellationToken = default)
+                        {
+                            ConfigPromptCalls++;
+                            return Task.CompletedTask;
+                        }
                     }
                     """,
                     "SettingsPlugin",

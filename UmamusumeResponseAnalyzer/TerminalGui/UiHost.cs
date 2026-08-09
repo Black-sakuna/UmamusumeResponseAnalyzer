@@ -47,8 +47,6 @@ internal sealed class UiHost : IUiInputSink
     readonly TaskCompletionSource ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
     readonly TaskCompletionSource shutdownCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
     readonly List<UiLogLine> globalLogs = [];
-    readonly Dictionary<Workspace, List<UiLogLine>> workspaceLogs =
-        new(ReferenceEqualityComparer.Instance);
     readonly List<NotificationState> notifications = [];
     readonly CancellationTokenSource stopping = new();
     readonly SemaphoreSlim commandExecution = new(1, 1);
@@ -100,12 +98,16 @@ internal sealed class UiHost : IUiInputSink
     internal event Action<UiLogLine>? LogAdded;
     internal event Action? ShutdownStarting;
 
-    internal IReadOnlyList<UiLogLine> GetLogsForTests(Workspace? workspace)
+    internal IReadOnlyList<UiLogLine> GetLogsForTests()
+        => globalLogs.ToArray();
+
+    internal IReadOnlyList<Workspace> GetWorkspacesForTests()
     {
-        var source = workspace is null
-            ? globalLogs
-            : workspaceLogs.GetValueOrDefault(workspace) ?? [];
-        return source.ToArray();
+        lock (ingressGate)
+        {
+            EnsureAvailableLocked();
+            return registry.SnapshotRegistrationOrder();
+        }
     }
 
     internal IReadOnlyList<UiNotification> GetNotificationsForTests(Workspace? workspace)
@@ -230,7 +232,6 @@ internal sealed class UiHost : IUiInputSink
     }
 
     internal void Log(
-        Workspace? workspace,
         string text,
         UiSeverity severity,
         string? exceptionDetails = null)
@@ -239,11 +240,9 @@ internal sealed class UiHost : IUiInputSink
         lock (ingressGate)
         {
             EnsureAvailableLocked();
-            if (workspace is not null)
-                registry.EnsureLive(workspace);
             ArgumentNullException.ThrowIfNull(text);
             schedule = AdmitLocked(new LogIngress(
-                new(workspace, text, severity, exceptionDetails)));
+                new(text, severity, exceptionDetails)));
         }
         ScheduleDrain(schedule);
     }
@@ -831,7 +830,6 @@ internal sealed class UiHost : IUiInputSink
                 return UiChange.Workspace;
             case RemoveWorkspaceIngress remove:
                 viewport.RemoveWorkspace(remove.Workspace);
-                workspaceLogs.Remove(remove.Workspace);
                 renderedWorkspaces = remove.RegistrationOrder;
                 renderedWorkspace = remove.Replacement;
                 viewport.SetActiveWorkspace(renderedWorkspace);
@@ -1042,37 +1040,23 @@ internal sealed class UiHost : IUiInputSink
 
     UiLogLine? AddLog(UiLogLine line)
     {
-        var bank = line.Workspace is null
-            ? globalLogs
-            : workspaceLogs.GetValueOrDefault(line.Workspace);
-        if (bank is null)
-        {
-            bank = [];
-            workspaceLogs.Add(line.Workspace!, bank);
-        }
-
-        bank.Add(line);
-        if (bank.Count <= MaxLogLines)
+        globalLogs.Add(line);
+        if (globalLogs.Count <= MaxLogLines)
             return null;
 
-        var trimmed = bank[0];
-        bank.RemoveAt(0);
+        var trimmed = globalLogs[0];
+        globalLogs.RemoveAt(0);
         return trimmed;
     }
 
     void RollbackLog(UiLogLine line, UiLogLine? trimmed)
     {
-        var bank = line.Workspace is null
-            ? globalLogs
-            : workspaceLogs[line.Workspace];
-        if (!ReferenceEquals(bank[^1], line))
+        if (!ReferenceEquals(globalLogs[^1], line))
             throw new InvalidOperationException("UiHost log bank rollback 顺序失衡。");
 
-        bank.RemoveAt(bank.Count - 1);
+        globalLogs.RemoveAt(globalLogs.Count - 1);
         if (trimmed is not null)
-            bank.Insert(0, trimmed);
-        if (line.Workspace is not null && bank.Count == 0)
-            workspaceLogs.Remove(line.Workspace);
+            globalLogs.Insert(0, trimmed);
     }
 
     void CreateWindow()
@@ -1243,6 +1227,7 @@ internal sealed class UiHost : IUiInputSink
         catch (Exception ex)
         {
             TerminalUi.LogException("URA", ex);
+            TerminalUi.Notify("URA", ex.Message, UiSeverity.Error);
             return true;
         }
     }
@@ -1259,6 +1244,7 @@ internal sealed class UiHost : IUiInputSink
         catch (Exception ex)
         {
             TerminalUi.LogException("URA", ex);
+            TerminalUi.Notify("URA", ex.Message, UiSeverity.Error);
         }
     }
 
@@ -1310,6 +1296,7 @@ internal sealed class UiHost : IUiInputSink
             try
             {
                 TerminalUi.LogException("Command", failure);
+                TerminalUi.Notify("Command", failure.Message, UiSeverity.Error);
             }
             catch (Exception ex)
             {
@@ -1402,14 +1389,22 @@ internal sealed class UiHost : IUiInputSink
         return completion.Task;
     }
 
-    void ApplyCommandResult(HostCommands.Result result)
+    internal void ApplyCommandResult(HostCommands.Result result)
     {
         if (!string.IsNullOrEmpty(result.Message))
         {
             Log(
-                null,
                 $"[Command] {result.Message}",
                 result.Severity);
+            if (result.Display is null)
+            {
+                Notify(
+                    null,
+                    $"[Command] {result.Message}",
+                    result.Severity,
+                    ttl: null,
+                    shortcuts: []);
+            }
         }
         if (result.Display is not null)
             ShowCommandDisplay(result.Display);
@@ -1591,7 +1586,6 @@ internal sealed class UiHost : IUiInputSink
         }
         notifications.Clear();
         globalLogs.Clear();
-        workspaceLogs.Clear();
         foreach (var hotkey in hotkeys)
             HotkeyManager.Unregister(hotkey.Key, hotkey.Modifiers, hotkey.Entry);
         ready.TrySetCanceled();

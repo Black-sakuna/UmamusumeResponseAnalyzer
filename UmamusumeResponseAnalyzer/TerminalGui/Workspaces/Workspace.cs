@@ -36,9 +36,6 @@ public sealed class Workspace
     public bool RemovePanel(string key)
         => TerminalUi.RequireHost().RemovePanel(this, key);
 
-    public void Log(string text, UiSeverity severity = UiSeverity.Info)
-        => TerminalUi.RequireHost().Log(this, text, severity);
-
     public void Notify(
         string text,
         UiSeverity severity = UiSeverity.Info,
