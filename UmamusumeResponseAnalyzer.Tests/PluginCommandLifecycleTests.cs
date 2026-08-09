@@ -76,7 +76,7 @@ public sealed class PluginCommandLifecycleTests : IDisposable
         AssertInitializedAndOpen(pluginName);
         Assert.Equal(
             new Version(2, 0),
-            Assert.Single(PluginManager.SnapshotPluginStatuses(), plugin =>
+            Assert.Single(PluginManager.InspectPluginStatuses(), plugin =>
                 plugin.InternalName == pluginName).Version);
     }
 
@@ -271,7 +271,7 @@ public sealed class PluginCommandLifecycleTests : IDisposable
     }
 
     HostCommands.Snapshot Snapshot()
-        => new([], null, PluginManager.SnapshotPluginStatuses());
+        => new([], null, PluginManager.InspectPluginStatuses());
 
     static void AssertLifecycleSuccess(
         HostCommands.Result result,

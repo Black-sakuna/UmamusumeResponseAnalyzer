@@ -211,9 +211,10 @@ namespace UmamusumeResponseAnalyzer
     {
         internal async Task PromptAsync(CancellationToken cancellationToken)
         {
-            var plugins = BuildPluginChoices(PluginManager.SnapshotLoadedPlugins());
+            var plugins = BuildPluginChoices(
+                PluginManager.SnapshotPluginStatuses().Where(plugin => plugin.IsLoaded));
             var choices = plugins
-                .Select(x => (Label: x.Key, Plugin: (IPlugin?)x.Value))
+                .Select(x => (Label: x.Key, InternalName: (string?)x.Value))
                 .Append((i18n.Return, null))
                 .ToArray();
             while (true)
@@ -223,33 +224,36 @@ namespace UmamusumeResponseAnalyzer
                     choices,
                     x => x.Label,
                     cancellationToken: cancellationToken);
-                if (selected.Plugin is null)
+                if (selected.InternalName is null)
                     return;
-                await PluginConfigPrompt.RunAsync(selected.Plugin, cancellationToken);
+                var plugin = PluginManager.FindLoadedPlugin(selected.InternalName)
+                    ?? throw new InvalidOperationException($"插件已卸载，无法打开设置: {selected.InternalName}");
+                await PluginConfigPrompt.RunAsync(plugin, cancellationToken);
             }
         }
 
-        internal static SortedDictionary<string, IPlugin> BuildPluginChoices(IEnumerable<IPlugin> plugins)
+        internal static SortedDictionary<string, string> BuildPluginChoices(
+            IEnumerable<PluginManager.PluginRuntimeStatus> plugins)
         {
             var list = plugins.ToList();
             var duplicateNames = list
-                .GroupBy(x => x.Name, StringComparer.Ordinal)
+                .GroupBy(x => x.DisplayName, StringComparer.Ordinal)
                 .Where(x => x.Count() > 1)
                 .Select(x => x.Key)
                 .ToHashSet(StringComparer.Ordinal);
 
-            var choices = new SortedDictionary<string, IPlugin>(StringComparer.Ordinal);
+            var choices = new SortedDictionary<string, string>(StringComparer.Ordinal);
             foreach (var plugin in list)
             {
-                var baseLabel = duplicateNames.Contains(plugin.Name)
-                    ? $"{plugin.Name} ({plugin.Author}/{PluginManager.InternalName(plugin)})"
-                    : plugin.Name;
+                var baseLabel = duplicateNames.Contains(plugin.DisplayName)
+                    ? $"{plugin.DisplayName} ({plugin.Author}/{plugin.InternalName})"
+                    : plugin.DisplayName;
 
                 var label = baseLabel;
                 for (var suffix = 2; choices.ContainsKey(label); suffix++)
                     label = $"{baseLabel} #{suffix}";
 
-                choices.Add(label, plugin);
+                choices.Add(label, plugin.InternalName);
             }
             return choices;
         }

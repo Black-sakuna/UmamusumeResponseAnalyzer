@@ -70,12 +70,16 @@ namespace UmamusumeResponseAnalyzer
             cancellationToken.ThrowIfCancellationRequested();
             ApplyCors(ctx);
             ctx.Response.ContentType = "application/json";
-            var plugins = PluginManager.SnapshotLoadedPlugins().Select(p => new
-            {
-                author = p.Author,
-                internalName = PluginManager.InternalName(p),
-                version = p.Version.ToString(),
-            });
+            var plugins = PluginManager.SnapshotPluginStatuses()
+                .Where(plugin => plugin.IsLoaded)
+                .Select(plugin => new
+                {
+                    author = plugin.Author,
+                    internalName = plugin.InternalName,
+                    version = (plugin.Version
+                        ?? throw new InvalidOperationException($"已加载插件缺少版本: {plugin.InternalName}"))
+                        .ToString(),
+                });
             var body = JsonConvert.SerializeObject(new
             {
                 app = "UmamusumeResponseAnalyzer",
@@ -111,9 +115,10 @@ namespace UmamusumeResponseAnalyzer
                 return;
             }
 
-            var installedFork = PluginManager.SnapshotLoadedPlugins()
-                .FirstOrDefault(p => string.Equals(PluginManager.InternalName(p), req.InternalName, StringComparison.OrdinalIgnoreCase)
-                    && !string.Equals(p.Author, req.Author, StringComparison.OrdinalIgnoreCase));
+            var installedFork = PluginManager.SnapshotPluginStatuses()
+                .FirstOrDefault(plugin => plugin.IsLoaded
+                    && string.Equals(plugin.InternalName, req.InternalName, StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(plugin.Author, req.Author, StringComparison.OrdinalIgnoreCase));
             if (installedFork != null)
             {
                 await SendJson(ctx, 409, new { ok = false, error = "author_conflict", installedAuthor = installedFork.Author });

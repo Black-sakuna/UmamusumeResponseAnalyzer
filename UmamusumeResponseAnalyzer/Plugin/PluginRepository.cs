@@ -107,8 +107,10 @@ namespace UmamusumeResponseAnalyzer.Plugin
 
         public static async Task<IReadOnlyList<PluginUpdateInfo>> CheckForUpdatesAsync(CancellationToken cancellationToken = default)
         {
-            var loaded = PluginManager.SnapshotLoadedPlugins();
-            if (loaded.Count == 0) return [];
+            var loaded = PluginManager.SnapshotPluginStatuses()
+                .Where(plugin => plugin.IsLoaded)
+                .ToArray();
+            if (loaded.Length == 0) return [];
             var remote = await FetchAllPluginsAsync(silent: true, cancellationToken);
             if (remote.Count == 0) return [];
 
@@ -118,7 +120,9 @@ namespace UmamusumeResponseAnalyzer.Plugin
             var updates = new List<PluginUpdateInfo>();
             foreach (var plugin in loaded)
             {
-                var assemblyName = PluginManager.InternalName(plugin);
+                var assemblyName = plugin.InternalName;
+                var currentVersion = plugin.Version
+                    ?? throw new InvalidOperationException($"已加载插件缺少版本: {assemblyName}");
                 // 同名 fork 用作者消歧：只有一个匹配时直接使用；多个 fork 时
                 // 按已加载插件的 Author 选对应那个，选不出就跳过（宁可不提示，也不对错误的 fork 误报更新）。
                 if (!remoteByInternalName.TryGetValue(assemblyName, out var matches)) continue;
@@ -128,11 +132,11 @@ namespace UmamusumeResponseAnalyzer.Plugin
                     _ => matches.FirstOrDefault(r => string.Equals(r.Author, plugin.Author, StringComparison.OrdinalIgnoreCase)),
                 };
                 if (remoteInfo is null) continue;
-                if (remoteInfo.Version > plugin.Version)
+                if (remoteInfo.Version > currentVersion)
                 {
                     updates.Add(new PluginUpdateInfo(
                         DisplayLabel(remoteInfo),
-                        plugin.Version,
+                        currentVersion,
                         remoteInfo.Version));
                 }
             }
@@ -316,9 +320,10 @@ namespace UmamusumeResponseAnalyzer.Plugin
                     continue;
                 }
 
-                var installedFork = PluginManager.SnapshotLoadedPlugins()
-                    .FirstOrDefault(p => string.Equals(PluginManager.InternalName(p), plugin.InternalName, StringComparison.OrdinalIgnoreCase)
-                        && !string.Equals(p.Author, plugin.Author, StringComparison.OrdinalIgnoreCase));
+                var installedFork = PluginManager.SnapshotPluginStatuses()
+                    .FirstOrDefault(status => status.IsLoaded
+                        && string.Equals(status.InternalName, plugin.InternalName, StringComparison.OrdinalIgnoreCase)
+                        && !string.Equals(status.Author, plugin.Author, StringComparison.OrdinalIgnoreCase));
                 if (installedFork != null)
                 {
                     var message = $"{Bracketed(DisplayLabel(plugin))} 与已安装的 {installedFork.Author}/{plugin.InternalName} 冲突，跳过";

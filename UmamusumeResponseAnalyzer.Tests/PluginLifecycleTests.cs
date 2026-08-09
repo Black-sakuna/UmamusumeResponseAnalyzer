@@ -259,33 +259,33 @@ namespace UmamusumeResponseAnalyzer.Tests
         [Fact]
         public void PluginConfig_BuildPluginChoices_AllowsDuplicateDisplayNames()
         {
-            IPlugin[] plugins =
+            PluginManager.PluginRuntimeStatus[] plugins =
             [
-                new DuplicateDisplayNamePlugin("Alice"),
-                new DuplicateDisplayNamePlugin("Bob"),
+                new("PluginA", "Same Display Name", "Alice", null, true, true, false),
+                new("PluginB", "Same Display Name", "Bob", null, true, true, false),
             ];
 
             var choices = PluginConfig.BuildPluginChoices(plugins);
 
             Assert.Equal(2, choices.Count);
             Assert.Equal(2, choices.Keys.Distinct(StringComparer.Ordinal).Count());
-            Assert.All(choices.Values, plugin => Assert.Equal("Same Display Name", plugin.Name));
+            Assert.Equal(["PluginA", "PluginB"], choices.Values);
         }
 
         [Fact]
         public void PluginConfig_BuildPluginChoices_AllowsDuplicateDisplayNamesAndAuthors()
         {
-            IPlugin[] plugins =
+            PluginManager.PluginRuntimeStatus[] plugins =
             [
-                new DuplicateDisplayNamePlugin("Same Author"),
-                new DuplicateDisplayNamePlugin("Same Author"),
+                new("PluginA", "Same Display Name", "Same Author", null, true, true, false),
+                new("PluginB", "Same Display Name", "Same Author", null, true, true, false),
             ];
 
             var choices = PluginConfig.BuildPluginChoices(plugins);
 
             Assert.Equal(2, choices.Count);
             Assert.Equal(2, choices.Keys.Distinct(StringComparer.Ordinal).Count());
-            Assert.All(choices.Values, plugin => Assert.Equal("Same Display Name", plugin.Name));
+            Assert.Equal(["PluginA", "PluginB"], choices.Values);
         }
 
         [Fact]
@@ -727,14 +727,6 @@ namespace UmamusumeResponseAnalyzer.Tests
                 await Task.Yield();
                 await PluginManager.ReloadPluginsAsync("AnyPlugin");
             }
-        }
-
-        sealed class DuplicateDisplayNamePlugin(string author) : IPlugin
-        {
-            public string Name => "Same Display Name";
-            public string Author => author;
-            public string[] Targets => [];
-            public void Initialize(IPluginContext context) { }
         }
 
     }

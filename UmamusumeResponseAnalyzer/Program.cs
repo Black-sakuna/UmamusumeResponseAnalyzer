@@ -212,7 +212,7 @@ namespace UmamusumeResponseAnalyzer
                             bootstrap.SetPhase("plugin-init", "插件初始化", UiSeverity.Info, "正在调用插件 Initialize。");
                             PluginManager.InitializeLoadedPlugins();
                             bootstrap.SetPluginSummary(BuildBootstrapPluginSummary(initialized: true));
-                            var loadedPluginCount = PluginManager.LoadedPlugins.Count;
+                            var loadedPluginCount = PluginManager.SnapshotPluginStatuses().Count(plugin => plugin.IsLoaded);
                             var failedPluginCount = PluginManager.FailedPlugins.Count;
                             bootstrap.SetPhase(
                                 "plugin-init",
@@ -285,10 +285,12 @@ namespace UmamusumeResponseAnalyzer
 
                         HotkeyManager.Register(ConsoleKey.P, "插件列表", ctx =>
                         {
-                            var plugins = PluginManager.SnapshotLoadedPlugins();
-                            foreach (var i in plugins)
-                                ctx.AddLine($"{i.Name} v{i.Version}  by {i.Author}");
-                            if (plugins.Count == 0)
+                            var plugins = PluginManager.SnapshotPluginStatuses()
+                                .Where(plugin => plugin.IsLoaded)
+                                .ToArray();
+                            foreach (var plugin in plugins)
+                                ctx.AddLine($"{plugin.DisplayName} v{plugin.Version}  by {plugin.Author}");
+                            if (plugins.Length == 0)
                                 ctx.AddLine("（没有加载任何插件）");
                             return Task.CompletedTask;
                         });
@@ -458,7 +460,7 @@ namespace UmamusumeResponseAnalyzer
                     throw;
                 }
 
-                var loadedPluginCount = PluginManager.LoadedPlugins.Count;
+                var loadedPluginCount = PluginManager.SnapshotPluginStatuses().Count(plugin => plugin.IsLoaded);
                 var failedPluginCount = PluginManager.FailedPlugins.Count;
                 bootstrap.SetPhase(
                     "plugin-scan",

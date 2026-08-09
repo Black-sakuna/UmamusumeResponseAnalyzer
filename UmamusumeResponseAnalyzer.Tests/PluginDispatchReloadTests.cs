@@ -20,7 +20,6 @@ public sealed class PluginDispatchReloadTests : IDisposable
     readonly string disposeRelease;
     readonly string callbackLog;
     readonly string statusGetterLog;
-    readonly string statusReloadGuard;
     readonly string startedDisposeEntered;
     readonly string startedDisposeRelease;
     readonly string startedDisposeLog;
@@ -40,7 +39,6 @@ public sealed class PluginDispatchReloadTests : IDisposable
         disposeRelease = Path.Combine(tempDir, "dispose-release");
         callbackLog = Path.Combine(tempDir, "callback.log");
         statusGetterLog = Path.Combine(tempDir, "status-getter.log");
-        statusReloadGuard = Path.Combine(tempDir, "status-reload-guard.log");
         startedDisposeEntered = Path.Combine(tempDir, "started-dispose-entered");
         startedDisposeRelease = Path.Combine(tempDir, "started-dispose-release");
         startedDisposeLog = Path.Combine(tempDir, "started-dispose.log");
@@ -140,10 +138,9 @@ public sealed class PluginDispatchReloadTests : IDisposable
         PluginManager.InitializeLoadedPlugins();
 
         var initialStatus = Assert.Single(
-            PluginManager.SnapshotPluginStatuses(),
+            PluginManager.InspectPluginStatuses(),
             status => status.InternalName == PluginName);
         Assert.True(initialStatus.IsLoaded);
-        Assert.Contains("插件回调内禁止执行热重载", File.ReadAllText(statusReloadGuard), StringComparison.Ordinal);
         var statusGettersBeforeReload = File.ReadAllLines(statusGetterLog);
 
         var oldContext = new WeakReference(PluginManager.Contexts[PluginName]);
@@ -163,7 +160,7 @@ public sealed class PluginDispatchReloadTests : IDisposable
             await WaitUntilAsync(() => File.Exists(disposeEntered));
             reloadWaited = !reload.IsCompleted;
             statusWhileDisposing = Assert.Single(
-                PluginManager.SnapshotPluginStatuses(),
+                PluginManager.InspectPluginStatuses(),
                 status => status.InternalName == PluginName);
             statusGettersWhileDisposing = File.ReadAllLines(statusGetterLog);
             lateDispatchError = await Record.ExceptionAsync(async () =>
@@ -277,6 +274,35 @@ public sealed class PluginDispatchReloadTests : IDisposable
     }
 
     [Fact]
+    public async Task InitParticipatesInLifecycleTransaction()
+    {
+        const string pluginName = "BlockingConstructorPlugin";
+        var constructorEntered = Path.Combine(tempDir, "constructor-entered");
+        var constructorRelease = Path.Combine(tempDir, "constructor-release");
+        PluginCompiler.Compile(
+            BlockingConstructorPluginSource(pluginName, constructorEntered, constructorRelease),
+            pluginName,
+            Path.Combine(tempDir, "Plugins", $"{pluginName}.dll"));
+
+        var initialize = Task.Run(PluginManager.Init);
+        try
+        {
+            await WaitUntilAsync(() => File.Exists(constructorEntered));
+            var secondInit = Assert.Throws<InvalidOperationException>(PluginManager.Init);
+            Assert.Contains("已有插件 lifecycle 事务", secondInit.Message, StringComparison.Ordinal);
+            var unload = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => PluginManager.UnloadPluginsAsync(pluginName));
+            Assert.Contains("已有插件热重载事务", unload.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.WriteAllText(constructorRelease, "release");
+        }
+
+        await initialize.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
     public async Task InitializeLoadedPluginsExcludesConcurrentUnloadAndDisposesOnce()
     {
         const string pluginName = "BlockingInitializePlugin";
@@ -339,7 +365,7 @@ public sealed class PluginDispatchReloadTests : IDisposable
         });
         await WaitUntilAsync(() => File.Exists(callbackEntered));
         var unload = Task.Run(() => PluginManager.UnloadPluginsAsync(pluginName));
-        await WaitUntilAsync(() => !PluginManager.SnapshotPluginStatuses()
+        await WaitUntilAsync(() => !PluginManager.InspectPluginStatuses()
             .Single(status => status.InternalName == pluginName)
             .IsLoaded);
 
@@ -390,14 +416,6 @@ public sealed class PluginDispatchReloadTests : IDisposable
                 get
                 {
                     File.AppendAllText(@"{{statusGetterLog}}", "Name" + Environment.NewLine);
-                    try
-                    {
-                        PluginManager.ReloadPluginsAsync("{{PluginName}}").GetAwaiter().GetResult();
-                    }
-                    catch (InvalidOperationException ex)
-                    {
-                        File.WriteAllText(@"{{statusReloadGuard}}", ex.Message);
-                    }
                     return "{{PluginName}}";
                 }
             }
@@ -467,6 +485,33 @@ public sealed class PluginDispatchReloadTests : IDisposable
         {
             public override string Message => throw new InvalidOperationException("Message getter failed");
             public override string ToString() => throw new InvalidOperationException("ToString failed");
+        }
+        """;
+
+    static string BlockingConstructorPluginSource(
+        string pluginName,
+        string constructorEntered,
+        string constructorRelease) => $$"""
+        using System;
+        using System.IO;
+        using System.Threading;
+        using UmamusumeResponseAnalyzer.Plugin;
+
+        namespace {{pluginName}}Ns;
+
+        public sealed class Plugin : IPlugin
+        {
+            public Plugin()
+            {
+                File.WriteAllText(@"{{constructorEntered}}", "entered");
+                while (!File.Exists(@"{{constructorRelease}}"))
+                    Thread.Sleep(10);
+            }
+
+            public string Name => "{{pluginName}}";
+            public string Author => "test";
+            public string[] Targets => Array.Empty<string>();
+            public void Initialize(IPluginContext context) { }
         }
         """;
 

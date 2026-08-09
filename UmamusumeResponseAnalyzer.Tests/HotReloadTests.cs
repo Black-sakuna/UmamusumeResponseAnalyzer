@@ -319,6 +319,24 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
 
         [Fact]
+        public void StatusSnapshotDoesNotRescanPluginDirectory()
+        {
+            const string pluginName = "StatusOnlyPlugin";
+            PluginManager.Init();
+            PluginCompiler.Compile(
+                PluginSource(pluginName, "status-only"),
+                pluginName,
+                Path.Combine(_tempDir, "Plugins", $"{pluginName}.dll"));
+
+            Assert.DoesNotContain(
+                PluginManager.SnapshotPluginStatuses(),
+                status => status.InternalName == pluginName);
+            Assert.Contains(
+                PluginManager.InspectPluginStatuses(),
+                status => status.InternalName == pluginName && status.IsAvailable && !status.IsLoaded);
+        }
+
+        [Fact]
         public async Task RuntimeLifecycle_LoadUnloadReload_UsesInternalNameAndKeepsPluginFiles()
         {
             var pluginsDir = Path.Combine(_tempDir, "Plugins");
@@ -337,7 +355,7 @@ namespace UmamusumeResponseAnalyzer.Tests
                 Path.Combine(pluginsDir, "RuntimeMember.dll"));
             PluginManager.Init();
 
-            Assert.Contains(PluginManager.SnapshotPluginStatuses(), x =>
+            Assert.Contains(PluginManager.InspectPluginStatuses(), x =>
                 x.InternalName == "RuntimeStandalone" && x.DisplayName == "显示名" && x.IsLoaded);
             Assert.False(Server.IsRunning, "前置条件:初始插件阶段完成后 HTTP server 尚未启动");
             PluginManager.InitializeLoadedPlugins();
@@ -351,7 +369,7 @@ namespace UmamusumeResponseAnalyzer.Tests
 
             Assert.True(File.Exists(standalonePath));
             Assert.DoesNotContain(PluginManager.LoadedPlugins, x => PluginManager.InternalName(x) == "RuntimeStandalone");
-            Assert.Contains(PluginManager.SnapshotPluginStatuses(), x =>
+            Assert.Contains(PluginManager.InspectPluginStatuses(), x =>
                 x.InternalName == "RuntimeStandalone" && x.IsAvailable && !x.IsLoaded);
             File.Delete(_logPath);
             Dispatch();

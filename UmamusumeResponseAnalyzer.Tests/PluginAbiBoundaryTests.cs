@@ -540,56 +540,21 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
 
         [Fact]
-        public void PluginLifecyclePublicApiMatchesTargetManifest()
+        public void PluginLifecycleManagementIsHostInternal()
         {
-            var outcomeType = typeof(PluginManager.PluginLifecycleOutcome);
-            Assert.True(outcomeType.IsNestedPublic);
-            Assert.True(outcomeType.IsEnum);
-            Assert.Equal(typeof(int), Enum.GetUnderlyingType(outcomeType));
-            Assert.Equal(
-                new[] { "Failed", "Succeeded", "RestartRequired" },
-                Enum.GetNames<PluginManager.PluginLifecycleOutcome>());
-            Assert.Equal(
-                new[] { 0, 1, 2 },
-                Enum.GetValues<PluginManager.PluginLifecycleOutcome>()
-                    .Select(value => (int)value)
-                    .ToArray());
-
-            var resultType = typeof(PluginManager.PluginLifecycleResult);
-            Assert.True(resultType.IsNestedPublic);
-            Assert.True(resultType.IsClass);
-            Assert.True(resultType.IsSealed);
-            Assert.Equal(typeof(object), resultType.BaseType);
-            Assert.Equal(
-                new[] { typeof(IEquatable<PluginManager.PluginLifecycleResult>) },
-                resultType.GetInterfaces());
-            Assert.Empty(resultType.GetEvents(PublicDeclared));
-            Assert.Empty(resultType.GetFields(PublicDeclared));
-            var constructor = Assert.Single(resultType.GetConstructors(
-                BindingFlags.Public | BindingFlags.Instance));
-            var constructorParameters = constructor.GetParameters();
-            Assert.Equal(2, constructorParameters.Length);
-            AssertParameter(constructorParameters[0], "PluginName", typeof(string));
-            AssertParameter(
-                constructorParameters[1],
-                "Outcome",
-                typeof(PluginManager.PluginLifecycleOutcome));
-            var properties = resultType.GetProperties(PublicDeclared);
-            Assert.Equal(
-                new[] { "Outcome", "PluginName" },
-                properties.Select(property => property.Name).Order(StringComparer.Ordinal).ToArray());
-            AssertReadWriteProperty(properties, "PluginName", typeof(string));
-            AssertReadWriteProperty(
-                properties,
-                "Outcome",
-                typeof(PluginManager.PluginLifecycleOutcome));
+            var manager = typeof(PluginManager);
+            Assert.True(manager.IsNotPublic);
+            Assert.True(typeof(PluginManager.PluginLifecycleOutcome).IsNestedAssembly);
+            Assert.True(typeof(PluginManager.PluginLifecycleResult).IsNestedAssembly);
+            Assert.DoesNotContain(
+                manager.GetMethods(PublicDeclared),
+                method => method.Name == nameof(PluginManager.ReloadPluginsAsync));
 
             var reload = Assert.Single(
-                typeof(PluginManager).GetMethods(PublicDeclared),
+                manager.GetMethods(BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.DeclaredOnly),
                 method => method.Name == nameof(PluginManager.ReloadPluginsAsync));
-            Assert.True(reload.IsPublic);
+            Assert.True(reload.IsAssembly);
             Assert.True(reload.IsStatic);
-            Assert.False(reload.IsGenericMethod);
             Assert.Equal(
                 typeof(Task<IReadOnlyList<PluginManager.PluginLifecycleResult>>),
                 reload.ReturnType);

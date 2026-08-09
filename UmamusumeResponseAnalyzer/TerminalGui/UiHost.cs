@@ -1258,7 +1258,7 @@ internal sealed class UiHost : IUiInputSink
         {
             snapshot = snapshot with
             {
-                Plugins = PluginManager.SnapshotPluginStatuses()
+                Plugins = PluginManager.InspectPluginStatuses()
             };
             result = await HostCommands.ExecuteAsync(
                 command,
@@ -1282,7 +1282,7 @@ internal sealed class UiHost : IUiInputSink
         {
             try
             {
-                plugins = PluginManager.SnapshotPluginStatuses();
+                plugins = PluginManager.InspectPluginStatuses();
             }
             catch (Exception ex)
             {
