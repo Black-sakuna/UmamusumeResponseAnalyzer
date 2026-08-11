@@ -1,47 +1,119 @@
-using System.Collections.Generic;
 using UmamusumeResponseAnalyzer.Plugin;
 using Xunit;
 
-namespace UmamusumeResponseAnalyzer.Tests
+namespace UmamusumeResponseAnalyzer.Tests;
+
+[Collection("PluginReload")]
+public sealed class SharedContextTests : IDisposable
 {
-    /// <summary>
-    /// 回归:加载一个 <c>[SharedContextWith]</c> 上下文组时,若组内有成员的元数据缺失——典型是声明的锚点插件
-    /// (如 EventLoggerPlugin)未安装(剧本分析器 manifest 常漏报这条依赖,于是单装一个分析器时锚点不在场)——
-    /// 旧 <see cref="PluginManager.LoadGroup"/> 会对 <c>Metadatas[缺失名]</c> 做索引抛 KeyNotFoundException、
-    /// 无人接住而【崩掉整个程序】(noVNC 实测:插件仓库装「梦想杯剧本解析器」当场崩溃,插件没装上)。
-    /// 修复后应优雅失败:在场成员记入 FailedPlugins、不建 ALC、不抛异常。
-    /// 归入 PluginReload collection 串行(与 HotReloadTests 一样会 mutate PluginManager 静态状态)。
-    /// </summary>
-    [Collection("PluginReload")]
-    public class SharedContextMissingAnchorTests
+    readonly string originalDirectory = Directory.GetCurrentDirectory();
+    readonly string testDirectory = Path.Combine(
+        Path.GetTempPath(),
+        $"ura-manifest-dependencies-{Guid.NewGuid():N}");
+    readonly string pluginsDirectory;
+
+    public SharedContextTests()
     {
-        [Fact]
-        public void LoadGroup_WithMissingAnchor_FailsGracefullyWithoutCrash()
+        pluginsDirectory = Path.Combine(testDirectory, "Plugins");
+        Directory.CreateDirectory(pluginsDirectory);
+        Directory.SetCurrentDirectory(testDirectory);
+    }
+
+    public void Dispose()
+    {
+        try
         {
-            const string member = "BreedersScenarioAnalyzer";
-            const string anchor = "EventLoggerPlugin"; // 故意不放进 Metadatas,模拟锚点未安装
-            var meta = new PluginManager.PluginMetadata(
-                $"X:/nonexistent/{member}.zip|{member}.dll", member,
-                loadInHost: false, shared: [anchor], isFromZip: true);
-
-            PluginManager.Metadatas[member] = meta;
-            var group = new HashSet<string> { member, anchor };
-            var key = string.Join("&", group);
-            try
-            {
-                var ex = Record.Exception(() => PluginManager.LoadGroup(group));
-
-                Assert.Null(ex);                                              // 不崩(修复前抛 KeyNotFoundException)
-                Assert.Contains(meta.FilePath, PluginManager.FailedPlugins);  // 在场成员被记为加载失败
-                Assert.DoesNotContain(PluginManager.LoadedPlugins, p => p.Name == member); // 未被加载
-                Assert.False(PluginManager.Contexts.ContainsKey(key));        // 没建出 ALC(无幽灵上下文)
-            }
-            finally
-            {
-                PluginManager.Metadatas.Remove(member);
-                PluginManager.FailedPlugins.Remove(meta.FilePath);
-                PluginManager.Contexts.Remove(key);
-            }
+            PluginManager.ShutdownAsync().GetAwaiter().GetResult();
+        }
+        finally
+        {
+            Directory.SetCurrentDirectory(originalDirectory);
+            try { Directory.Delete(testDirectory, recursive: true); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
         }
     }
+
+    [Fact]
+    public void MissingManifestDependencyFailsBeforeCreatingLoadContext()
+    {
+        CreatePackage("Member", ["Missing"]);
+
+        var error = Assert.Throws<InvalidDataException>(RestartPluginManager);
+
+        Assert.Contains("Member", error.Message, StringComparison.Ordinal);
+        Assert.Contains("Missing", error.Message, StringComparison.Ordinal);
+        Assert.Contains("缺少 manifest 依赖", error.Message, StringComparison.Ordinal);
+        Assert.Empty(PluginManager.Contexts);
+    }
+
+    [Fact]
+    public void ManifestDependencyCycleFailsBeforeCreatingLoadContext()
+    {
+        CreatePackage("CycleA", ["CycleB"]);
+        CreatePackage("CycleB", ["CycleA"]);
+
+        var error = Assert.Throws<InvalidDataException>(RestartPluginManager);
+
+        Assert.Contains("CycleA", error.Message, StringComparison.Ordinal);
+        Assert.Contains("CycleB", error.Message, StringComparison.Ordinal);
+        Assert.Contains("循环", error.Message, StringComparison.Ordinal);
+        Assert.Empty(PluginManager.Contexts);
+    }
+
+    [Fact]
+    public void ManifestDependencyLoadsBothPackagesInOneAssemblyLoadContext()
+    {
+        var resultPath = Path.Combine(testDirectory, "context-result.txt");
+        CreatePackage("Anchor");
+        CreatePackage(
+            "Member",
+            ["Anchor"],
+            $$"""
+            using System.IO;
+            using System.Reflection;
+            using System.Runtime.Loader;
+            using UmamusumeResponseAnalyzer.Plugin;
+
+            public sealed class MemberPlugin : IPlugin
+            {
+                public void Initialize(IPluginContext context)
+                {
+                    var ownContext = AssemblyLoadContext.GetLoadContext(GetType().Assembly)!;
+                    var dependency = ownContext.LoadFromAssemblyName(new AssemblyName("Anchor"));
+                    var dependencyContext = AssemblyLoadContext.GetLoadContext(dependency);
+                    File.WriteAllText(@"{{resultPath.Replace("\"", "\"\"")}}", object.ReferenceEquals(ownContext, dependencyContext) ? "same" : "different");
+                }
+            }
+            """);
+
+        RestartPluginManager();
+        PluginManager.InitializeLoadedPlugins();
+
+        Assert.Empty(PluginManager.FailedPlugins);
+        Assert.Equal("same", File.ReadAllText(resultPath));
+    }
+
+    static void RestartPluginManager()
+    {
+        PluginManager.ShutdownAsync().GetAwaiter().GetResult();
+        PluginManager.Init();
+    }
+
+    void CreatePackage(
+        string internalName,
+        IReadOnlyList<string>? dependencies = null,
+        string? source = null)
+        => PluginCompiler.CompilePackage(
+            source ?? $$"""
+            using UmamusumeResponseAnalyzer.Plugin;
+
+            public sealed class {{internalName}}Plugin : IPlugin
+            {
+                public void Initialize(IPluginContext context) { }
+            }
+            """,
+            internalName,
+            Path.Combine(pluginsDirectory, $"{internalName}.zip"),
+            dependencies);
 }

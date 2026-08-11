@@ -208,13 +208,40 @@ namespace UmamusumeResponseAnalyzer.Tests
             Assert.False(cond.IsArchived(chara, [turf]));   // Turf 不计：0+0 < 1
         }
 
+        [Fact]
+        public void IsArchived_UnknownProperRequirement_Throws()
+        {
+            var chara = MakeChara(upgradeInfo: [Info(100, 0, 1)]);
+            var condition = new UpgradeCondition
+            {
+                ConditionId = 100,
+                Type = UpgradeCondition.ConditionType.Proper,
+                Requirement = 10,
+                AdditionalRequirement = 1
+            };
+
+            Assert.Throws<InvalidDataException>(() => condition.IsArchived(chara, []));
+        }
+
+        [Fact]
+        public void IsArchived_UnknownConditionType_Throws()
+        {
+            var chara = MakeChara(upgradeInfo: [Info(100, 0, 1)]);
+            var condition = new UpgradeCondition
+            {
+                ConditionId = 100,
+                Type = UpgradeCondition.ConditionType.None
+            };
+
+            Assert.Throws<InvalidDataException>(() => condition.IsArchived(chara, []));
+        }
+
         // =========================================================================
         // CanUpgrade：前置短路
         // =========================================================================
 
-        /// <summary>skill_upgrade_info_array 为 null（繁中服兼容）→ false。</summary>
         [Fact]
-        public void CanUpgrade_NullUpgradeInfoArray_ReturnsFalse()
+        public void CanUpgrade_NullUpgradeInfoArray_ViolatesNormalizedBoundaryInvariant()
         {
             var chara = new SingleModeChara { talent_level = 5, scenario_id = 1, skill_upgrade_info_array = null! };
             var talent = new TalentSkillData
@@ -223,8 +250,7 @@ namespace UmamusumeResponseAnalyzer.Tests
                 UpgradeSkills = { [200] = [new UpgradeCondition { ConditionId = 1, Type = UpgradeCondition.ConditionType.Specific, Requirement = 1 }] },
             };
 
-            Assert.False(talent.CanUpgrade(chara, out var upgraded, []));
-            Assert.Equal(0, upgraded); // out 维持 default
+            Assert.Throws<ArgumentNullException>(() => talent.CanUpgrade(chara, out _, []));
         }
 
         /// <summary>角色天赋等级低于技能所需 Rank → false。</summary>
@@ -441,8 +467,10 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
 
         [Fact]
-        public void SkillData_Clone_IsShallowCopyWithIndependentInstance()
+        public void SkillData_Clone_DeepCopiesMutableGraph()
         {
+            var proper = new SkillProper { Style = SkillProper.StyleType.Senko };
+            var upgrade = new SkillData { Id = 2, Name = "进化", Propers = [] };
             var original = new SkillData
             {
                 Id = 1,
@@ -452,8 +480,11 @@ namespace UmamusumeResponseAnalyzer.Tests
                 Name = "原",
                 Grade = 100,
                 Cost = 50,
-                Propers = [],
+                Propers = [proper],
+                Upgrades = [upgrade],
             };
+            original.Superior = upgrade;
+            upgrade.Inferior = original;
             original.DisplayName = "原显示名";
 
             var clone = original.Clone();
@@ -467,16 +498,61 @@ namespace UmamusumeResponseAnalyzer.Tests
             Assert.Equal(original.Name, clone.Name);
             Assert.Equal(original.Grade, clone.Grade);
             Assert.Equal(original.Cost, clone.Cost);
-            Assert.Equal("原显示名", clone.DisplayName); // 私有 translatedName 也被 MemberwiseClone 复制
+            Assert.Equal("原显示名", clone.DisplayName);
 
-            // 浅拷贝的实质:引用类型字段与原对象【共享同一实例】(MemberwiseClone 不递归复制)。
-            // 这两条才真正区分深/浅——仅靠下面改值类型字段无法区分(值类型本就各自独立)。
-            Assert.Same(original.Propers, clone.Propers);
-            Assert.Same(original.Upgrades, clone.Upgrades);
+            Assert.NotSame(original.Propers, clone.Propers);
+            Assert.NotSame(original.Propers[0], clone.Propers[0]);
+            Assert.NotSame(original.Upgrades, clone.Upgrades);
+            Assert.NotSame(original.Upgrades[0], clone.Upgrades[0]);
+            Assert.Same(clone.Upgrades[0], clone.Superior);
+            Assert.Same(clone, clone.Upgrades[0].Inferior);
 
             // 改克隆体的值类型属性不影响原对象(独立实例)
             clone.Grade = 999;
             Assert.Equal(100, original.Grade);
+        }
+
+        [Fact]
+        public void SkillManager_Lookups_DistinguishTryFromRequired()
+        {
+            var skill = new SkillData
+            {
+                Id = 10,
+                GroupId = 20,
+                Rarity = 1,
+                Name = "测试技能",
+                Propers = []
+            };
+            var manager = new SkillManager([skill]);
+
+            Assert.Same(skill, Assert.Single(manager.FindByGroup(20, 1)));
+            Assert.True(manager.TryFindById(10, out var found));
+            Assert.Same(skill, found);
+            Assert.False(manager.TryFindById(99, out _));
+            Assert.Throws<KeyNotFoundException>(() => manager.GetRequiredById(99));
+        }
+
+        [Fact]
+        public void SkillManagerGenerator_NameLookup_ReturnsDetachedClones()
+        {
+            var source = new SkillData
+            {
+                Id = 10,
+                GroupId = 20,
+                Rarity = 1,
+                Name = "测试技能",
+                Grade = 100,
+                Propers = []
+            };
+            var generator = new SkillManagerGenerator([source]);
+
+            Assert.True(generator.TryFindByName("测试技能", out var first));
+            first.Grade = 999;
+            source.Grade = 500;
+
+            Assert.True(generator.TryFindByName("测试技能", out var second));
+            Assert.Equal(100, second.Grade);
+            Assert.NotSame(first, second);
         }
     }
 }

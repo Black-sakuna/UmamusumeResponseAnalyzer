@@ -157,6 +157,11 @@ public sealed class LifecycleTeardownTests
     static async Task RunReentrantServerStopAsync()
     {
         var port = GetFreePort();
+        var config = Config.Serialize(new YamlConfig()).Replace(
+            $"custom-database-repository: {Environment.NewLine}",
+            $"custom-database-repository: \"\"{Environment.NewLine}",
+            StringComparison.Ordinal);
+        File.WriteAllText(Config.CONFIG_FILEPATH, config);
         Config.Initialize();
         var callbackEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         using var releaseHandler = new ManualResetEventSlim();

@@ -1,6 +1,8 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Gallop.Endpoints;
+using Newtonsoft.Json;
+using System.IO.Compression;
 using Terminal.Gui.ViewBase;
 using UmamusumeResponseAnalyzer.Plugin;
 
@@ -49,6 +51,43 @@ namespace UmamusumeResponseAnalyzer.Tests
                 throw new InvalidOperationException($"插件编译失败:\n{errors}");
             }
             File.WriteAllBytes(dllPath, ms.ToArray());
+        }
+
+        public static void CompilePackage(
+            string source,
+            string internalName,
+            string packagePath,
+            IReadOnlyList<string>? dependencies = null,
+            IReadOnlyList<string>? targets = null,
+            string version = "1.0.0")
+        {
+            var dllPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.dll");
+            try
+            {
+                Compile(source, internalName, dllPath);
+                using var archive = ZipFile.Open(packagePath, ZipArchiveMode.Create);
+                archive.CreateEntryFromFile(dllPath, $"{internalName}.dll");
+                using var writer = new StreamWriter(archive.CreateEntry("manifest.json").Open());
+                writer.Write(JsonConvert.SerializeObject(new
+                {
+                    Author = "Tests",
+                    InternalName = internalName,
+                    DisplayName = internalName,
+                    Description = string.Empty,
+                    Changelog = string.Empty,
+                    Version = version,
+                    Dependencies = dependencies ?? [],
+                    Targets = targets ?? [],
+                    RepositoryUrl = string.Empty,
+                    LastUpdate = 0,
+                    Category = string.Empty,
+                    Homepage = string.Empty,
+                }));
+            }
+            finally
+            {
+                File.Delete(dllPath);
+            }
         }
     }
 }

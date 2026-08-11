@@ -1,3 +1,6 @@
+using System.IO.Compression;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using UmamusumeResponseAnalyzer.Plugin;
 using Xunit;
 
@@ -5,10 +8,7 @@ namespace UmamusumeResponseAnalyzer.Tests
 {
     /// <summary>
     /// <see cref="PluginRepository.BuildCatalog"/> 的确定性单测——不依赖网络/Config。
-    /// 锁定一个真实回归:仓库目录必须保留“同名不同作者”的 fork(插件身份是
-    /// (Author, InternalName) 复合键)。旧实现用 Dictionary 拿 InternalName 当 key,
-    /// 后到的 fork 会覆盖先到的,导致目录里只剩一个、其余连分类一起“消失”
-    /// (现场表现:插件仓库里几乎全部归到了同一组)。
+    /// 插件身份只由 InternalName 决定，并使用 OrdinalIgnoreCase 比较。
     /// </summary>
     public class PluginRepositoryTests
     {
@@ -16,6 +16,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         {
             Author = author,
             InternalName = internalName,
+            DisplayName = internalName,
             Category = category,
             Targets = targets ?? [],
             Version = new(1, 0, 0),
@@ -23,39 +24,34 @@ namespace UmamusumeResponseAnalyzer.Tests
 
         static readonly string[] NoFilter = [];
         const string ApiBase = "https://ura.shuise.net/api/Plugins";
+        const string PackageInternalName = "UmamusumeResponseAnalyzer";
 
         [Fact]
-        public void BuildCatalog_KeepsSameInternalNameDifferentAuthorForks()
+        public void BuildCatalog_RejectsDuplicateInternalNamesIgnoringCase()
         {
-            // 回归:离披 与 URACloud-Tester 各有一个 StatisticsCollector,二者都必须保留,
-            // 各自的分类也不能被对方覆盖。
             PluginInformation[] raw =
             [
                 Info("离披", "StatisticsCollector", category: "数据收集"),
-                Info("URACloud-Tester", "StatisticsCollector", category: ""),
+                Info("URACloud-Tester", "statisticscollector", category: ""),
             ];
 
-            var catalog = PluginRepository.BuildCatalog(raw, NoFilter);
+            var error = Assert.Throws<InvalidDataException>(() =>
+                PluginRepository.BuildCatalog(raw, NoFilter));
 
-            Assert.Equal(2, catalog.Count);
-            Assert.Contains(catalog, p => p.Author == "离披" && p.Category == "数据收集");
-            Assert.Contains(catalog, p => p.Author == "URACloud-Tester" && p.Category == "");
+            Assert.Contains("InternalName 重复", error.Message);
+            Assert.Contains("statisticscollector", error.Message);
         }
 
         [Fact]
-        public void BuildCatalog_BuildsDownloadUrlPerForkAuthor()
+        public void BuildCatalog_BuildsDownloadUrlFromManifestAuthor()
         {
-            // DownloadUrl 必须用各自的 Author 拼,否则一个 fork 会下到另一个作者的包。
-            PluginInformation[] raw =
-            [
-                Info("离披", "StatisticsCollector"),
-                Info("URACloud-Tester", "StatisticsCollector"),
-            ];
+            PluginInformation[] raw = [Info("离披", "StatisticsCollector")];
 
             var catalog = PluginRepository.BuildCatalog(raw, NoFilter);
 
-            Assert.Contains(catalog, p => p.DownloadUrl == $"{ApiBase}/%E7%A6%BB%E6%8A%AB/StatisticsCollector/versions/1.0.0/download");
-            Assert.Contains(catalog, p => p.DownloadUrl == $"{ApiBase}/URACloud-Tester/StatisticsCollector/versions/1.0.0/download");
+            Assert.Equal(
+                $"{ApiBase}/%E7%A6%BB%E6%8A%AB/StatisticsCollector/versions/1.0.0/download",
+                Assert.Single(catalog).DownloadUrl);
         }
 
         [Fact]
@@ -180,32 +176,330 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
 
         [Fact]
-        public void ResolveDependencies_ThrowsWhenUnselectedDependencyHasMultipleForks()
+        public void ResolveDependencies_RejectsDuplicateCatalogNamesIgnoringCase()
         {
             var root = Info("a", "Root");
             root.Dependencies = ["Dependency"];
-            var firstFork = Info("a", "Dependency");
-            var secondFork = Info("b", "Dependency");
+            var first = Info("a", "Dependency");
+            var duplicate = Info("b", "dependency");
 
             var exception = Assert.Throws<InvalidOperationException>(() =>
-                PluginRepository.ResolveDependencies([root], [root, firstFork, secondFork]));
+                PluginRepository.ResolveDependencies([root], [root, first, duplicate]));
 
-            Assert.Contains("Dependency", exception.Message);
-            Assert.Contains("多个 fork", exception.Message);
+            Assert.Contains("InternalName 重复", exception.Message);
+            Assert.Contains("dependency", exception.Message);
         }
 
         [Fact]
-        public void ResolveDependencies_PrefersSelectedFork()
+        public void ResolveDependencies_MatchesInternalNameIgnoringCase()
         {
             var root = Info("a", "Root");
-            root.Dependencies = ["Dependency"];
-            var selectedFork = Info("a", "Dependency");
-            var otherFork = Info("b", "Dependency");
-            var selected = new List<PluginInformation> { root, selectedFork };
+            root.Dependencies = ["dependency"];
+            var dependency = Info("a", "Dependency");
+            var selected = new List<PluginInformation> { root };
 
-            PluginRepository.ResolveDependencies(selected, [root, selectedFork, otherFork]);
+            PluginRepository.ResolveDependencies(selected, [root, dependency]);
 
-            Assert.Equal([root, selectedFork], selected);
+            Assert.Equal([root, dependency], selected);
+        }
+
+        [Fact]
+        public void ValidatePackage_ReturnsStrictManifestMetadata()
+        {
+            var manifest = Info("author", PackageInternalName, targets: ["Cygames"]);
+            manifest.RawVersion = "2026.03.04";
+            manifest.Dependencies = ["Dependency"];
+            var package = CreatePackage(manifest);
+            try
+            {
+                var actual = PluginRepository.ValidatePackage(
+                    package,
+                    "AUTHOR",
+                    "umamusumeresponseanalyzer",
+                    "2026.3.4");
+
+                Assert.Equal(PackageInternalName, actual.InternalName);
+                Assert.Equal(["Dependency"], actual.Dependencies);
+                Assert.Equal(["Cygames"], actual.Targets);
+                Assert.Equal("2026.03.04", actual.RawVersion);
+            }
+            finally
+            {
+                File.Delete(package);
+            }
+        }
+
+        [Fact]
+        public void ValidatePackage_RejectsNonCurrentManifestSchema()
+        {
+            var manifest = Info("author", PackageInternalName);
+            var package = CreatePackage(manifest, json =>
+            {
+                json["version"] = json["Version"];
+                json.Remove("Version");
+            });
+            try
+            {
+                var error = Assert.Throws<InvalidDataException>(() =>
+                    PluginRepository.ValidatePackage(package, "author", PackageInternalName, "1.0.0"));
+
+                Assert.Contains("missing=[Version]", error.Message);
+                Assert.Contains("unexpected=[version]", error.Message);
+            }
+            finally
+            {
+                File.Delete(package);
+            }
+        }
+
+        [Theory]
+        [InlineData("other", PackageInternalName, "1.0.0", "Author")]
+        [InlineData("author", "OtherPlugin", "1.0.0", "InternalName")]
+        [InlineData("author", PackageInternalName, "2.0.0", "Version")]
+        public void ValidatePackage_RejectsRequestedIdentityMismatch(
+            string author,
+            string internalName,
+            string version,
+            string field)
+        {
+            var package = CreatePackage(Info("author", PackageInternalName));
+            try
+            {
+                var error = Assert.Throws<InvalidDataException>(() =>
+                    PluginRepository.ValidatePackage(package, author, internalName, version));
+
+                Assert.Contains(field, error.Message);
+                Assert.Contains("不匹配", error.Message);
+            }
+            finally
+            {
+                File.Delete(package);
+            }
+        }
+
+        [Fact]
+        public void ValidatePackage_RequiresRootMainAssembly()
+        {
+            var package = CreatePackage(
+                Info("author", PackageInternalName),
+                mainAssemblyPath: $"lib/{PackageInternalName}.dll");
+            try
+            {
+                var error = Assert.Throws<InvalidDataException>(() =>
+                    PluginRepository.ValidatePackage(package, "author", PackageInternalName, "1.0.0"));
+
+                Assert.Contains("根目录", error.Message);
+                Assert.Contains($"{PackageInternalName}.dll", error.Message);
+            }
+            finally
+            {
+                File.Delete(package);
+            }
+        }
+
+        [Fact]
+        public void ValidatePackage_DoesNotTreatBackslashNestedDllAsRootAssembly()
+        {
+            var package = CreatePackage(
+                Info("author", PackageInternalName),
+                additionalEntries: ["Dependency.dll", @"lib\dependency.DLL"]);
+            try
+            {
+                var manifest = PluginRepository.ValidatePackage(
+                    package,
+                    "author",
+                    PackageInternalName,
+                    "1.0.0");
+
+                Assert.Equal(PackageInternalName, manifest.InternalName);
+            }
+            finally
+            {
+                File.Delete(package);
+            }
+        }
+
+        [Fact]
+        public void ValidatePackage_RejectsDuplicateRootAssemblyNamesIgnoringCase()
+        {
+            var package = CreatePackage(
+                Info("author", PackageInternalName),
+                additionalEntries: ["Dependency.dll", "dependency.DLL"]);
+            try
+            {
+                var error = Assert.Throws<InvalidDataException>(() =>
+                    PluginRepository.ValidatePackage(package, "author", PackageInternalName, "1.0.0"));
+
+                Assert.Contains("程序集名重复", error.Message);
+            }
+            finally
+            {
+                File.Delete(package);
+            }
+        }
+
+        [Fact]
+        public void ValidatePackage_RejectsCaseDuplicateRootManifest()
+        {
+            var package = CreatePackage(
+                Info("author", PackageInternalName),
+                additionalEntries: ["Manifest.json"]);
+            try
+            {
+                var error = Assert.Throws<InvalidDataException>(() =>
+                    PluginRepository.ValidatePackage(package, "author", PackageInternalName, "1.0.0"));
+
+                Assert.Contains("manifest.json", error.Message);
+            }
+            finally
+            {
+                File.Delete(package);
+            }
+        }
+
+        [Theory]
+        [InlineData("LastUpdate", "not-an-integer", "类型无效")]
+        [InlineData("Dependencies", 1, "只能包含字符串")]
+        public void ValidatePackage_RejectsWrongManifestTokenShape(
+            string property,
+            object value,
+            string expectedMessage)
+        {
+            var package = CreatePackage(Info("author", PackageInternalName), json =>
+            {
+                if (property == "Dependencies")
+                    json[property] = new JArray(value);
+                else
+                    json[property] = JToken.FromObject(value);
+            });
+            try
+            {
+                var error = Assert.Throws<InvalidDataException>(() =>
+                    PluginRepository.ValidatePackage(package, "author", PackageInternalName, "1.0.0"));
+
+                Assert.Contains(expectedMessage, error.Message);
+            }
+            finally
+            {
+                File.Delete(package);
+            }
+        }
+
+        [Theory]
+        [InlineData("comment")]
+        [InlineData("trailing-comma")]
+        [InlineData("single-quotes")]
+        [InlineData("extra-token")]
+        public void ValidatePackage_RejectsNonStrictJson(string mutation)
+        {
+            var package = CreatePackage(
+                Info("author", PackageInternalName),
+                editRawManifest: json => mutation switch
+                {
+                    "comment" => $"/*comment*/{json}",
+                    "trailing-comma" => $"{json[..^1]},}}",
+                    "single-quotes" => json.Replace('"', '\''),
+                    "extra-token" => $"{json}{{}}",
+                    _ => throw new InvalidOperationException($"未知 JSON mutation: {mutation}"),
+                });
+            try
+            {
+                var error = Assert.Throws<InvalidDataException>(() =>
+                    PluginRepository.ValidatePackage(package, "author", PackageInternalName, "1.0.0"));
+
+                Assert.Contains("严格 JSON", error.Message);
+            }
+            finally
+            {
+                File.Delete(package);
+            }
+        }
+
+        [Fact]
+        public void ValidatePackage_AllowsDotInLoaderValidInternalName()
+        {
+            var package = CreatePackage(Info("author", PackageInternalName));
+            try
+            {
+                var manifest = PluginRepository.ValidatePackage(
+                    package,
+                    "author",
+                    PackageInternalName,
+                    "1.0.0");
+
+                Assert.Equal(PackageInternalName, manifest.InternalName);
+            }
+            finally
+            {
+                File.Delete(package);
+            }
+        }
+
+        [Fact]
+        public void ValidatePackage_PreservesDateLikeManifestStrings()
+        {
+            var expected = "2026-08-11T03:16:39.2341390Z";
+            var info = Info("author", PackageInternalName);
+            info.Description = expected;
+            var package = CreatePackage(info);
+            try
+            {
+                var manifest = PluginRepository.ValidatePackage(
+                    package,
+                    "author",
+                    PackageInternalName,
+                    "1.0.0");
+
+                Assert.Equal(expected, manifest.Description);
+            }
+            finally
+            {
+                File.Delete(package);
+            }
+        }
+
+        [Fact]
+        public void ValidatePackage_RejectsEmbeddedMainAssemblyNameMismatch()
+        {
+            const string manifestName = "Different.Plugin";
+            var package = CreatePackage(Info("author", manifestName));
+            try
+            {
+                var error = Assert.Throws<InvalidDataException>(() =>
+                    PluginRepository.ValidatePackage(package, "author", manifestName, "1.0.0"));
+
+                Assert.Contains("主程序集名称", error.Message);
+                Assert.Contains(PackageInternalName, error.Message);
+                Assert.Contains(manifestName, error.Message);
+            }
+            finally
+            {
+                File.Delete(package);
+            }
+        }
+
+        static string CreatePackage(
+            PluginInformation manifest,
+            Action<JObject>? editManifest = null,
+            string? mainAssemblyPath = null,
+            string[]? additionalEntries = null,
+            Func<string, string>? editRawManifest = null)
+        {
+            var path = Path.Combine(Path.GetTempPath(), $"ura-repository-{Guid.NewGuid():N}.zip");
+            using var archive = ZipFile.Open(path, ZipArchiveMode.Create);
+            var json = JObject.FromObject(manifest, JsonSerializer.CreateDefault());
+            editManifest?.Invoke(json);
+            using (var writer = new StreamWriter(archive.CreateEntry("manifest.json").Open()))
+                writer.Write(editRawManifest?.Invoke(json.ToString(Formatting.None)) ?? json.ToString(Formatting.None));
+            using (var source = File.OpenRead(typeof(PluginInformation).Assembly.Location))
+            using (var stream = archive.CreateEntry(mainAssemblyPath ?? $"{manifest.InternalName}.dll").Open())
+                source.CopyTo(stream);
+            foreach (var entry in additionalEntries ?? [])
+            {
+                using var stream = archive.CreateEntry(entry).Open();
+                stream.WriteByte(0);
+            }
+            return path;
         }
     }
 }

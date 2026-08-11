@@ -400,83 +400,11 @@ namespace UmamusumeResponseAnalyzer.Tests
                 .Where(method => !method.IsSpecialName)
                 .ToDictionary(method => method.Name);
             Assert.Equal(
-                new[]
-                {
-                    "Acknowledge",
-                    "Ask",
-                    "Confirm",
-                    "Log",
-                    "MultiSelect",
-                    "Notify",
-                    "Select"
-                },
+                new[] { "Log", "Notify" },
                 methods.Keys.Order(StringComparer.Ordinal).ToArray());
-            foreach (var (name, parameterCount) in new[]
-            {
-                ("Acknowledge", 2),
-                ("Ask", 4),
-                ("Confirm", 3),
-                ("Log", 3),
-                ("MultiSelect", 5),
-                ("Notify", 4),
-                ("Select", 4)
-            })
-            {
-                Assert.True(methods[name].IsStatic);
-                Assert.Equal(parameterCount, methods[name].GetParameters().Length);
-            }
-
-            var select = methods["Select"];
-            Assert.True(select.IsGenericMethodDefinition);
-            var selectType = Assert.Single(select.GetGenericArguments());
-            Assert.Equal(GenericParameterAttributes.None, selectType.GenericParameterAttributes);
-            Assert.Empty(selectType.GetGenericParameterConstraints());
-            Assert.Equal(selectType, select.ReturnType);
-            var selectParameters = select.GetParameters();
-            Assert.Equal(4, selectParameters.Length);
-            AssertParameter(selectParameters[0], "title", typeof(string));
-            AssertParameter(selectParameters[1], "choices", typeof(IEnumerable<>).MakeGenericType(selectType));
-            AssertParameter(selectParameters[2], "converter", typeof(Func<,>).MakeGenericType(selectType, typeof(string)), null);
-            AssertParameter(selectParameters[3], "cancellationToken", typeof(CancellationToken), null);
-
-            var multiSelect = methods["MultiSelect"];
-            Assert.True(multiSelect.IsGenericMethodDefinition);
-            var multiSelectType = Assert.Single(multiSelect.GetGenericArguments());
-            Assert.Equal(GenericParameterAttributes.None, multiSelectType.GenericParameterAttributes);
-            Assert.Empty(multiSelectType.GetGenericParameterConstraints());
-            Assert.Equal(
-                typeof(IReadOnlyList<>).MakeGenericType(multiSelectType),
-                multiSelect.ReturnType);
-            var multiSelectParameters = multiSelect.GetParameters();
-            Assert.Equal(5, multiSelectParameters.Length);
-            AssertParameter(multiSelectParameters[0], "title", typeof(string));
-            AssertParameter(multiSelectParameters[1], "choices", typeof(IEnumerable<>).MakeGenericType(multiSelectType));
-            AssertParameter(multiSelectParameters[2], "selected", typeof(IEnumerable<>).MakeGenericType(multiSelectType), null);
-            AssertParameter(multiSelectParameters[3], "converter", typeof(Func<,>).MakeGenericType(multiSelectType, typeof(string)), null);
-            AssertParameter(multiSelectParameters[4], "cancellationToken", typeof(CancellationToken), null);
-
-            var ask = methods["Ask"];
-            Assert.Equal(typeof(string), ask.ReturnType);
-            var askParameters = ask.GetParameters();
-            AssertParameter(askParameters[0], "title", typeof(string));
-            AssertParameter(askParameters[1], "value", typeof(string), null);
-            AssertParameter(askParameters[2], "allowEmpty", typeof(bool), false);
-            AssertParameter(askParameters[3], "cancellationToken", typeof(CancellationToken), null);
-
-            var confirm = methods["Confirm"];
-            Assert.Equal(typeof(bool), confirm.ReturnType);
-            var confirmParameters = confirm.GetParameters();
-            AssertParameter(confirmParameters[0], "title", typeof(string));
-            AssertParameter(confirmParameters[1], "defaultValue", typeof(bool), false);
-            AssertParameter(confirmParameters[2], "cancellationToken", typeof(CancellationToken), null);
-
-            var acknowledge = methods["Acknowledge"];
-            Assert.Equal(typeof(bool), acknowledge.ReturnType);
-            var acknowledgeParameters = acknowledge.GetParameters();
-            AssertParameter(acknowledgeParameters[0], "title", typeof(string), "按 Enter 返回");
-            AssertParameter(acknowledgeParameters[1], "cancellationToken", typeof(CancellationToken), null);
 
             var log = methods["Log"];
+            Assert.True(log.IsStatic);
             Assert.Equal(typeof(void), log.ReturnType);
             var logParameters = log.GetParameters();
             AssertParameter(logParameters[0], "source", typeof(string));
@@ -484,6 +412,7 @@ namespace UmamusumeResponseAnalyzer.Tests
             AssertParameter(logParameters[2], "severity", typeof(UiSeverity), UiSeverity.Info);
 
             var notify = methods["Notify"];
+            Assert.True(notify.IsStatic);
             Assert.Equal(typeof(void), notify.ReturnType);
             var notifyParameters = notify.GetParameters();
             AssertParameter(notifyParameters[0], "source", typeof(string));
@@ -493,11 +422,23 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
 
         [Fact]
-        public void PluginContextMatchesDestructiveCutover()
+        public void PluginContractsMatchDestructiveCutover()
         {
             var hostAssembly = typeof(IPluginContext).Assembly;
             Assert.Null(hostAssembly.GetType("UmamusumeResponseAnalyzer.TerminalGui.IWorkspaceOutput"));
             Assert.Null(hostAssembly.GetType("UmamusumeResponseAnalyzer.TerminalGui.PluginWorkspaceOutput"));
+            foreach (var removedTypeName in new[]
+            {
+                "IConfigurablePlugin",
+                "RouteAttribute",
+                "LoadInHostAttribute",
+                "LoadInHostContextAttribute",
+                "SharedContextWithAttribute",
+                "RestartRequiredAttribute"
+            })
+            {
+                Assert.DoesNotContain(hostAssembly.GetTypes(), type => type.Name == removedTypeName);
+            }
             Assert.DoesNotContain(
                 hostAssembly.GetTypes().SelectMany(type => type.GetMethods(
                     BindingFlags.Public |
@@ -506,6 +447,37 @@ namespace UmamusumeResponseAnalyzer.Tests
                 method =>
                     method.GetCustomAttribute<ExtensionAttribute>() is not null &&
                     method.GetParameters().FirstOrDefault()?.ParameterType == typeof(Workspace));
+
+            var pluginType = typeof(IPlugin);
+            Assert.True(pluginType.IsPublic);
+            Assert.True(pluginType.IsInterface);
+            Assert.Empty(pluginType.GetInterfaces());
+            Assert.Empty(pluginType.GetProperties(PublicDeclared));
+            Assert.Empty(pluginType.GetEvents(PublicDeclared));
+            Assert.Empty(pluginType.GetFields(PublicDeclared));
+            var pluginMethods = pluginType.GetMethods(PublicDeclared)
+                .Where(method => !method.IsSpecialName)
+                .ToDictionary(method => method.Name);
+            Assert.Equal(
+                new[] { "ConfigPromptAsync", "Dispose", "Initialize" },
+                pluginMethods.Keys.Order(StringComparer.Ordinal).ToArray());
+
+            var initialize = pluginMethods["Initialize"];
+            Assert.True(initialize.IsAbstract);
+            Assert.Equal(typeof(void), initialize.ReturnType);
+            AssertParameter(Assert.Single(initialize.GetParameters()), "context", typeof(IPluginContext));
+
+            var dispose = pluginMethods["Dispose"];
+            Assert.False(dispose.IsAbstract);
+            Assert.Equal(typeof(void), dispose.ReturnType);
+            Assert.Empty(dispose.GetParameters());
+
+            var configPrompt = pluginMethods["ConfigPromptAsync"];
+            Assert.False(configPrompt.IsAbstract);
+            Assert.Equal(typeof(Task), configPrompt.ReturnType);
+            var configPromptParameters = configPrompt.GetParameters();
+            AssertParameter(configPromptParameters[0], "application", typeof(IApplication));
+            AssertParameter(configPromptParameters[1], "cancellationToken", typeof(CancellationToken), null);
 
             var contextType = typeof(IPluginContext);
             Assert.True(contextType.IsPublic);
@@ -516,7 +488,6 @@ namespace UmamusumeResponseAnalyzer.Tests
             Assert.Empty(contextType.GetConstructors());
             Assert.Empty(contextType.GetEvents(PublicDeclared));
             Assert.Empty(contextType.GetFields(PublicDeclared));
-            Assert.DoesNotContain(contextType.GetMethods(PublicDeclared), method => !method.IsSpecialName);
 
             var contextProperties = contextType.GetProperties(PublicDeclared);
             Assert.Equal(
@@ -525,6 +496,145 @@ namespace UmamusumeResponseAnalyzer.Tests
             AssertReadOnlyProperty(contextProperties, "Application", typeof(IApplication));
             AssertReadOnlyProperty(contextProperties, "Events", typeof(IPluginHostEvents));
             AssertReadOnlyProperty(contextProperties, "Analyzers", typeof(IPluginAnalyzerRegistry));
+
+            var runBackground = Assert.Single(
+                contextType.GetMethods(PublicDeclared),
+                method => !method.IsSpecialName);
+            Assert.Equal("RunBackground", runBackground.Name);
+            Assert.Equal(typeof(void), runBackground.ReturnType);
+            AssertParameter(
+                Assert.Single(runBackground.GetParameters()),
+                "operation",
+                typeof(Func<CancellationToken, ValueTask>));
+
+            var eventsType = typeof(IPluginHostEvents);
+            Assert.True(eventsType.IsPublic);
+            Assert.True(eventsType.IsInterface);
+            Assert.Empty(eventsType.GetProperties(PublicDeclared));
+            Assert.Empty(eventsType.GetEvents(PublicDeclared));
+            Assert.Empty(eventsType.GetFields(PublicDeclared));
+            var onStarted = Assert.Single(
+                eventsType.GetMethods(PublicDeclared),
+                method => !method.IsSpecialName);
+            Assert.Equal("OnStarted", onStarted.Name);
+            Assert.Equal(typeof(void), onStarted.ReturnType);
+            AssertParameter(
+                Assert.Single(onStarted.GetParameters()),
+                "handler",
+                typeof(Func<CancellationToken, ValueTask>));
+
+            var registryType = typeof(IPluginAnalyzerRegistry);
+            Assert.True(registryType.IsPublic);
+            Assert.True(registryType.IsInterface);
+            Assert.Empty(registryType.GetProperties(PublicDeclared));
+            Assert.Empty(registryType.GetEvents(PublicDeclared));
+            Assert.Empty(registryType.GetFields(PublicDeclared));
+            var register = Assert.Single(
+                registryType.GetMethods(PublicDeclared),
+                method => !method.IsSpecialName);
+            Assert.Equal("Register", register.Name);
+            Assert.True(register.IsGenericMethodDefinition);
+            Assert.Equal(typeof(void), register.ReturnType);
+            var payloadType = Assert.Single(register.GetGenericArguments());
+            Assert.Equal(GenericParameterAttributes.None, payloadType.GenericParameterAttributes);
+            Assert.Empty(payloadType.GetGenericParameterConstraints());
+            var registerParameters = register.GetParameters();
+            AssertParameter(registerParameters[0], "kind", typeof(AnalyzerKind));
+            AssertParameter(registerParameters[1], "patterns", typeof(IReadOnlyList<EndpointPattern>));
+            AssertParameter(
+                registerParameters[2],
+                "handler",
+                typeof(Func<,>).MakeGenericType(
+                    typeof(AnalyzerInvocation<>).MakeGenericType(payloadType),
+                    typeof(ValueTask)));
+            AssertParameter(registerParameters[3], "priority", typeof(int), 0);
+
+            Assert.Equal(new[] { "Request", "Response" }, Enum.GetNames<AnalyzerKind>());
+            Assert.Equal(new[] { "Exact", "Wildcard", "Regex" }, Enum.GetNames<EndpointPatternKind>());
+            var analyzerAttributeProperties = typeof(AnalyzerAttribute).GetProperties(PublicDeclared);
+            Assert.Equal(
+                new[] { "EndpointType", "Kind", "Priority" },
+                analyzerAttributeProperties.Select(property => property.Name).Order(StringComparer.Ordinal).ToArray());
+            AssertReadOnlyProperty(analyzerAttributeProperties, "EndpointType", typeof(Type));
+            AssertReadOnlyProperty(analyzerAttributeProperties, "Kind", typeof(AnalyzerKind));
+            AssertReadOnlyProperty(analyzerAttributeProperties, "Priority", typeof(int));
+            foreach (var attributeType in new[]
+            {
+                typeof(RequestAnalyzerAttribute<>),
+                typeof(ResponseAnalyzerAttribute<>)
+            })
+            {
+                Assert.True(attributeType.IsPublic);
+                Assert.True(attributeType.IsSealed);
+                Assert.True(attributeType.IsGenericTypeDefinition);
+                var endpointType = Assert.Single(attributeType.GetGenericArguments());
+                Assert.Contains(typeof(IGameEndpoint), endpointType.GetGenericParameterConstraints());
+                var constructor = Assert.Single(
+                    attributeType.GetConstructors(BindingFlags.Public | BindingFlags.Instance));
+                AssertParameter(Assert.Single(constructor.GetParameters()), "priority", typeof(int), 0);
+            }
+            foreach (var (pattern, kind, value) in new[]
+            {
+                (EndpointPattern.Exact("/umamusume/single_mode/check_event"), EndpointPatternKind.Exact, "/umamusume/single_mode/check_event"),
+                (EndpointPattern.Wildcard("/umamusume/single_mode/*/check_event"), EndpointPatternKind.Wildcard, "/umamusume/single_mode/*/check_event"),
+                (EndpointPattern.Regex("^/umamusume/single_mode/(?:arc|legend)/check_event$"), EndpointPatternKind.Regex, "^/umamusume/single_mode/(?:arc|legend)/check_event$")
+            })
+            {
+                Assert.Equal(kind, pattern.Kind);
+                Assert.Equal(value, pattern.Pattern);
+            }
+
+            var invocationType = typeof(AnalyzerInvocation<SingleModeCheckEventResponse>);
+            Assert.True(invocationType.IsValueType);
+            var invocationProperties = invocationType.GetProperties(PublicDeclared);
+            Assert.Equal(
+                new[] { "Endpoint", "Headers", "Payload" },
+                invocationProperties.Select(property => property.Name).Order(StringComparer.Ordinal).ToArray());
+            AssertReadWriteProperty(invocationProperties, "Endpoint", typeof(GameEndpointDescriptor));
+            AssertReadWriteProperty(invocationProperties, "Payload", typeof(SingleModeCheckEventResponse));
+            AssertReadWriteProperty(invocationProperties, "Headers", typeof(GameHttpHeaders));
+            var nullability = new NullabilityInfoContext();
+            Assert.Equal(
+                NullabilityState.NotNull,
+                nullability.Create(invocationProperties.Single(property => property.Name == "Headers")).ReadState);
+
+            var headersType = typeof(GameHttpHeaders);
+            Assert.True(headersType.IsPublic);
+            Assert.True(headersType.IsClass);
+            Assert.True(headersType.IsSealed);
+            Assert.DoesNotContain(headersType.GetMembers(PublicDeclared), member => member.Name == "Empty");
+            var headerProperties = headersType.GetProperties(PublicDeclared);
+            Assert.Equal(
+                new[] { "AppVer", "Device", "DeviceSubtype", "ResVer", "Sid", "ViewerId" },
+                headerProperties.Select(property => property.Name).Order(StringComparer.Ordinal).ToArray());
+            foreach (var name in new[] { "Sid", "AppVer", "ResVer", "ViewerId", "Device", "DeviceSubtype" })
+            {
+                AssertReadWriteProperty(headerProperties, name, typeof(string));
+                Assert.Equal(
+                    NullabilityState.Nullable,
+                    nullability.Create(headerProperties.Single(property => property.Name == name)).ReadState);
+            }
+            var headersConstructorParameters = Assert.Single(
+                headersType.GetConstructors(BindingFlags.Public | BindingFlags.Instance)).GetParameters();
+            Assert.Equal(
+                new[] { "Sid", "AppVer", "ResVer", "ViewerId", "Device", "DeviceSubtype" },
+                headersConstructorParameters.Select(parameter => parameter.Name).ToArray());
+            Assert.All(headersConstructorParameters, parameter =>
+            {
+                Assert.Equal(typeof(string), parameter.ParameterType);
+                Assert.Equal(NullabilityState.Nullable, nullability.Create(parameter).ReadState);
+            });
+
+            var serverType = hostAssembly.GetType(
+                "UmamusumeResponseAnalyzer.Server",
+                throwOnError: true)!;
+            Assert.DoesNotContain(
+                serverType.GetMethods(
+                    BindingFlags.Public |
+                    BindingFlags.NonPublic |
+                    BindingFlags.Static |
+                    BindingFlags.DeclaredOnly),
+                method => method.Name is "DispatchRequest" or "DispatchResponse");
 
             var uiHostType = hostAssembly.GetType(
                 "UmamusumeResponseAnalyzer.TerminalGui.UiHost",
@@ -610,6 +720,8 @@ namespace UmamusumeResponseAnalyzer.Tests
                 using System.Collections.Generic;
                 using System.Threading;
                 using System.Threading.Tasks;
+                using Gallop;
+                using Gallop.Endpoints;
                 using Terminal.Gui.ViewBase;
                 using UmamusumeResponseAnalyzer.Plugin;
                 using UmamusumeResponseAnalyzer.TerminalGui;
@@ -643,15 +755,44 @@ namespace UmamusumeResponseAnalyzer.Tests
 
                 public sealed class SyntheticFuturePlugin : IPlugin
                 {
-                    public string Name => "Synthetic Future Plugin";
-                    public string Author => "ABI Tests";
-                    public string[] Targets => Array.Empty<string>();
-
                     public void Initialize(IPluginContext context)
                     {
                         _ = context.Application;
-                        _ = context.Events;
-                        _ = context.Analyzers;
+                        context.Events.OnStarted(static _ => ValueTask.CompletedTask);
+                        context.RunBackground(static _ => ValueTask.CompletedTask);
+                        context.Analyzers.Register<SingleModeCheckEventResponse>(
+                            AnalyzerKind.Response,
+                            new[]
+                            {
+                                EndpointPattern.Exact("/umamusume/single_mode/check_event"),
+                                EndpointPattern.Wildcard("/umamusume/single_mode/*/check_event"),
+                                EndpointPattern.Regex("^/umamusume/single_mode/(?:arc|legend)/check_event$")
+                            },
+                            static invocation =>
+                            {
+                                _ = invocation.Endpoint;
+                                _ = invocation.Payload;
+                                _ = invocation.Headers;
+                                return ValueTask.CompletedTask;
+                            });
+                        context.Analyzers.Register<ReadOnlyMemory<byte>>(
+                            AnalyzerKind.Request,
+                            new[] { EndpointPattern.Exact("/umamusume/single_mode/check_event") },
+                            static invocation =>
+                            {
+                                _ = invocation.Endpoint;
+                                _ = invocation.Payload;
+                                _ = invocation.Headers;
+                                return ValueTask.CompletedTask;
+                            },
+                            priority: -1);
+                    }
+
+                    [ResponseAnalyzer<GameApi.SingleMode.CheckEvent>]
+                    static ValueTask AnalyzeCheckEvent(SingleModeCheckEventResponse payload)
+                    {
+                        _ = payload;
+                        return ValueTask.CompletedTask;
                     }
 
                     public static async Task<SyntheticExerciseResult> ExerciseAsync()
@@ -713,7 +854,6 @@ namespace UmamusumeResponseAnalyzer.Tests
                         var tombstoneFailureCount = VerifyTombstone(workspace);
 
                         ExerciseHotkeySurface(shortcut);
-                        ExerciseDialogSurface();
 
                         SyntheticPanelWriterA.Write(recreated, panelKey, "First caller final", "first caller final content");
                         SyntheticPanelWriterB.Write(recreated, panelKey, finalPanelTitle, finalPanelText);
@@ -734,31 +874,6 @@ namespace UmamusumeResponseAnalyzer.Tests
                     public static void Cleanup(SyntheticExerciseResult result) => result.Workspace.Remove();
 
                     public static void UnregisterAllInIsolatedChildProcess() => HotkeyManager.UnregisterAll();
-
-                    static void ExerciseDialogSurface()
-                    {
-                        var cancellation = new CancellationToken(canceled: true);
-                        var choices = new[] { "one" };
-                        ExpectCanceled(() => TerminalUi.Select("Select value", new[] { 1 }, cancellationToken: cancellation));
-                        ExpectCanceled(() => TerminalUi.MultiSelect("MultiSelect", choices, cancellationToken: cancellation));
-                        ExpectCanceled(() => TerminalUi.Ask("Ask", cancellationToken: cancellation));
-                        ExpectCanceled(() => TerminalUi.Confirm("Confirm", cancellationToken: cancellation));
-                        ExpectCanceled(() => TerminalUi.Acknowledge(cancellationToken: cancellation));
-                    }
-
-                    static void ExpectCanceled(Action action)
-                    {
-                        try
-                        {
-                            action();
-                        }
-                        catch (OperationCanceledException)
-                        {
-                            return;
-                        }
-
-                        throw new InvalidOperationException("TerminalUi dialog must observe deterministic cancellation.");
-                    }
 
                     static void ExerciseHotkeySurface(UiShortcut shortcut)
                     {
@@ -967,18 +1082,13 @@ namespace UmamusumeResponseAnalyzer.Tests
                 var logObserved = logs.Any(line =>
                     line.Text == $"[Synthetic] {logText}" &&
                     line.Severity == UiSeverity.Success);
-                var notifications = terminal.InvokeAsync(() =>
-                        host.GetNotificationsForTests(exercisedWorkspace))
-                    .GetAwaiter().GetResult();
-                var notificationObserved = notifications.Any(notification =>
-                    ReferenceEquals(notification.Workspace, exercisedWorkspace) &&
-                    notification.Text == notificationText &&
-                    notification.Severity == UiSeverity.Info);
 
                 exercisedWorkspace.SwitchTo();
                 host.FlushAsync().WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
                 terminal.RedrawAsync().GetAwaiter().GetResult();
+                terminal.WaitForScreenAsync(notificationText).GetAwaiter().GetResult();
                 var screen = terminal.CaptureScreenAsync().GetAwaiter().GetResult();
+                var notificationObserved = screen.Contains(notificationText, StringComparison.Ordinal);
                 var panelObserved =
                     screen.Contains(panelText, StringComparison.Ordinal) &&
                     !screen.Contains("first caller final content", StringComparison.Ordinal);

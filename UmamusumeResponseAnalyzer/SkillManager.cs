@@ -1,13 +1,29 @@
+using System.Diagnostics.CodeAnalysis;
 using UmamusumeResponseAnalyzer.Entities;
 using SingleModeChara = Gallop.SingleModeChara;
 
 namespace UmamusumeResponseAnalyzer
 {
-    public class SkillManagerGenerator
+    public sealed class SkillManagerGenerator
     {
-        // 默认空 SkillManager:数据未加载(如全新用户还没下技能数据)时,Default[...] 返回空/null 而非 NPE。
-        // 正常加载会在 Database.Initialize 用真实技能列表覆盖它。
-        public static SkillManager Default = new([]);
+        private readonly SkillManager defaults;
+
+        public SkillManagerGenerator(IEnumerable<SkillData> skills)
+        {
+            defaults = new(skills.Select(x => x.Clone()));
+        }
+
+        public bool TryFindByName(string name, [NotNullWhen(true)] out SkillData? skill)
+        {
+            if (defaults.TryFindByName(name, out var found))
+            {
+                skill = found.Clone();
+                return true;
+            }
+
+            skill = null;
+            return false;
+        }
         /// <summary>
         /// 根据马的属性应用折扣，改变技能的价格
         /// </summary>
@@ -94,7 +110,7 @@ namespace UmamusumeResponseAnalyzer
         }
         public SkillManager Apply(SingleModeChara chara_info)
         {
-            var tips = chara_info.skill_tips_array.SelectMany(x => Default[(x.group_id, x.rarity)])
+            var tips = chara_info.skill_tips_array.SelectMany(x => defaults.FindByGroup(x.group_id, x.rarity))
                 .Select(x => x.Clone())
                 .Where(x => x.Rate > 0)
                 .ToList();
@@ -105,18 +121,18 @@ namespace UmamusumeResponseAnalyzer
                 {
                     if (!tips.Any(x => x.Id == talent.SkillId) && !chara_info.skill_array.Any(y => y.skill_id == talent.SkillId))
                     {
-                        tips.Add(Default[talent.SkillId].Clone());
+                        tips.Add(defaults.GetRequiredById(talent.SkillId).Clone());
                     }
                 }
             }
             foreach (var learned in chara_info.skill_array)
             {
-                tips.Add(Default[learned.skill_id].Clone());
+                tips.Add(defaults.GetRequiredById(learned.skill_id).Clone());
             }
             //添加上位技能缺少的下位技能（为方便计算切者技能点）
             foreach (var group in tips.GroupBy(x => x.GroupId))
             {
-                var additionalSkills = Default.GetAllByGroupId(group.Key)
+                var additionalSkills = defaults.FindByGroup(group.Key)
                     .Where(x => x.Rarity <= group.Max(y => y.Rarity))
                     .Where(x => x.Rate > 0);
                 var ids = additionalSkills.ExceptBy(tips.Select(x => x.Id), x => x.Id);
@@ -165,54 +181,55 @@ namespace UmamusumeResponseAnalyzer
                     inferior = inferior.Inferior;
                 }
             }
-            return new SkillManager(tips);
+            return new SkillManager(tips, this);
         }
+
+        internal SkillData GetRequiredById(int id) => defaults.GetRequiredById(id);
     }
-    public class SkillManager(List<SkillData> list)
+
+    public sealed class SkillManager : IEnumerable<SkillData>
     {
-        /// <summary>
-        /// 根据GroupId和Rarity获得所有同类技能(通常是单圈双圈绿)
-        /// </summary>
-        /// <param name="tuple">技能的GroupId、Rarity</param>
-        /// <returns>所有具有相同GroupId、Rarity的技能</returns>
-        public SkillData[] this[(int GroupId, int Rarity) tuple]
+        private readonly List<SkillData> list;
+        private readonly SkillManagerGenerator? source;
+
+        public SkillManager(IEnumerable<SkillData> skills)
+            : this(skills, null)
         {
-            get
-            {
-                return [.. list.Where(x => x.GroupId == tuple.GroupId && x.Rarity == tuple.Rarity)];
-            }
         }
-        public SkillData this[int Id]
+
+        internal SkillManager(IEnumerable<SkillData> skills, SkillManagerGenerator? source)
         {
-            get
-            {
-                return list.FirstOrDefault(x => x.Id == Id)!;
-            }
-            set
-            {
-                var skill = list.FirstOrDefault(x => x.Id == Id);
-                if (skill == default)
-                {
-                    if (value != default)
-                        list.Add(value);
-                }
-                else
-                {
-                    skill = value;
-                }
-            }
+            list = [.. skills];
+            this.source = source;
         }
-        public (int GroupId, int Rarity, int Rate) Deconstruction(int Id) => this[Id].Deconstruction();
-        /// <summary>
-        /// 获得某个技能的所有子技能(金、双圈、单圈、×)
-        /// </summary>
-        /// <param name="groupId">技能的GroupId</param>
-        /// <returns>所有具有相同GroupId的技能</returns>
-        public SkillData[] GetAllByGroupId(int groupId) => [.. list.Where(x => x.GroupId == groupId)];
-        public SkillData? GetSkillByName(string name) => list.FirstOrDefault(x => x.Name == name);
+        public SkillData[] FindByGroup(int groupId, int rarity)
+            => [.. list.Where(x => x.GroupId == groupId && x.Rarity == rarity)];
+
+        public SkillData[] FindByGroup(int groupId)
+            => [.. list.Where(x => x.GroupId == groupId)];
+
+        public bool TryFindById(int id, [NotNullWhen(true)] out SkillData? skill)
+        {
+            skill = list.FirstOrDefault(x => x.Id == id);
+            return skill is not null;
+        }
+
+        public SkillData GetRequiredById(int id)
+            => list.FirstOrDefault(x => x.Id == id)
+                ?? throw new KeyNotFoundException($"技能数据不存在: skillId={id}");
+
+        public bool TryFindByName(string name, [NotNullWhen(true)] out SkillData? skill)
+        {
+            skill = list.FirstOrDefault(x => x.Name == name);
+            return skill is not null;
+        }
+
+        public (int GroupId, int Rarity, int Rate) Deconstruction(int id)
+            => GetRequiredById(id).Deconstruction();
 
         public void Evolve(SingleModeChara chara_info, IEnumerable<SkillData> willLearnSkills = null!)
         {
+            var defaults = source ?? throw new InvalidOperationException("该 SkillManager 不是由 Database.Skills.Apply 创建，无法计算进化技能。");
             list.ForEach(x => x.Upgrades.Clear());
             willLearnSkills ??= [];
             if (Database.TalentSkill.TryGetValue(chara_info.card_id, out var talents))
@@ -223,11 +240,11 @@ namespace UmamusumeResponseAnalyzer
                     {
                         foreach (var upgradedSkillId in talent.UpgradeSkills.Keys)
                         {
-                            var upgraded = SkillManagerGenerator.Default[upgradedSkillId].Clone();
+                            var upgraded = defaults.GetRequiredById(upgradedSkillId).Clone();
                             SkillManagerGenerator.ApplyProper(upgraded, chara_info);
-                            upgraded.Cost = this[talent.SkillId].Cost;
+                            upgraded.Cost = GetRequiredById(talent.SkillId).Cost;
                             upgraded.IsScenarioEvolution = false;
-                            this[talent.SkillId].Upgrades.Add(upgraded);
+                            GetRequiredById(talent.SkillId).Upgrades.Add(upgraded);
                         }
                     }
                 }
@@ -235,14 +252,14 @@ namespace UmamusumeResponseAnalyzer
             //添加剧本进化
             foreach (var upgraded in Database.SkillUpgradeSpeciality.Values)
             {
-                var baseSkill = this[upgraded.BaseSkillId];
-                if (baseSkill != default && chara_info.scenario_id == upgraded.ScenarioId)
+                if (TryFindById(upgraded.BaseSkillId, out var baseSkill)
+                    && chara_info.scenario_id == upgraded.ScenarioId)
                 {
                     foreach (var j in upgraded.UpgradeSkills)
                     {
                         if (j.Value.GroupBy(x => x.Group).All(x => x.Any(y => y.IsArchived(chara_info, willLearnSkills))))
                         {
-                            var upgradedSkill = SkillManagerGenerator.Default[j.Key].Clone();
+                            var upgradedSkill = defaults.GetRequiredById(j.Key).Clone();
                             SkillManagerGenerator.ApplyProper(upgradedSkill, chara_info);
                             upgradedSkill.Cost = baseSkill.Cost;
                             upgradedSkill.IsScenarioEvolution = true;
@@ -257,6 +274,7 @@ namespace UmamusumeResponseAnalyzer
             list.RemoveAll(x => chara_info.skill_array.Any(y => y.skill_id == x.Id));
         }
         public IEnumerator<SkillData> GetEnumerator() => list.GetEnumerator();
-        public List<SkillData> GetSkills() => list;
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+        public IReadOnlyList<SkillData> GetSkills() => list;
     }
 }

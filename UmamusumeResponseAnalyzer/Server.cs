@@ -78,94 +78,109 @@ namespace UmamusumeResponseAnalyzer
     }
 
     internal sealed class AnalyzerDispatchContext(
-        AnalyzerKind kind,
         GameEndpointDescriptor descriptor,
         byte[] payload,
         GameHttpHeaders headers)
     {
-        object? dto;
+        readonly Dictionary<Type, object> projections = [];
 
-        public byte[] Payload { get; } = payload;
+        public GameEndpointDescriptor Endpoint { get; } = descriptor;
+        public ReadOnlyMemory<byte> Payload { get; } = payload;
         public GameHttpHeaders Headers { get; } = headers;
 
-        public object GetDto() => dto ??= DeserializeDto();
-
-        object DeserializeDto()
+        public object GetDto(Type payloadType)
         {
-            var dtoType = kind == AnalyzerKind.Request ? descriptor.RequestType : descriptor.ResponseType;
-            try
+            if (!projections.TryGetValue(payloadType, out var projection))
             {
-                return MessagePackSerializer.Deserialize(dtoType, Payload)
-                    ?? throw new InvalidOperationException(
-                        $"Gallop DTO 反序列化返回 null: endpoint={descriptor.EndpointType.FullName}, path={descriptor.Path}");
+                try
+                {
+                    projection = MessagePackSerializer.Deserialize(payloadType, Payload)
+                        ?? throw new InvalidOperationException(
+                            $"Gallop DTO 反序列化返回 null: endpoint={Endpoint.EndpointType.FullName}, " +
+                            $"path={Endpoint.Path}, dto={payloadType.FullName}");
+                }
+                catch (Exception ex)
+                {
+                    projection = new AnalyzerProjectionException(Endpoint, payloadType, ex);
+                }
+
+                projections[payloadType] = projection;
             }
-            catch (Exception ex)
-            {
-                throw new InvalidOperationException(
-                    $"Gallop DTO 反序列化失败: endpoint={descriptor.EndpointType.FullName}, path={descriptor.Path}, dto={dtoType.FullName}",
-                    ex);
-            }
+
+            if (projection is AnalyzerProjectionException failure)
+                throw failure;
+            return projection;
         }
+    }
+
+    internal sealed class AnalyzerProjectionException(
+        GameEndpointDescriptor endpoint,
+        Type payloadType,
+        Exception innerException) : InvalidOperationException(
+            $"Gallop DTO 投影失败: endpoint={endpoint.EndpointType.FullName}, path={endpoint.Path}, dto={payloadType.FullName}",
+            innerException)
+    {
+        int reported;
+
+        internal bool TryMarkReported()
+            => Interlocked.Exchange(ref reported, 1) == 0;
     }
 
     internal static class Server
     {
         const string GameEndpointPathPrefix = "/umamusume";
         const string CanonicalUrlHeaderName = "X-Hachimi-Game-Url";
-        static readonly object DebugPacketCleanupLock = new();
-        static readonly object LifecycleLock = new();
         static ServerRequestBarrier? requests;
         static Task? shutdownTask;
         internal static WebserverLite Instance = new(new WebserverSettings(Config.Core.ListenAddress, Config.Core.ListenPort), ctx => ctx.Response.Send(string.Empty));
         internal static bool IsRunning => Instance.IsListening;
         internal static void Start(CancellationToken hostCancellationToken)
         {
-            lock (LifecycleLock)
+            if (Volatile.Read(ref shutdownTask) is not null)
+                throw new InvalidOperationException("HTTP server lifecycle 已启动，不能重复 Start。");
+
+            var requestBarrier = new ServerRequestBarrier(hostCancellationToken);
+            if (Interlocked.CompareExchange(ref requests, requestBarrier, null) is not null)
             {
-                if (requests is not null || shutdownTask is not null)
-                    throw new InvalidOperationException("HTTP server lifecycle 已启动，不能重复 Start。");
-                requests = new(hostCancellationToken);
+                requestBarrier.Dispose();
+                throw new InvalidOperationException("HTTP server lifecycle 已启动，不能重复 Start。");
             }
 
             Instance.Routes.PreAuthentication.Static.Add(
                 WatsonWebserver.Core.HttpMethod.POST,
                 "/notify/response",
-                requests.Wrap((ctx, cancellationToken) => HandleNotificationAsync(AnalyzerKind.Response, ctx, cancellationToken)));
+                requestBarrier.Wrap((ctx, cancellationToken) => HandleNotificationAsync(AnalyzerKind.Response, ctx, cancellationToken)));
             Instance.Routes.PreAuthentication.Static.Add(
                 WatsonWebserver.Core.HttpMethod.POST,
                 "/notify/request",
-                requests.Wrap((ctx, cancellationToken) => HandleNotificationAsync(AnalyzerKind.Request, ctx, cancellationToken)));
+                requestBarrier.Wrap((ctx, cancellationToken) => HandleNotificationAsync(AnalyzerKind.Request, ctx, cancellationToken)));
             Instance.Routes.PreAuthentication.Static.Add(
                 WatsonWebserver.Core.HttpMethod.GET,
                 "/notify/ping",
-                requests.Wrap((ctx, cancellationToken) =>
+                requestBarrier.Wrap((ctx, cancellationToken) =>
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     TerminalUi.Log("Server", I18N_PingReceived, UiSeverity.Trace);
                     return ctx.Response.Send("pong");
                 }));
-            WebInstallApi.Register(Instance, requests);
-            Instance.Start(requests.Token);
+            WebInstallApi.Register(Instance, requestBarrier);
+            Instance.Start(requestBarrier.Token);
         }
 
         internal static Task StopAsync()
         {
-            TaskCompletionSource completion;
-            WebserverLite server;
-            ServerRequestBarrier? requestBarrier;
-            lock (LifecycleLock)
-            {
-                if (shutdownTask is not null)
-                    return shutdownTask;
+            var existing = Volatile.Read(ref shutdownTask);
+            if (existing is not null)
+                return existing;
 
-                completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
-                shutdownTask = completion.Task;
-                server = Instance;
-                requestBarrier = requests;
-            }
+            var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var task = completion.Task;
+            existing = Interlocked.CompareExchange(ref shutdownTask, task, null);
+            if (existing is not null)
+                return existing;
 
-            _ = CompleteShutdownAsync(completion, server, requestBarrier);
-            return completion.Task;
+            _ = CompleteShutdownAsync(completion, Instance, Volatile.Read(ref requests));
+            return task;
         }
 
         static async Task CompleteShutdownAsync(
@@ -270,12 +285,6 @@ namespace UmamusumeResponseAnalyzer
             return value;
         }
 
-        internal static ValueTask DispatchRequest(string canonicalUrl, byte[] buffer, GameHttpHeaders? headers = null)
-            => DispatchPacket(AnalyzerKind.Request, canonicalUrl, buffer, headers ?? GameHttpHeaders.Empty);
-
-        internal static ValueTask DispatchResponse(string canonicalUrl, byte[] buffer, GameHttpHeaders? headers = null)
-            => DispatchPacket(AnalyzerKind.Response, canonicalUrl, buffer, headers ?? GameHttpHeaders.Empty);
-
         static async ValueTask DispatchPacket(AnalyzerKind kind, string canonicalUrl, byte[] buffer, GameHttpHeaders headers)
         {
             try
@@ -289,7 +298,7 @@ namespace UmamusumeResponseAnalyzer
                 if (registrations.Count == 0)
                     return;
 
-                var context = new AnalyzerDispatchContext(kind, descriptor, buffer, headers);
+                var context = new AnalyzerDispatchContext(descriptor, buffer, headers);
                 for (var i = 0; i < registrations.Count; i++)
                     await InvokeAnalyzer(kind, registrations[i], context);
             }
@@ -327,22 +336,19 @@ namespace UmamusumeResponseAnalyzer
 
         static void CleanupOldDebugPackets()
         {
-            lock (DebugPacketCleanupLock)
+            foreach (var i in Directory.GetFiles("packets"))
             {
-                foreach (var i in Directory.GetFiles("packets"))
-                {
-                    var fileInfo = new FileInfo(i);
-                    if (fileInfo.CreationTime.AddDays(1) >= DateTime.Now)
-                        continue;
+                var fileInfo = new FileInfo(i);
+                if (fileInfo.CreationTime.AddDays(1) >= DateTime.Now)
+                    continue;
 
-                    try
-                    {
-                        fileInfo.Delete();
-                    }
-                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-                    {
-                        TerminalUi.Log("Server", $"debug packet 旧文件清理失败，已跳过 {Path.GetFileName(i)}: {ex.Message}", UiSeverity.Warning);
-                    }
+                try
+                {
+                    fileInfo.Delete();
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    TerminalUi.Log("Server", $"debug packet 旧文件清理失败，已跳过 {Path.GetFileName(i)}: {ex.Message}", UiSeverity.Warning);
                 }
             }
         }
@@ -358,6 +364,8 @@ namespace UmamusumeResponseAnalyzer
             catch (Exception e)
             {
                 var root = e is TargetInvocationException { InnerException: { } inner } ? inner : e;
+                if (root is AnalyzerProjectionException projection && !projection.TryMarkReported())
+                    return;
                 var label = kind == AnalyzerKind.Request ? "请求" : "响应";
                 var failure = new InvalidOperationException(
                     $"{label}分析插件处理失败: plugin={PluginManager.InternalName(registration.Plugin)}, " +

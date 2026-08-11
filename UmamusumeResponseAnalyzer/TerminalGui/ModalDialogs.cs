@@ -11,7 +11,7 @@ static class ModalDialogs
 {
     const int PromptHeight = 3;
 
-    public static async Task RunProgressAsync(
+    internal static async Task RunProgressAsync(
         Func<IProgress<DownloadProgress>, CancellationToken, Task> action,
         CancellationToken cancellationToken = default)
     {
@@ -187,7 +187,7 @@ static class ModalDialogs
         cancellationToken.ThrowIfCancellationRequested();
     }
 
-    public static T Select<T>(
+    internal static T Select<T>(
         string title,
         IEnumerable<T> choices,
         Func<T, string>? converter = null,
@@ -230,7 +230,7 @@ static class ModalDialogs
         return values[index];
     }
 
-    public static T Menu<T>(
+    internal static T Menu<T>(
         string title,
         IEnumerable<T> choices,
         Func<T, string>? converter = null,
@@ -310,7 +310,7 @@ static class ModalDialogs
             : throw new OperationCanceledException("菜单已取消。");
     }
 
-    public static IReadOnlyList<T> MultiSelect<T>(
+    internal static IReadOnlyList<T> MultiSelect<T>(
         string title,
         IEnumerable<T> choices,
         IEnumerable<T>? selected = null,
@@ -387,7 +387,7 @@ static class ModalDialogs
         return list.GetAllMarkedItems().Select(x => values[x]).ToArray();
     }
 
-    public static string Ask(
+    internal static string Ask(
         string title,
         string? value = null,
         bool allowEmpty = false,
@@ -450,7 +450,7 @@ static class ModalDialogs
         return input.Text;
     }
 
-    public static bool Confirm(
+    internal static bool Confirm(
         string title,
         bool defaultValue = false,
         CancellationToken cancellationToken = default)
@@ -501,7 +501,7 @@ static class ModalDialogs
         return result;
     }
 
-    public static bool Acknowledge(
+    internal static bool Acknowledge(
         string title = "按 Enter 返回",
         CancellationToken cancellationToken = default)
     {

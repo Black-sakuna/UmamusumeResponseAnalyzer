@@ -157,9 +157,9 @@ public sealed class HostCommandsTests
     {
         var plugins = new PluginManager.PluginRuntimeStatus[]
         {
-            new("Internal", "显示名", "Author", new(1, 2, 3), true, true, true),
-            new("Plain", "Plain", string.Empty, null, false, true, false),
-            new("Broken", "Broken", string.Empty, null, false, false, false)
+            new("Internal", "显示名", "Author", new(1, 2, 3), true, true),
+            new("Plain", "Plain", string.Empty, null, false, true),
+            new("Broken", "Broken", string.Empty, null, false, false)
         };
         var snapshot = new HostCommands.Snapshot([], null, plugins);
 
@@ -172,7 +172,7 @@ public sealed class HostCommandsTests
         Assert.Equal("Plugins", display.Title);
         Assert.Equal(
             [
-                "loaded Internal (显示名) v1.2.3 by Author host",
+                "loaded Internal (显示名) v1.2.3 by Author",
                 "unloaded Plain",
                 "failed Broken"
             ],
@@ -192,15 +192,14 @@ public sealed class HostCommandsTests
             [new(quoted), new(alpha), new(slash)],
             alpha,
             [
-                new PluginManager.PluginRuntimeStatus("Zulu", "Zulu", string.Empty, null, false, true, false),
+                new PluginManager.PluginRuntimeStatus("Zulu", "Zulu", string.Empty, null, false, true),
                 new PluginManager.PluginRuntimeStatus(
                     "alpha-plugin",
                     "alpha-plugin",
                     string.Empty,
                     null,
                     true,
-                    true,
-                    false)
+                    true)
             ]);
 
         Assert.Equal(["/plugin", "/workspace"], HostCommands.Complete("/", snapshot));

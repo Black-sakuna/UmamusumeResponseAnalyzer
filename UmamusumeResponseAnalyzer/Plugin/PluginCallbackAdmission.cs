@@ -1,3 +1,5 @@
+using System.Collections.Immutable;
+
 namespace UmamusumeResponseAnalyzer.Plugin;
 
 internal sealed class PluginCallbackSnapshot<T>(
@@ -15,53 +17,71 @@ internal sealed class PluginCallbackSnapshot<T>(
         Func<T, IPlugin> plugin,
         CancellationToken cancellationToken = default)
     {
-        var items = new List<T>();
+        var candidateList = candidates.ToList();
+        var admitted = new HashSet<IPlugin>(ReferenceEqualityComparer.Instance);
+        var rejected = new HashSet<IPlugin>(ReferenceEqualityComparer.Instance);
         var leases = new List<IDisposable>();
         try
         {
-            foreach (var candidate in candidates)
+            foreach (var candidate in candidateList)
             {
-                var lease = PluginManager.TryEnterPluginCallback(plugin(candidate), cancellationToken);
-                if (lease is null)
+                var owner = plugin(candidate);
+                if (admitted.Contains(owner) || rejected.Contains(owner))
                     continue;
-                items.Add(candidate);
-                leases.Add(lease);
+
+                var lease = PluginManager.TryEnterPluginCallback(owner, cancellationToken);
+                if (lease is null)
+                    rejected.Add(owner);
+                else
+                {
+                    admitted.Add(owner);
+                    leases.Add(lease);
+                }
             }
-            return new(items, leases);
+
+            return new(
+                candidateList.Where(candidate => admitted.Contains(plugin(candidate))).ToList(),
+                leases);
         }
         catch
         {
-            items.Clear();
-            foreach (var lease in leases)
-                lease.Dispose();
+            for (var i = leases.Count - 1; i >= 0; i--)
+                leases[i].Dispose();
             throw;
         }
     }
 
     public void Dispose()
     {
-        var items = Interlocked.Exchange(ref this.items, null);
-        var leases = Interlocked.Exchange(ref this.leases, null);
-        items?.Clear();
-        if (leases is null)
+        Interlocked.Exchange(ref items, null)?.Clear();
+        var currentLeases = Interlocked.Exchange(ref leases, null);
+        if (currentLeases is null)
             return;
 
-        foreach (var lease in leases)
-            lease.Dispose();
-        leases.Clear();
+        for (var i = currentLeases.Count - 1; i >= 0; i--)
+            currentLeases[i].Dispose();
+        currentLeases.Clear();
     }
 }
 
 internal sealed class PluginGeneration(IPlugin plugin)
 {
+    static readonly AsyncLocal<ImmutableHashSet<PluginGeneration>?> CallbackFlow = new();
     readonly object gate = new();
-    TaskCompletionSource drained = CompletedSignal();
+    readonly CancellationTokenSource backgroundCancellation = new();
+    readonly HashSet<Task> backgroundTasks = [];
+    PluginRegistrationPlan? pendingRegistration;
+    TaskCompletionSource? callbackDrain;
+    TaskCompletionSource? closeCompletion;
     int inFlight;
     bool initializing;
     bool accepting;
     bool closed;
 
     internal IPlugin Plugin { get; } = plugin;
+
+    internal static bool HasActiveCallbackFlow
+        => CallbackFlow.Value is { Count: > 0 };
 
     internal bool IsAccepting
     {
@@ -86,7 +106,7 @@ internal sealed class PluginGeneration(IPlugin plugin)
         }
     }
 
-    internal void CompleteInitialization(bool activateCallbacks)
+    internal void CompleteInitialization()
     {
         lock (gate)
         {
@@ -96,14 +116,16 @@ internal sealed class PluginGeneration(IPlugin plugin)
             initializing = false;
             if (closed)
                 throw Closed();
-            accepting = activateCallbacks;
         }
     }
 
     internal void AbortInitialization()
     {
         lock (gate)
+        {
             initializing = false;
+            pendingRegistration = null;
+        }
     }
 
     internal void Open()
@@ -118,13 +140,113 @@ internal sealed class PluginGeneration(IPlugin plugin)
         }
     }
 
-    internal Task Close()
+    internal bool TryStageRegistration(PluginRegistrationPlan plan)
     {
         lock (gate)
         {
+            if (closed)
+                throw Closed();
+            if (!initializing)
+                return false;
+            if (pendingRegistration is not null)
+                throw new InvalidOperationException(
+                    $"插件 initialization registration 已提交: {PluginManager.InternalName(Plugin)}");
+
+            pendingRegistration = plan;
+            return true;
+        }
+    }
+
+    internal PluginRegistrationPlan TakePendingRegistration()
+    {
+        lock (gate)
+        {
+            if (closed || initializing || accepting)
+                throw Closed();
+            var plan = pendingRegistration
+                ?? throw new InvalidOperationException(
+                    $"插件 initialization registration 尚未提交: {PluginManager.InternalName(Plugin)}");
+            pendingRegistration = null;
+            return plan;
+        }
+    }
+
+    internal Task Close()
+    {
+        Task callbackTask;
+        Task[] backgroundSnapshot;
+        TaskCompletionSource completion;
+        lock (gate)
+        {
+            if (closeCompletion is not null)
+                return closeCompletion.Task;
+
             accepting = false;
             closed = true;
-            return drained.Task;
+            pendingRegistration = null;
+            callbackTask = inFlight == 0
+                ? Task.CompletedTask
+                : (callbackDrain = new(TaskCreationOptions.RunContinuationsAsynchronously)).Task;
+            backgroundSnapshot = [.. backgroundTasks];
+            backgroundTasks.Clear();
+            completion = closeCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+
+        _ = CompleteCloseAsync(callbackTask, backgroundSnapshot, completion);
+        return completion.Task;
+    }
+
+    async Task CompleteCloseAsync(
+        Task callbackTask,
+        Task[] backgroundSnapshot,
+        TaskCompletionSource completion)
+    {
+        List<Exception> failures = [];
+        try
+        {
+            try
+            {
+                await backgroundCancellation.CancelAsync();
+            }
+            catch (Exception ex)
+            {
+                failures.Add(ex);
+            }
+
+            try
+            {
+                await callbackTask;
+            }
+            catch (Exception ex)
+            {
+                failures.Add(ex);
+            }
+
+            try
+            {
+                await Task.WhenAll(backgroundSnapshot);
+            }
+            catch (Exception ex)
+            {
+                failures.Add(ex);
+            }
+
+            if (failures.Count == 0)
+                completion.TrySetResult();
+            else if (failures.Count == 1)
+                completion.TrySetException(failures[0]);
+            else
+                completion.TrySetException(new AggregateException(
+                    "插件 generation 关闭失败。",
+                    failures));
+        }
+        catch (Exception ex)
+        {
+            completion.TrySetException(ex);
+        }
+        finally
+        {
+            backgroundCancellation.Dispose();
         }
     }
 
@@ -141,6 +263,13 @@ internal sealed class PluginGeneration(IPlugin plugin)
             lease = EnterLocked();
             return true;
         }
+    }
+
+    internal IDisposable EnterCallbackFlow(IDisposable generationLease)
+    {
+        var previous = CallbackFlow.Value;
+        CallbackFlow.Value = (previous ?? ImmutableHashSet<PluginGeneration>.Empty).Add(this);
+        return new CallbackFlowLease(generationLease, previous);
     }
 
     internal bool TryEnterInspection(out IDisposable? lease)
@@ -173,36 +302,85 @@ internal sealed class PluginGeneration(IPlugin plugin)
         }
     }
 
+    internal void ValidateBackgroundAdmission()
+    {
+        lock (gate)
+        {
+            if (closed || !initializing && !accepting)
+                throw Closed();
+        }
+    }
+
+    internal void RunBackground(IReadOnlyList<Func<CancellationToken, ValueTask>> operations)
+    {
+        List<Task> started;
+        lock (gate)
+        {
+            if (closed || !accepting)
+                throw Closed();
+            started = StartBackgroundLocked(operations);
+        }
+
+        ObserveBackgroundTasks(started);
+    }
+
+    List<Task> StartBackgroundLocked(IReadOnlyList<Func<CancellationToken, ValueTask>> operations)
+    {
+        List<Task> started = [];
+        foreach (var operation in operations)
+        {
+            var task = Task.Run(() => InvokeBackgroundAsync(operation, backgroundCancellation.Token));
+            backgroundTasks.Add(task);
+            started.Add(task);
+        }
+        return started;
+    }
+
+    static void ObserveBackgroundTasks(IEnumerable<Task> tasks)
+    {
+        foreach (var task in tasks)
+            _ = task.Exception;
+    }
+
+    async Task InvokeBackgroundAsync(
+        Func<CancellationToken, ValueTask> operation,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await operation(cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            var failure = new InvalidOperationException(
+                $"插件后台操作失败: plugin={PluginManager.InternalName(Plugin)}, " +
+                PluginManager.DescribeException(ex));
+            _ = PluginManager.ReportPluginFailure("Plugin", failure);
+        }
+    }
+
     IDisposable EnterLocked()
     {
-        if (inFlight++ == 0)
-            drained = NewSignal();
+        inFlight++;
         return new Lease(Exit);
     }
 
     void Exit()
     {
-        TaskCompletionSource? signal = null;
+        TaskCompletionSource? completion = null;
         lock (gate)
         {
             if (--inFlight == 0)
-                signal = drained;
+                completion = callbackDrain;
         }
-        signal?.TrySetResult();
-    }
-
-    static TaskCompletionSource NewSignal()
-        => new(TaskCreationOptions.RunContinuationsAsynchronously);
-
-    static TaskCompletionSource CompletedSignal()
-    {
-        var signal = NewSignal();
-        signal.SetResult();
-        return signal;
+        completion?.TrySetResult();
     }
 
     InvalidOperationException Closed()
-        => new($"插件 generation 已关闭: {PluginManager.InternalName(Plugin)}");
+        => new($"插件 generation 已关闭或未开放: {PluginManager.InternalName(Plugin)}");
 
     sealed class Lease(Action release) : IDisposable
     {
@@ -210,5 +388,21 @@ internal sealed class PluginGeneration(IPlugin plugin)
 
         public void Dispose()
             => Interlocked.Exchange(ref release, null)?.Invoke();
+    }
+
+    sealed class CallbackFlowLease(
+        IDisposable generationLease,
+        ImmutableHashSet<PluginGeneration>? previous) : IDisposable
+    {
+        IDisposable? generationLease = generationLease;
+
+        public void Dispose()
+        {
+            var current = Interlocked.Exchange(ref generationLease, null);
+            if (current is null)
+                return;
+            CallbackFlow.Value = previous;
+            current.Dispose();
+        }
     }
 }

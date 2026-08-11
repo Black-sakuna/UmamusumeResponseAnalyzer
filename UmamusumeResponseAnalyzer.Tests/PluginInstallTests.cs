@@ -70,14 +70,15 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
 
         [Fact]
-        public async Task InstallPluginsAsync_SkipsBatchForkConflicts()
+        public async Task InstallPluginsAsync_RejectsDuplicateInternalNamesIgnoringCase()
         {
-            var installed = await PluginRepository.InstallPluginsAsync([
+            var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                PluginRepository.InstallPluginsAsync([
                 new() { Author = "author-a", InternalName = "SameName", RawVersion = "1.0.0" },
-                new() { Author = "author-b", InternalName = "SameName", RawVersion = "1.0.0" },
-            ], TestContext.Current.CancellationToken);
+                new() { Author = "author-b", InternalName = "samename", RawVersion = "1.0.0" },
+            ], TestContext.Current.CancellationToken));
 
-            Assert.Empty(installed);
+            Assert.Contains("InternalName 重复", error.Message);
             Assert.False(File.Exists(Path.Combine(tempDir, "Plugins", "SameName.zip")));
         }
 

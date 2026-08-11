@@ -24,7 +24,7 @@ internal sealed class PendingPluginUnload(
 
 internal sealed record StagedAssembly(string Name, Assembly Assembly);
 
-internal sealed record StagedPlugin(IPlugin Plugin, PluginRegistrationPlan Plan);
+internal sealed record StagedPlugin(IPlugin Plugin);
 
 internal sealed record StagedGroupLoad(
     HashSet<string> Names,

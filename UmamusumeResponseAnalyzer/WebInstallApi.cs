@@ -115,16 +115,6 @@ namespace UmamusumeResponseAnalyzer
                 return;
             }
 
-            var installedFork = PluginManager.SnapshotPluginStatuses()
-                .FirstOrDefault(plugin => plugin.IsLoaded
-                    && string.Equals(plugin.InternalName, req.InternalName, StringComparison.OrdinalIgnoreCase)
-                    && !string.Equals(plugin.Author, req.Author, StringComparison.OrdinalIgnoreCase));
-            if (installedFork != null)
-            {
-                await SendJson(ctx, 409, new { ok = false, error = "author_conflict", installedAuthor = installedFork.Author });
-                return;
-            }
-
             if (!ConfirmInstall(req.Author, req.InternalName, req.Version, cancellationToken))
             {
                 await SendJson(ctx, 409, new { ok = false, error = "cancelled" });
@@ -136,17 +126,16 @@ namespace UmamusumeResponseAnalyzer
                 await PluginRepository.InstallByReferenceAsync(req.Author, req.InternalName, req.Version, cancellationToken);
                 // 核心安装路由由 Server barrier 跟踪；热重载会等待插件 callback 排空。
                 var result = (await PluginManager.ReloadPluginsAsync(req.InternalName)).Single();
-                var needsRestart = result.Outcome switch
+                _ = result.Outcome switch
                 {
-                    PluginManager.PluginLifecycleOutcome.Succeeded => false,
-                    PluginManager.PluginLifecycleOutcome.RestartRequired => true,
+                    PluginManager.PluginLifecycleOutcome.Succeeded => true,
                     PluginManager.PluginLifecycleOutcome.Failed => throw new InvalidOperationException(
                         $"插件 {req.InternalName} 已安装，但加载失败。"),
                     _ => throw new InvalidOperationException($"未知插件 lifecycle 结果: {result.Outcome}")
                 };
                 cancellationToken.ThrowIfCancellationRequested();
                 TerminalUi.Log("URA", $"URACloud 网页请求已安装插件 {req.InternalName} v{req.Version}");
-                await SendJson(ctx, 200, new { ok = true, installed = req.InternalName, needsRestart });
+                await SendJson(ctx, 200, new { ok = true, installed = req.InternalName });
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {

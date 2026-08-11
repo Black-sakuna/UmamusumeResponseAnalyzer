@@ -245,7 +245,6 @@ public sealed class UiHostRenderTests : IDisposable
     [Fact]
     public async Task Notifications_FilterByWorkspaceAndKeepShortcutLifetime()
     {
-        await WaitForGlobalNotificationsToExpireAsync();
         var first = CreateWorkspace("Notification First");
         var second = CreateWorkspace("Notification Second");
         host.SetPanel(
@@ -301,7 +300,6 @@ public sealed class UiHostRenderTests : IDisposable
     [Fact]
     public async Task Notification_TtlRemovesFramebufferAndShortcut()
     {
-        await WaitForGlobalNotificationsToExpireAsync();
         var workspace = CreateWorkspace("TTL workspace");
         host.SetPanel(
             workspace,
@@ -631,27 +629,35 @@ public sealed class UiHostRenderTests : IDisposable
     [Fact]
     public async Task CommandResultsAlwaysLogAndOnlyMessageWithoutDisplayNotifies()
     {
-        const string messageOnly = "command-message-only-sentinel";
-        const string messageWithDisplay = "command-message-with-display-sentinel";
+        const string scenario = "command-result-notifications";
+        if (!TerminalUiLifecycleChildProcess.IsChild(scenario))
+        {
+            Assert.Equal(
+                "ok",
+                await TerminalUiLifecycleProcessTests.RunChildAsync(
+                    scenario,
+                    typeof(UiHostRenderTests),
+                    nameof(CommandResultsAlwaysLogAndOnlyMessageWithoutDisplayNotifies)));
+            return;
+        }
+
+        const string messageOnly = "message-only";
+        const string messageWithDisplay = "message-with-display";
         List<UiLogLine> logs = [];
         void ObserveLog(UiLogLine line) => logs.Add(line);
 
         host.LogAdded += ObserveLog;
         try
         {
-            await WaitForGlobalNotificationsToExpireAsync();
             await terminal.InvokeAsync(() => host.ApplyCommandResult(
                 new HostCommands.Result(messageOnly, UiSeverity.Info)));
             await host.FlushAsync();
+            await terminal.WaitForScreenAsync($"[Command] {messageOnly}");
 
             Assert.Contains(
                 logs,
                 line => line.Text == $"[Command] {messageOnly}"
                     && line.Severity == UiSeverity.Info);
-            Assert.Single(
-                host.GetNotificationsForTests(workspace: null),
-                notification => notification.Text == $"[Command] {messageOnly}"
-                    && notification.Severity == UiSeverity.Info);
 
             await terminal.InvokeAsync(() => host.ApplyCommandResult(new HostCommands.Result(
                 messageWithDisplay,
@@ -667,20 +673,28 @@ public sealed class UiHostRenderTests : IDisposable
                 line => line.Text == $"[Command] {messageWithDisplay}"
                     && line.Severity == UiSeverity.Success);
             Assert.DoesNotContain(
-                host.GetNotificationsForTests(workspace: null),
-                notification => notification.Text.Contains(messageWithDisplay, StringComparison.Ordinal));
+                messageWithDisplay,
+                await terminal.CaptureScreenAsync(),
+                StringComparison.Ordinal);
 
             await terminal.InjectAsync(Key.Esc);
             await terminal.WaitForAsync(async () =>
                 !(await terminal.CaptureScreenAsync()).Contains(
                     "command-display-item-sentinel",
                     StringComparison.Ordinal));
-            await WaitForGlobalNotificationsToExpireAsync();
+            await Task.Delay(TimeSpan.FromMilliseconds(5100), TestContext.Current.CancellationToken);
+            terminal.Time.Advance(TimeSpan.FromSeconds(1));
+            await terminal.WaitForAsync(async () =>
+                !(await terminal.CaptureScreenAsync()).Contains(
+                    messageOnly,
+                    StringComparison.Ordinal));
         }
         finally
         {
             host.LogAdded -= ObserveLog;
         }
+
+        TerminalUiLifecycleChildProcess.WriteResult("ok");
     }
 
     [Fact]
@@ -831,22 +845,6 @@ public sealed class UiHostRenderTests : IDisposable
             await terminal.InjectAsync(new Key(character));
     }
 
-    async Task WaitForGlobalNotificationsToExpireAsync()
-    {
-        var notifications = host.GetNotificationsForTests(workspace: null);
-        if (notifications.Count == 0)
-            return;
-
-        var delay = notifications.Max(notification => notification.ExpiresAt)
-            - DateTimeOffset.Now
-            + TimeSpan.FromMilliseconds(100);
-        if (delay > TimeSpan.Zero)
-            await Task.Delay(delay, TestContext.Current.CancellationToken);
-        terminal.Time.Advance(TimeSpan.FromSeconds(1));
-        await terminal.WaitForAsync(() =>
-            host.GetNotificationsForTests(workspace: null).Count == 0);
-    }
-
 }
 
 public sealed class UiHostShutdownProcessTests
@@ -970,14 +968,14 @@ public sealed class UiHostShutdownProcessTests
             switchToWorkspace: true);
         await host.FlushAsync();
 
-        var plugin = new ShutdownWorkspacePlugin(workspace);
-        PluginManager.LoadedPlugins.Add(plugin);
-        PluginManager.InitializePlugin(plugin);
+        using var plugin = new PackagedPluginFixture(
+            "ShutdownWorkspacePlugin",
+            root => WorkspaceRemovalPluginSource(Path.Combine(root, "panel-removed")));
 
         host.RequestShutdown();
         await run.WaitAsync(TimeSpan.FromSeconds(5));
 
-        Assert.True(plugin.PanelRemoved);
+        Assert.Equal("removed", File.ReadAllText(Path.Combine(plugin.Root, "panel-removed")));
         Assert.True(view.DetachedAndDisposedWhileHostAccepted);
     }
 
@@ -1028,13 +1026,11 @@ public sealed class UiHostShutdownProcessTests
         HotkeyManager.OverlaySink = host;
         var run = await terminal.StartAsync(host);
 
-        var entered = new TaskCompletionSource(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        var plugin = new LeaseHoldingPlugin(entered);
-        PluginManager.LoadedPlugins.Add(plugin);
-        PluginManager.InitializePlugin(plugin);
-        var started = PluginManager.TriggerStartedForPluginsAsync([plugin], lifetime.Token);
-        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        using var plugin = new PackagedPluginFixture(
+            "LeaseHoldingPlugin",
+            root => LeaseHoldingPluginSource(Path.Combine(root, "entered")));
+        var started = PluginManager.TriggerStartedForPluginsAsync([plugin.Plugin], lifetime.Token);
+        await WaitForFileAsync(Path.Combine(plugin.Root, "entered"));
 
         await terminal.InvokeAsync(() =>
             Assert.True(terminal.Application.TopRunnableView!.InvokeCommand(Command.Quit)));
@@ -1053,16 +1049,16 @@ public sealed class UiHostShutdownProcessTests
         HotkeyManager.OverlaySink = host;
         var run = await terminal.StartAsync(host);
 
-        var plugin = new CancellationObservingPlugin();
-        PluginManager.LoadedPlugins.Add(plugin);
-        PluginManager.InitializePlugin(plugin);
-        await PluginManager.TriggerStartedForPluginsAsync([plugin], lifetime.Token);
+        using var plugin = new PackagedPluginFixture(
+            "CancellationObservingPlugin",
+            root => CancellationObservingPluginSource(Path.Combine(root, "disposed")));
+        await PluginManager.TriggerStartedForPluginsAsync([plugin.Plugin], lifetime.Token);
         Assert.False(lifetime.IsCancellationRequested);
 
         host.RequestShutdown();
         await run.WaitAsync(TimeSpan.FromSeconds(5));
 
-        Assert.True(plugin.Disposed);
+        Assert.Equal("disposed", File.ReadAllText(Path.Combine(plugin.Root, "disposed")));
     }
 
     static async Task RunCreateWindowFailureAsync()
@@ -1095,9 +1091,9 @@ public sealed class UiHostShutdownProcessTests
     {
         using var terminal = new TerminalGuiTestApp();
         var host = TerminalUiLifecycleChildProcess.InitializeHost(terminal, CancellationToken.None);
-        var plugin = new FailingShutdownPlugin();
-        PluginManager.LoadedPlugins.Add(plugin);
-        PluginManager.InitializePlugin(plugin);
+        using var plugin = new PackagedPluginFixture(
+            "FailingShutdownPlugin",
+            _ => FailingShutdownPluginSource());
         Config.WorkspaceTaskbarTitleOrder = null!;
 
         var failure = await Record.ExceptionAsync(async () =>
@@ -1197,10 +1193,10 @@ public sealed class UiHostShutdownProcessTests
         try
         {
             const string pluginName = "CommandPrimaryFailure";
-            PluginCompiler.Compile(
+            PluginCompiler.CompilePackage(
                 CommandPrimaryFailurePluginSource(pluginName),
                 pluginName,
-                Path.Combine(tempDir, "Plugins", $"{pluginName}.dll"));
+                Path.Combine(tempDir, "Plugins", $"{pluginName}.zip"));
 
             using var terminal = new TerminalGuiTestApp();
             var host = TerminalUiLifecycleChildProcess.InitializeHost(
@@ -1243,10 +1239,9 @@ public sealed class UiHostShutdownProcessTests
         using var terminal = new TerminalGuiTestApp();
         var host = TerminalUiLifecycleChildProcess.InitializeHost(terminal, CancellationToken.None);
         HotkeyManager.OverlaySink = host;
-        var workspace = Workspace.Create("Pending plugin hotkey");
-        var plugin = new PendingWorkspaceHotkeyPlugin(workspace);
-        PluginManager.LoadedPlugins.Add(plugin);
-        PluginManager.InitializePlugin(plugin);
+        using var plugin = new PackagedPluginFixture(
+            "PendingWorkspaceHotkeyPlugin",
+            _ => PendingWorkspaceHotkeyPluginSource());
 
         host.RequestShutdown();
         var run = await terminal.StartAsync(host);
@@ -1255,6 +1250,15 @@ public sealed class UiHostShutdownProcessTests
         Assert.DoesNotContain(
             (ConsoleKey.F19, ConsoleModifiers.None),
             HotkeyManager.Hotkeys.Keys);
+    }
+
+    static async Task WaitForFileAsync(string path)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(5));
+        while (!File.Exists(path))
+            await Task.Delay(10, timeout.Token);
     }
 
     static (UiHost Host, FirstPostSynchronizationContext OwnerContext)
@@ -1309,18 +1313,136 @@ public sealed class UiHostShutdownProcessTests
             }
             """;
 
-    sealed class ShutdownWorkspacePlugin(Workspace workspace) : IPlugin
-    {
-        public string Name => nameof(ShutdownWorkspacePlugin);
-        public string Author => "Test";
-        public string[] Targets => [];
-        public bool PanelRemoved { get; private set; }
+    static string WorkspaceRemovalPluginSource(string marker)
+        => $$"""
+            using System.IO;
+            using UmamusumeResponseAnalyzer.Plugin;
+            using UmamusumeResponseAnalyzer.TerminalGui;
 
-        public void Initialize(IPluginContext context) { }
+            public sealed class Plugin : IPlugin
+            {
+                public void Initialize(IPluginContext context) { }
+
+                public void Dispose()
+                {
+                    var removed = Workspace.Current?.RemovePanel("probe") == true;
+                    File.WriteAllText(@"{{marker.Replace("\"", "\"\"")}}", removed ? "removed" : "missing");
+                }
+            }
+            """;
+
+    static string LeaseHoldingPluginSource(string entered)
+        => $$"""
+            using System;
+            using System.IO;
+            using System.Threading;
+            using System.Threading.Tasks;
+            using UmamusumeResponseAnalyzer.Plugin;
+
+            public sealed class Plugin : IPlugin
+            {
+                public void Initialize(IPluginContext context)
+                    => context.Events.OnStarted(async cancellationToken =>
+                    {
+                        File.WriteAllText(@"{{entered.Replace("\"", "\"\"")}}", "entered");
+                        await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                    });
+            }
+            """;
+
+    static string CancellationObservingPluginSource(string disposed)
+        => $$"""
+            using System;
+            using System.IO;
+            using System.Threading;
+            using System.Threading.Tasks;
+            using UmamusumeResponseAnalyzer.Plugin;
+
+            public sealed class Plugin : IPlugin
+            {
+                CancellationToken lifetimeToken;
+
+                public void Initialize(IPluginContext context)
+                    => context.Events.OnStarted(cancellationToken =>
+                    {
+                        lifetimeToken = cancellationToken;
+                        return ValueTask.CompletedTask;
+                    });
+
+                public void Dispose()
+                {
+                    if (!lifetimeToken.IsCancellationRequested)
+                        throw new InvalidOperationException("plugin lifetime was not cancelled");
+                    File.WriteAllText(@"{{disposed.Replace("\"", "\"\"")}}", "disposed");
+                }
+            }
+            """;
+
+    static string FailingShutdownPluginSource()
+        => """
+            using System;
+            using UmamusumeResponseAnalyzer.Plugin;
+
+            public sealed class Plugin : IPlugin
+            {
+                public void Initialize(IPluginContext context) { }
+                public void Dispose()
+                    => throw new InvalidOperationException("shutdown-cleanup-failure");
+            }
+            """;
+
+    static string PendingWorkspaceHotkeyPluginSource()
+        => """
+            using System;
+            using UmamusumeResponseAnalyzer.Plugin;
+            using UmamusumeResponseAnalyzer.TerminalGui;
+
+            public sealed class Plugin : IPlugin
+            {
+                public void Initialize(IPluginContext context)
+                {
+                    var workspace = Workspace.Create("Pending plugin hotkey");
+                    workspace.BindHotkey(ConsoleKey.F19, description: "pending plugin workspace");
+                }
+            }
+            """;
+
+    sealed class PackagedPluginFixture : IDisposable
+    {
+        public PackagedPluginFixture(string internalName, Func<string, string> source)
+        {
+            Root = Path.Combine(
+                Path.GetTempPath(),
+                $"ura-uihost-plugin-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(Path.Combine(Root, "Plugins"));
+            var originalCwd = Directory.GetCurrentDirectory();
+            try
+            {
+                Directory.SetCurrentDirectory(Root);
+                PluginCompiler.CompilePackage(
+                    source(Root),
+                    internalName,
+                    Path.Combine(Root, "Plugins", $"{internalName}.zip"));
+                PluginManager.Init();
+                PluginManager.InitializeLoadedPlugins();
+                Plugin = Assert.Single(
+                    PluginManager.SnapshotLoadedPlugins(),
+                    plugin => PluginManager.InternalName(plugin) == internalName);
+            }
+            finally
+            {
+                Directory.SetCurrentDirectory(originalCwd);
+            }
+        }
+
+        public string Root { get; }
+        public IPlugin Plugin { get; }
 
         public void Dispose()
         {
-            PanelRemoved = workspace.RemovePanel("probe");
+            try { Directory.Delete(Root, recursive: true); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
         }
     }
 
@@ -1337,71 +1459,6 @@ public sealed class UiHostShutdownProcessTests
             TerminalUi.Log("shutdown-test", "realized panel disposed");
             DetachedAndDisposedWhileHostAccepted = SuperView is null;
         }
-    }
-
-    sealed class LeaseHoldingPlugin(TaskCompletionSource entered) : IPlugin
-    {
-        public string Name => nameof(LeaseHoldingPlugin);
-        public string Author => "Test";
-        public string[] Targets => [];
-
-        public void Initialize(IPluginContext context)
-        {
-            context.Events.OnStarted(async cancellationToken =>
-            {
-                entered.TrySetResult();
-                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
-            });
-        }
-    }
-
-    sealed class CancellationObservingPlugin : IPlugin
-    {
-        CancellationToken lifetimeToken;
-
-        public string Name => nameof(CancellationObservingPlugin);
-        public string Author => "Test";
-        public string[] Targets => [];
-        public bool Disposed { get; private set; }
-
-        public void Initialize(IPluginContext context)
-        {
-            context.Events.OnStarted(cancellationToken =>
-            {
-                lifetimeToken = cancellationToken;
-                return ValueTask.CompletedTask;
-            });
-        }
-
-        public void Dispose()
-        {
-            Assert.True(lifetimeToken.IsCancellationRequested);
-            Disposed = true;
-        }
-    }
-
-    sealed class FailingShutdownPlugin : IPlugin
-    {
-        public string Name => nameof(FailingShutdownPlugin);
-        public string Author => "Test";
-        public string[] Targets => [];
-
-        public void Initialize(IPluginContext context) { }
-
-        public void Dispose()
-            => throw new InvalidOperationException("shutdown-cleanup-failure");
-    }
-
-    sealed class PendingWorkspaceHotkeyPlugin(Workspace workspace) : IPlugin
-    {
-        public string Name => nameof(PendingWorkspaceHotkeyPlugin);
-        public string Author => "Test";
-        public string[] Targets => [];
-
-        public void Initialize(IPluginContext context)
-            => workspace.BindHotkey(
-                ConsoleKey.F19,
-                description: "pending plugin workspace");
     }
 
     sealed class FirstPostSynchronizationContext(SynchronizationContext owner)

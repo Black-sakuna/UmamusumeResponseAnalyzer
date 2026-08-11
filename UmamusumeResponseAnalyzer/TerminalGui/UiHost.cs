@@ -48,9 +48,6 @@ internal sealed class UiHost : IUiInputSink
     }
     internal event Action? ShutdownStarting;
 
-    internal IReadOnlyList<UiNotification> GetNotificationsForTests(Workspace? workspace)
-        => surface.GetNotificationsForTests(workspace);
-
     internal void EnsureAvailable() => session.EnsureAvailable();
 
     internal Workspace? GetCurrentWorkspace() => session.GetCurrentWorkspace();

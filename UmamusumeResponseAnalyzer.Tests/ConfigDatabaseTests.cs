@@ -1,81 +1,51 @@
 using System.Reflection;
+using System.IO.Compression;
+using System.Text;
+using Newtonsoft.Json;
 using UmamusumeResponseAnalyzer;
-using YamlDotNet.Serialization;
-using YamlDotNet.Serialization.NamingConventions;
+using UmamusumeResponseAnalyzer.Entities;
 using Xunit;
 
 namespace UmamusumeResponseAnalyzer.Tests
 {
-    /// <summary>
-    /// Config 的 YAML 往返、Initialize 文件边界和各 sub-config 默认值测试。
-    /// </summary>
     [Collection("Database")]
     public class ConfigSerializationTests
     {
-        // 复刻 Config.cs 第 19/20 行的两个 builder 设置，保持命名约定一致
-        static readonly ISerializer Serializer = new SerializerBuilder()
-            .WithQuotingNecessaryStrings()
-            .WithNamingConvention(HyphenatedNamingConvention.Instance)
-            .Build();
-        static readonly IDeserializer Deserializer = new DeserializerBuilder()
-            .IgnoreUnmatchedProperties()
-            .WithNamingConvention(HyphenatedNamingConvention.Instance)
-            .Build();
+        private const string CompleteYaml = """
+            core:
+              listen-address: 127.0.0.1
+              listen-port: 4693
+              show-first-run-prompt: true
+            repository:
+              targets: []
+            plugin: {}
+            updater:
+              is-github-blocked: false
+              trainer-is-male: true
+              database-language: ja-JP
+              custom-database-repository: ''
+              force-use-github-to-update: false
+            language:
+              selected: AutoDetect
+            misc:
+              save-response-for-debug: false
+            workspace-taskbar-title-order: []
+            """;
 
-        static void WithConfigFile(string yaml, Action<string> test)
+        [Theory]
+        [InlineData("core")]
+        [InlineData("repository")]
+        [InlineData("plugin")]
+        [InlineData("updater")]
+        [InlineData("language")]
+        [InlineData("misc")]
+        public void Deserialize_MissingSection_ThrowsWithSourceAndFieldPath(string section)
         {
-            var path = Path.Combine(Path.GetTempPath(), $"ura-config-{Guid.NewGuid():N}.yaml");
-            var originalPath = Config.CONFIG_FILEPATH;
-            var currentProperty = typeof(Config).GetProperty("Current", BindingFlags.NonPublic | BindingFlags.Static)!;
-            var originalCurrent = currentProperty.GetValue(null);
-            var originalCulture = Thread.CurrentThread.CurrentCulture;
-            var originalUiCulture = Thread.CurrentThread.CurrentUICulture;
-            var resourceCultures = typeof(Config).Assembly.GetTypes()
-                .Where(type => type.Namespace?.StartsWith("UmamusumeResponseAnalyzer.Localization") == true)
-                .Select(type => type.GetField("resourceCulture", BindingFlags.NonPublic | BindingFlags.Static))
-                .OfType<FieldInfo>()
-                .Select(field => (Field: field, Value: field.GetValue(null)))
-                .ToArray();
+            var exception = Assert.Throws<InvalidDataException>(() =>
+                Config.Deserialize(RemoveSection(CompleteYaml, section), "settings/config.yaml"));
 
-            try
-            {
-                File.WriteAllText(path, yaml);
-                Config.CONFIG_FILEPATH = path;
-                test(path);
-            }
-            finally
-            {
-                Config.CONFIG_FILEPATH = originalPath;
-                currentProperty.SetValue(null, originalCurrent);
-                Thread.CurrentThread.CurrentCulture = originalCulture;
-                Thread.CurrentThread.CurrentUICulture = originalUiCulture;
-                foreach (var (field, value) in resourceCultures)
-                    field.SetValue(null, value);
-                File.Delete(path);
-            }
-        }
-
-        [Fact]
-        public void Initialize_MissingSections_UsesDefaultsWithoutRewritingFile()
-        {
-            const string yaml = """
-                core:
-                  listen-port: 5000
-                """;
-
-            WithConfigFile(yaml, path =>
-            {
-                Config.Initialize();
-
-                Assert.Equal(5000, Config.Core.ListenPort);
-                Assert.NotNull(Config.Repository);
-                Assert.NotNull(Config.Plugin);
-                Assert.NotNull(Config.Updater);
-                Assert.NotNull(Config.Language);
-                Assert.NotNull(Config.Misc);
-                Assert.Empty(Config.WorkspaceTaskbarTitleOrder);
-                Assert.Equal(yaml, File.ReadAllText(path));
-            });
+            Assert.Contains("settings/config.yaml", exception.Message);
+            Assert.Contains(section, exception.Message);
         }
 
         [Theory]
@@ -85,96 +55,147 @@ namespace UmamusumeResponseAnalyzer.Tests
         [InlineData("updater")]
         [InlineData("language")]
         [InlineData("misc")]
-        public void Initialize_ExplicitNullSection_ThrowsWithPathAndDoesNotRewriteFile(string section)
+        public void Deserialize_ExplicitNullSection_ThrowsWithSourceAndFieldPath(string section)
         {
-            var yaml = $"{section}: null";
+            var exception = Assert.Throws<InvalidDataException>(() =>
+                Config.Deserialize(ReplaceSection(CompleteYaml, section, $"{section}: null"), "config.yaml"));
 
-            WithConfigFile(yaml, path =>
-            {
-                var exception = Assert.Throws<InvalidDataException>(Config.Initialize);
-
-                Assert.Contains(path, exception.Message);
-                Assert.True(exception.Message.Contains(section, StringComparison.OrdinalIgnoreCase));
-                Assert.Equal(yaml, File.ReadAllText(path));
-            });
+            Assert.Contains("config.yaml", exception.Message);
+            Assert.Contains(section, exception.Message);
         }
 
         [Fact]
-        public void Initialize_NullDocument_ThrowsWithPathAndDoesNotRewriteFile()
+        public void Deserialize_NullDocument_ThrowsWithSourceAndRootPath()
         {
-            const string yaml = "null";
+            var exception = Assert.Throws<InvalidDataException>(() =>
+                Config.Deserialize("null", "settings/config.yaml"));
 
-            WithConfigFile(yaml, path =>
-            {
-                var exception = Assert.Throws<InvalidDataException>(Config.Initialize);
-
-                Assert.Contains(path, exception.Message);
-                Assert.Equal(yaml, File.ReadAllText(path));
-            });
+            Assert.Contains("settings/config.yaml", exception.Message);
+            Assert.Contains("$", exception.Message);
         }
 
         [Fact]
-        public void Initialize_V11421Config_IgnoresRemovedFieldsWithoutRewritingFile()
+        public void Deserialize_UnknownRootField_ThrowsWithSource()
         {
-            const string yaml = """
-                core:
-                  listen-address: 0.0.0.0
-                  listen-port: 5000
-                  request-additional-header: true
-                  show-first-run-prompt: false
-                repository:
-                  targets:
-                  - Cygames
-                  additional-plugin-repositories:
-                    legacy: https://example.com/plugins.json
-                plugin:
-                  plugin-settings:
-                    LegacyPlugin:
-                      enabled: true
-                updater:
-                  is-github-blocked: false
-                  trainer-is-male: false
-                  database-language: zh-TW
-                  custom-database-repository: https://example.com/assets
-                  force-use-github-to-update: true
-                net-filter:
-                  host: 127.0.0.1
-                  port: 1080
-                  username: user
-                  password: password
-                  server-type: socks5
-                  enable: false
-                dmm:
-                  launcher-infomation:
-                    client-app: DMMGamePlayer5
-                  machine-information:
-                    user-os: win
-                  accounts: []
-                  enable: false
-                language:
-                  selected: English
-                misc:
-                  save-response-for-debug: true
-                """;
+            var yaml = $"removed-section: true{Environment.NewLine}{CompleteYaml}";
+            var exception = Assert.Throws<InvalidDataException>(() =>
+                Config.Deserialize(yaml, "config.yaml"));
 
-            WithConfigFile(yaml, path =>
-            {
-                Config.Initialize();
-
-                Assert.Equal("0.0.0.0", Config.Core.ListenAddress);
-                Assert.Equal(5000, Config.Core.ListenPort);
-                Assert.False(Config.Core.ShowFirstRunPrompt);
-                Assert.Equal(["Cygames"], Config.Repository.Targets);
-                Assert.False(Config.Updater.TrainerIsMale);
-                Assert.Equal("zh-TW", Config.Updater.DatabaseLanguage);
-                Assert.Equal(LanguageConfig.Language.English, Config.Language.Selected);
-                Assert.True(Config.Misc.SaveResponseForDebug);
-                Assert.Equal(yaml, File.ReadAllText(path));
-            });
+            Assert.Contains("config.yaml", exception.Message);
+            Assert.Contains("removed-section", exception.Message);
         }
 
         [Fact]
-        public void YamlConfig_RoundTrips_PreservesKeyFields()
+        public void Deserialize_UnknownNestedField_ThrowsWithSource()
+        {
+            var yaml = CompleteYaml.Replace(
+                "  listen-port: 4693",
+                "  listen-port: 4693\n  request-additional-header: true",
+                StringComparison.Ordinal);
+            var exception = Assert.Throws<InvalidDataException>(() =>
+                Config.Deserialize(yaml, "config.yaml"));
+
+            Assert.Contains("config.yaml", exception.Message);
+            Assert.Contains("request-additional-header", exception.Message);
+        }
+
+        [Fact]
+        public void Deserialize_DuplicateField_ThrowsWithSourceAndField()
+        {
+            var yaml = CompleteYaml.Replace(
+                "  listen-port: 4693",
+                "  listen-port: 4693\n  listen-port: 5000",
+                StringComparison.Ordinal);
+            var exception = Assert.Throws<InvalidDataException>(() =>
+                Config.Deserialize(yaml, "config.yaml"));
+
+            Assert.Contains("config.yaml", exception.Message);
+            Assert.Contains("listen-port", exception.Message);
+        }
+
+        [Fact]
+        public void Deserialize_InvalidScalar_ThrowsWithSourceAndYamlPosition()
+        {
+            var yaml = CompleteYaml.Replace("  listen-port: 4693", "  listen-port: nope", StringComparison.Ordinal);
+            var exception = Assert.Throws<InvalidDataException>(() =>
+                Config.Deserialize(yaml, "settings/config.yaml"));
+
+            Assert.Contains("settings/config.yaml", exception.Message);
+            Assert.Contains(":", exception.Message);
+            Assert.Contains("nope", exception.Message);
+        }
+
+        [Theory]
+        [InlineData("  listen-address: 127.0.0.1", "  listen-address: null", "core.listen-address")]
+        [InlineData("  listen-port: 4693", "  listen-port: null", "core.listen-port")]
+        [InlineData("  targets: []", "  targets: null", "repository.targets")]
+        [InlineData("  database-language: ja-JP", "  database-language: null", "updater.database-language")]
+        [InlineData("  custom-database-repository: ''", "  custom-database-repository: null", "updater.custom-database-repository")]
+        [InlineData("  selected: AutoDetect", "  selected: null", "language.selected")]
+        [InlineData("workspace-taskbar-title-order: []", "workspace-taskbar-title-order: null", "workspace-taskbar-title-order")]
+        public void Deserialize_ExplicitNullValue_ThrowsWithFieldPath(
+            string original,
+            string replacement,
+            string fieldPath)
+        {
+            var yaml = CompleteYaml.Replace(original, replacement, StringComparison.Ordinal);
+            var exception = Assert.Throws<InvalidDataException>(() =>
+                Config.Deserialize(yaml, "config.yaml"));
+
+            Assert.Contains(fieldPath, exception.Message);
+        }
+
+        [Fact]
+        public void Deserialize_NullCollectionItem_ThrowsWithIndexedFieldPath()
+        {
+            var yaml = CompleteYaml.Replace("  targets: []", "  targets: [Cygames, null]", StringComparison.Ordinal);
+            var exception = Assert.Throws<InvalidDataException>(() =>
+                Config.Deserialize(yaml, "config.yaml"));
+
+            Assert.Contains("repository.targets[1]", exception.Message);
+        }
+
+        [Fact]
+        public void Deserialize_MissingFields_UsesCurrentDefaults()
+        {
+            var yaml = ReplaceSection(CompleteYaml, "repository", "repository: {}")
+                .Replace("  listen-address: 127.0.0.1", string.Empty, StringComparison.Ordinal)
+                .Replace("  custom-database-repository: ''", string.Empty, StringComparison.Ordinal)
+                .Replace("workspace-taskbar-title-order: []", string.Empty, StringComparison.Ordinal);
+
+            var config = Config.Deserialize(yaml, "config.yaml");
+
+            Assert.Equal("127.0.0.1", config.Core.ListenAddress);
+            Assert.Empty(config.Repository.Targets);
+            Assert.Equal(string.Empty, config.Updater.CustomDatabaseRepository);
+            Assert.Empty(config.WorkspaceTaskbarTitleOrder);
+        }
+
+        [Fact]
+        public void Serialize_DefaultConfig_WritesCompleteCurrentSchema()
+        {
+            var yaml = Config.Serialize(new YamlConfig());
+
+            foreach (var field in new[]
+                     {
+                         "core:", "listen-address:", "listen-port:", "show-first-run-prompt:",
+                         "repository:", "targets:", "plugin:", "updater:", "is-github-blocked:",
+                         "trainer-is-male:", "database-language:", "custom-database-repository:",
+                         "force-use-github-to-update:", "language:", "selected:", "misc:",
+                         "save-response-for-debug:", "workspace-taskbar-title-order:"
+                     })
+                Assert.Contains(field, yaml);
+
+            var restored = Config.Deserialize(yaml, "config.yaml");
+            Assert.NotNull(restored.Core.ListenAddress);
+            Assert.NotNull(restored.Updater.DatabaseLanguage);
+            Assert.NotNull(restored.Updater.CustomDatabaseRepository);
+            Assert.NotNull(restored.Repository.Targets);
+            Assert.NotNull(restored.WorkspaceTaskbarTitleOrder);
+        }
+
+        [Fact]
+        public void CurrentSchema_RoundTrips_PreservingValues()
         {
             var original = new YamlConfig
             {
@@ -198,23 +219,19 @@ namespace UmamusumeResponseAnalyzer.Tests
                 WorkspaceTaskbarTitleOrder = ["插件", "启动信息", "遥测"]
             };
 
-            var yaml = Serializer.Serialize(original);
-            var restored = Deserializer.Deserialize<YamlConfig>(yaml);
+            var yaml = Config.Serialize(original);
+            var restored = Config.Deserialize(yaml, "config.yaml");
 
             Assert.DoesNotContain("request-additional-header", yaml);
 
-            // Core
             Assert.Equal("0.0.0.0", restored.Core.ListenAddress);
             Assert.Equal(5000, restored.Core.ListenPort);
             Assert.False(restored.Core.ShowFirstRunPrompt);
-            // Repository（List<string> 往返保序）
             Assert.Equal(["a", "b", "c"], restored.Repository.Targets);
-            // Updater
             Assert.False(restored.Updater.TrainerIsMale);
             Assert.Equal("zh-CN", restored.Updater.DatabaseLanguage);
             Assert.Equal("https://example.com/repo", restored.Updater.CustomDatabaseRepository);
             Assert.True(restored.Updater.ForceUseGithubToUpdate);
-            // Misc
             Assert.True(restored.Misc.SaveResponseForDebug);
             Assert.Equal(["插件", "启动信息", "遥测"], restored.WorkspaceTaskbarTitleOrder);
         }
@@ -222,32 +239,12 @@ namespace UmamusumeResponseAnalyzer.Tests
         [Fact]
         public void HyphenatedNamingConvention_EmitsKebabCaseKeys()
         {
-            // ListenPort / ListenAddress 等多词属性应被序列化成 listen-port / listen-address
-            var yaml = Serializer.Serialize(new YamlConfig { Core = new CoreConfig() });
+            var yaml = Config.Serialize(new YamlConfig());
 
             Assert.Contains("listen-port", yaml);
             Assert.Contains("listen-address", yaml);
             Assert.Contains("workspace-taskbar-title-order", yaml);
-            // 不应出现原始 PascalCase
             Assert.DoesNotContain("ListenPort", yaml);
-        }
-
-        [Fact]
-        public void WorkspaceTaskbarTitleOrder_SaveAndInitialize_RoundTrips()
-        {
-            WithConfigFile("{}", path =>
-            {
-                Config.Initialize();
-                Assert.Empty(Config.WorkspaceTaskbarTitleOrder);
-
-                Config.WorkspaceTaskbarTitleOrder = ["Third", "暂未加载", "First"];
-                Config.Save();
-                Config.WorkspaceTaskbarTitleOrder = [];
-                Config.Initialize();
-
-                Assert.Equal(["Third", "暂未加载", "First"], Config.WorkspaceTaskbarTitleOrder);
-                Assert.Contains("workspace-taskbar-title-order", File.ReadAllText(path));
-            });
         }
 
         [Fact]
@@ -269,9 +266,27 @@ namespace UmamusumeResponseAnalyzer.Tests
             // TrainerIsMale 源码默认 true；DatabaseLanguage 源码默认 "ja-JP"
             Assert.True(updater.TrainerIsMale);
             Assert.Equal("ja-JP", updater.DatabaseLanguage);
+            Assert.Equal(string.Empty, updater.CustomDatabaseRepository);
 
             // LanguageConfig.Selected 源码默认 AutoDetect
             Assert.Equal(LanguageConfig.Language.AutoDetect, new LanguageConfig().Selected);
+        }
+
+        private static string RemoveSection(string yaml, string section) =>
+            ReplaceSection(yaml, section, string.Empty);
+
+        private static string ReplaceSection(string yaml, string section, string replacement)
+        {
+            var lines = yaml.Split('\n').ToList();
+            var start = lines.FindIndex(line => line.StartsWith($"{section}:", StringComparison.Ordinal));
+            Assert.True(start >= 0, $"Section not found: {section}");
+            var end = start + 1;
+            while (end < lines.Count && (lines[end].Length == 0 || char.IsWhiteSpace(lines[end][0])))
+                end++;
+            lines.RemoveRange(start, end - start);
+            if (replacement.Length > 0)
+                lines.Insert(start, replacement);
+            return string.Join('\n', lines);
         }
     }
 
@@ -420,44 +435,103 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
     }
 
-    /// <summary>
-    /// #1 回归:数据文件缺失时 <see cref="Database.Initialize"/> 必须优雅降级——不再对 null 调 .ToDictionary 而崩溃。
-    /// 全新用户(还没下数据)选"启动"曾在此抛 ArgumentNullException 拖垮整个程序;修复后应正常完成、各属性保持安全空默认。
-    /// 测试在当前 CWD(测试输出目录,无任何 .br)直接调真实 Initialize 走"文件缺失"路径——只 File.Exists 判断、不读真实数据、无文件写入。
-    /// 归入 "PluginReload" collection，复用其唯一 Config 和 UiHost。
-    /// </summary>
     [Collection("PluginReload")]
     public class DatabaseInitializeMissingFilesTests(PluginRuntimeFixture runtime)
     {
         [Fact]
-        public async Task Initialize_WithMissingDataFiles_DoesNotThrowAndKeepsSafeDefaults()
+        public async Task Initialize_WithMissingDataFiles_IsUnavailableAndDataAccessFailsClearly()
         {
-            // 不抛即过:修复前这里会因 events_*.br 缺失→eventsTask.Result 为 null→null.ToDictionary 抛 ArgumentNullException
-            await Database.Initialize();
-            await runtime.Host.FlushAsync();
+            const string scenario = "database-missing";
+            if (!TerminalUiLifecycleChildProcess.IsChild(scenario))
+            {
+                Assert.Equal(
+                    "Unavailable|Unavailable|游戏数据尚未完整加载。请先更新数据文件并重新启动。",
+                    await TerminalUiLifecycleProcessTests.RunChildAsync(
+                        scenario,
+                        typeof(DatabaseInitializeMissingFilesTests),
+                        nameof(Initialize_WithMissingDataFiles_IsUnavailableAndDataAccessFailsClearly)));
+                return;
+            }
 
-            Assert.True(Database.Initialized);
-            // 缺文件时各属性保持非空安全默认,后续消费(如分析包/技能进化)不会 NPE
-            Assert.NotNull(Database.Events);
-            Assert.NotNull(Database.SkillUpgradeSpeciality);
-            Assert.NotNull(Database.FactorIds);
-            Assert.NotNull(Database.SuccessionRelation);
-            Assert.NotNull(Database.SuccessionRelation.PointDictionary);
-            Assert.NotNull(Database.SuccessionRelation.MemberDictionary);
-            Assert.NotNull(SkillManagerGenerator.Default);
-            // 空 SkillManager 索引返回 null 而非 NPE
-            Assert.Null(SkillManagerGenerator.Default[999999]);
+            var directory = Path.Combine(Path.GetTempPath(), $"ura-database-missing-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(directory);
+            var previousDirectory = Directory.GetCurrentDirectory();
+            try
+            {
+                Directory.SetCurrentDirectory(directory);
+                var result = await Database.Initialize();
+                await runtime.Host.FlushAsync();
+                var message = Assert.Throws<InvalidOperationException>(() => Database.Events).Message;
+                TerminalUiLifecycleChildProcess.WriteResult($"{result}|{Database.Availability}|{message}");
+            }
+            finally
+            {
+                Directory.SetCurrentDirectory(previousDirectory);
+                Directory.Delete(directory, true);
+            }
         }
 
         [Fact]
-        public void SuccessionRelationTable_Defaults_AreEmptyNotNull()
+        public async Task Initialize_PublishesOnlyACompleteSnapshot()
         {
-            // #1 的一部分:该实体两个字典给了空默认,使 Database.SuccessionRelation = new() 完全安全(内部字典不为 null)
-            var table = new Entities.SuccessionRelationTable();
-            Assert.NotNull(table.PointDictionary);
-            Assert.Empty(table.PointDictionary);
-            Assert.NotNull(table.MemberDictionary);
-            Assert.Empty(table.MemberDictionary);
+            const string scenario = "database-atomic-snapshot";
+            if (!TerminalUiLifecycleChildProcess.IsChild(scenario))
+            {
+                Assert.Equal(
+                    "Ready|Unavailable|Ready|True|event",
+                    await TerminalUiLifecycleProcessTests.RunChildAsync(
+                        scenario,
+                        typeof(DatabaseInitializeMissingFilesTests),
+                        nameof(Initialize_PublishesOnlyACompleteSnapshot)));
+                return;
+            }
+
+            var directory = Path.Combine(Path.GetTempPath(), $"ura-database-ready-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(directory);
+            var previousDirectory = Directory.GetCurrentDirectory();
+            try
+            {
+                Directory.SetCurrentDirectory(directory);
+                await WriteAsync(directory, Database.EVENT_NAME_FILEPATH, new[] { new Story { Id = 7, Name = "event" } });
+                await WriteAsync(directory, Database.NAMES_FILEPATH, new List<BaseName> { new(1001, "name", "name") }, new() { TypeNameHandling = TypeNameHandling.All });
+                await WriteAsync(directory, Database.SKILLS_FILEPATH, Array.Empty<SkillData>());
+                await WriteAsync(directory, Database.SKILL_UPGRADE_SPECIALITY_FILEPATH, Array.Empty<SkillUpgradeSpeciality>());
+                await WriteAsync(directory, Database.TALENT_SKILLS_FILEPATH, new Dictionary<int, TalentSkillData[]>());
+                await WriteAsync(directory, Database.FACTOR_IDS_FILEPATH, new Dictionary<int, string>());
+                await WriteAsync(directory, Database.SADDLE_IDS_FILEPATH, Array.Empty<int>());
+                await WriteAsync(directory, Database.SUCCESSION_RELATION_FILEPATH, new SuccessionRelationTable());
+
+                var ready = await Database.Initialize();
+                if (ready != DatabaseAvailability.Ready)
+                {
+                    await runtime.Host.FlushAsync();
+                    Assert.Fail(await runtime.Terminal.CaptureScreenAsync());
+                }
+                var publishedEvents = Database.Events;
+
+                File.Delete(Path.Combine(directory, Database.NAMES_FILEPATH));
+                var unavailable = await Database.Initialize();
+                await runtime.Host.FlushAsync();
+                TerminalUiLifecycleChildProcess.WriteResult(
+                    $"{ready}|{unavailable}|{Database.Availability}|{ReferenceEquals(publishedEvents, Database.Events)}|{Database.Events[7].Name}");
+            }
+            finally
+            {
+                Directory.SetCurrentDirectory(previousDirectory);
+                Directory.Delete(directory, true);
+            }
+        }
+
+        private static async Task WriteAsync<T>(
+            string directory,
+            string fileName,
+            T value,
+            JsonSerializerSettings? settings = null)
+        {
+            await using var file = File.Create(Path.Combine(directory, fileName));
+            await using var brotli = new BrotliStream(file, CompressionMode.Compress);
+            await using var writer = new StreamWriter(brotli, Encoding.UTF8);
+            await writer.WriteAsync(JsonConvert.SerializeObject(value, settings));
         }
     }
 

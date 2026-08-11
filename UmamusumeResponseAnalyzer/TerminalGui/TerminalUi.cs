@@ -2,20 +2,14 @@ namespace UmamusumeResponseAnalyzer.TerminalGui;
 
 public static class TerminalUi
 {
-    static readonly object initializationGate = new();
     static UiHost? uiHost;
 
     internal static void Initialize(UiHost host)
     {
         ArgumentNullException.ThrowIfNull(host);
-        lock (initializationGate)
-        {
-            if (uiHost is not null)
-                throw new InvalidOperationException("TerminalUi 已初始化；进程内不允许替换 UiHost。");
-
-            host.EnsureAvailable();
-            Volatile.Write(ref uiHost, host);
-        }
+        host.EnsureAvailable();
+        if (Interlocked.CompareExchange(ref uiHost, host, null) is not null)
+            throw new InvalidOperationException("TerminalUi 已初始化；进程内不允许替换 UiHost。");
     }
 
     internal static UiHost RequireHost()
@@ -26,7 +20,7 @@ public static class TerminalUi
         return host;
     }
 
-    public static T Select<T>(
+    internal static T Select<T>(
         string title,
         IEnumerable<T> choices,
         Func<T, string>? converter = null,
@@ -40,7 +34,7 @@ public static class TerminalUi
         CancellationToken cancellationToken = default)
         => ModalDialogs.Menu(title, choices, converter, cancellationToken);
 
-    public static IReadOnlyList<T> MultiSelect<T>(
+    internal static IReadOnlyList<T> MultiSelect<T>(
         string title,
         IEnumerable<T> choices,
         IEnumerable<T>? selected = null,
@@ -48,20 +42,20 @@ public static class TerminalUi
         CancellationToken cancellationToken = default)
         => ModalDialogs.MultiSelect(title, choices, selected, converter, cancellationToken);
 
-    public static string Ask(
+    internal static string Ask(
         string title,
         string? value = null,
         bool allowEmpty = false,
         CancellationToken cancellationToken = default)
         => ModalDialogs.Ask(title, value, allowEmpty, cancellationToken);
 
-    public static bool Confirm(
+    internal static bool Confirm(
         string title,
         bool defaultValue = false,
         CancellationToken cancellationToken = default)
         => ModalDialogs.Confirm(title, defaultValue, cancellationToken);
 
-    public static bool Acknowledge(
+    internal static bool Acknowledge(
         string title = "按 Enter 返回",
         CancellationToken cancellationToken = default)
         => ModalDialogs.Acknowledge(title, cancellationToken);

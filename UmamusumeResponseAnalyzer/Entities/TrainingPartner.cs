@@ -61,9 +61,9 @@ namespace UmamusumeResponseAnalyzer.Entities
             if (!IsNpc) // 自己带的S卡
             {
                 CardId = turn.SupportCards[Position];
-                var supportCard = Database.Names.GetSupportCard(CardId);
-                var isFriendSupportCard = supportCard.Type == 0;
-                Name = supportCard.Nickname;
+                var supportCard = Database.Names.GetRequiredSupportCard(CardId);
+                var isFriendSupportCard = supportCard.IsFriendCard;
+                Name = Database.Names.DisplayNickname(CardId);
                 if (isFriendSupportCard) // 友人单独标绿
                 {
                     Priority = PartnerPriority.友人;
@@ -97,7 +97,7 @@ namespace UmamusumeResponseAnalyzer.Entities
             }
             else // NPC
             {
-                Name = Database.Names.GetCharacter(Position).Nickname;
+                Name = Database.Names.DisplayNickname(Position);
                 if (Position is >= 100 and < 1000) // 理事长、记者等
                 {
                     Priority = PartnerPriority.关键NPC;

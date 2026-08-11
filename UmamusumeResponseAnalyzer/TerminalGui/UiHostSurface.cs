@@ -38,16 +38,6 @@ internal sealed class UiHostSurface : IDisposable
     internal int PopupVisibleLineCount => Volatile.Read(ref popupVisibleLineCount);
     internal event Action<UiLogLine>? LogAdded;
 
-    internal IReadOnlyList<UiNotification> GetNotificationsForTests(Workspace? workspace)
-        => notifications
-            .Where(notification => ReferenceEquals(notification.Workspace, workspace))
-            .Select(notification => new UiNotification(
-                notification.Workspace,
-                notification.Text,
-                notification.Severity,
-                notification.ExpiresAt))
-            .ToArray();
-
     internal void Create()
     {
         var savedTaskbarTitleOrder = Config.WorkspaceTaskbarTitleOrder?.ToArray()

@@ -58,6 +58,28 @@ namespace UmamusumeResponseAnalyzer.Tests
             Assert.False(File.Exists(path));
         }
 
+        [Fact]
+        public void InstallProgramUpdate_CopiesCurrentExecutableAndRequestsRestart()
+        {
+            var path = Path.Combine(Path.GetTempPath(), $"ura-install-update-{Guid.NewGuid():N}.exe");
+            try
+            {
+                var exception = Assert.Throws<UmamusumeResponseAnalyzer.PostShutdownProcessRequestedException>(
+                    () => ResourceUpdater.InstallProgramUpdate(path));
+
+                Assert.Equal(Path.GetFullPath(path), exception.StartInfo.FileName);
+                Assert.True(exception.StartInfo.UseShellExecute);
+                Assert.Equal(
+                    File.ReadAllBytes(Environment.ProcessPath!),
+                    File.ReadAllBytes(path));
+            }
+            finally
+            {
+                if (File.Exists(path))
+                    File.Delete(path);
+            }
+        }
+
         sealed class StubHttpMessageHandler(Func<HttpRequestMessage, HttpResponseMessage> respond) : HttpMessageHandler
         {
             protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)

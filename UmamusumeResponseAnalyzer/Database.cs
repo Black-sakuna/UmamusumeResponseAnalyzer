@@ -8,18 +8,32 @@ using static UmamusumeResponseAnalyzer.Localization.Database;
 
 namespace UmamusumeResponseAnalyzer
 {
+    public enum DatabaseAvailability
+    {
+        Unavailable,
+        Ready
+    }
+
     public static class Database
     {
-        public static bool Initialized { get; private set; } = false;
+        private static DatabaseSnapshot? snapshot;
+
+        public static DatabaseAvailability Availability => Volatile.Read(ref snapshot) is null
+            ? DatabaseAvailability.Unavailable
+            : DatabaseAvailability.Ready;
+
+        private static DatabaseSnapshot Current => Volatile.Read(ref snapshot)
+            ?? throw new InvalidOperationException("游戏数据尚未完整加载。请先更新数据文件并重新启动。");
+
         #region Paths
-        internal static string EVENT_NAME_FILEPATH = $"events_{(Config.Updater.TrainerIsMale ? "male" : "female")}.br";
-        internal static string NAMES_FILEPATH = "names.br";
-        internal static string SKILLS_FILEPATH = "skill_data.br";
-        internal static string TALENT_SKILLS_FILEPATH = "talent_skill_sets.br";
-        internal static string FACTOR_IDS_FILEPATH = "factor_ids.br";
-        internal static string SKILL_UPGRADE_SPECIALITY_FILEPATH = "skill_upgrade_speciality.br";
-        internal static string SADDLE_IDS_FILEPATH = "wins_saddle.br";
-        internal static string SUCCESSION_RELATION_FILEPATH = "succession_relation.br";
+        internal static string EVENT_NAME_FILEPATH => $"events_{(Config.Updater.TrainerIsMale ? "male" : "female")}.br";
+        internal const string NAMES_FILEPATH = "names.br";
+        internal const string SKILLS_FILEPATH = "skill_data.br";
+        internal const string TALENT_SKILLS_FILEPATH = "talent_skill_sets.br";
+        internal const string FACTOR_IDS_FILEPATH = "factor_ids.br";
+        internal const string SKILL_UPGRADE_SPECIALITY_FILEPATH = "skill_upgrade_speciality.br";
+        internal const string SADDLE_IDS_FILEPATH = "wins_saddle.br";
+        internal const string SUCCESSION_RELATION_FILEPATH = "succession_relation.br";
         #endregion
         #region Properties
         /// <summary>
@@ -30,19 +44,19 @@ namespace UmamusumeResponseAnalyzer
         /// <summary>
         /// 技能
         /// </summary>
-        public static SkillManagerGenerator Skills { get; } = new();
+        public static SkillManagerGenerator Skills => Current.Skills;
         /// <summary>
         /// 剧本限定进化技能&lt;(基础技能id,剧本id),升级后&gt;
         /// </summary>
-        public static FrozenDictionary<(int, int), SkillUpgradeSpeciality> SkillUpgradeSpeciality { get; private set; } = FrozenDictionary<(int, int), SkillUpgradeSpeciality>.Empty;
+        public static FrozenDictionary<(int, int), SkillUpgradeSpeciality> SkillUpgradeSpeciality => Current.SkillUpgradeSpeciality;
         /// <summary>
         /// 育成事件
         /// </summary>
-        public static Dictionary<int, Story> Events { get; set; } = [];
+        public static FrozenDictionary<int, Story> Events => Current.Events;
         /// <summary>
         /// 马娘ID到马娘全名（包括前缀）的Dictionary
         /// </summary>
-        public static NameManager Names { get; set; } = new NameManager([]);
+        public static NameManager Names => Current.Names;
         /// <summary>
         /// 巅峰杯道具的ID及其对应名称
         /// </summary>
@@ -50,46 +64,63 @@ namespace UmamusumeResponseAnalyzer
         /// <summary>
         /// 马娘的天赋技能,Key是CardId
         /// </summary>
-        public static Dictionary<int, TalentSkillData[]> TalentSkill { get; set; } = [];
+        public static FrozenDictionary<int, TalentSkillData[]> TalentSkill => Current.TalentSkill;
         /// <summary>
         /// 
         /// </summary>
-        public static NullableIntStringDictionary FactorIds { get; set; } = new();
+        public static FrozenDictionary<int, string> FactorIds => Current.FactorIds;
         /// <summary>
         /// 可获得胜鞍的Id
         /// </summary>
-        public static int[] SaddleIds { get; set; } = [];
-        public static SuccessionRelationTable SuccessionRelation { get; set; } = new();
+        public static IReadOnlyList<int> SaddleIds => Current.SaddleIds;
+        public static SuccessionRelationTable SuccessionRelation => Current.SuccessionRelation;
         #endregion
-        public static async Task Initialize()
+        public static Task<DatabaseAvailability> Initialize() => Initialize(Directory.GetCurrentDirectory());
+
+        private static async Task<DatabaseAvailability> Initialize(string dataDirectory)
         {
             // 并行加载所有数据文件
-            var eventsTask = DeserializeAsync<List<Story>>(EVENT_NAME_FILEPATH);
-            var namesTask = DeserializeAsync<List<BaseName>>(NAMES_FILEPATH, new JsonSerializerSettings { TypeNameHandling = TypeNameHandling.All });
-            var skillsTask = DeserializeAsync<List<SkillData>>(SKILLS_FILEPATH);
-            var skillUpgradeTask = DeserializeAsync<List<SkillUpgradeSpeciality>>(SKILL_UPGRADE_SPECIALITY_FILEPATH);
-            var talentSkillTask = DeserializeAsync<Dictionary<int, TalentSkillData[]>>(TALENT_SKILLS_FILEPATH);
-            var factorIdsTask = DeserializeAsync<NullableIntStringDictionary>(FACTOR_IDS_FILEPATH);
-            var saddleIdsTask = DeserializeAsync<int[]>(SADDLE_IDS_FILEPATH);
-            var successionTask = DeserializeAsync<SuccessionRelationTable>(SUCCESSION_RELATION_FILEPATH);
+            var eventsTask = DeserializeAsync<List<Story>>(Path.Combine(dataDirectory, EVENT_NAME_FILEPATH));
+            var namesTask = DeserializeAsync<List<BaseName>>(Path.Combine(dataDirectory, NAMES_FILEPATH), new JsonSerializerSettings { TypeNameHandling = TypeNameHandling.All });
+            var skillsTask = DeserializeAsync<List<SkillData>>(Path.Combine(dataDirectory, SKILLS_FILEPATH));
+            var skillUpgradeTask = DeserializeAsync<List<SkillUpgradeSpeciality>>(Path.Combine(dataDirectory, SKILL_UPGRADE_SPECIALITY_FILEPATH));
+            var talentSkillTask = DeserializeAsync<Dictionary<int, TalentSkillData[]>>(Path.Combine(dataDirectory, TALENT_SKILLS_FILEPATH));
+            var factorIdsTask = DeserializeAsync<Dictionary<int, string>>(Path.Combine(dataDirectory, FACTOR_IDS_FILEPATH));
+            var saddleIdsTask = DeserializeAsync<int[]>(Path.Combine(dataDirectory, SADDLE_IDS_FILEPATH));
+            var successionTask = DeserializeAsync<SuccessionRelationTable>(Path.Combine(dataDirectory, SUCCESSION_RELATION_FILEPATH));
 
             await Task.WhenAll(eventsTask, namesTask, skillsTask, skillUpgradeTask, talentSkillTask, factorIdsTask, saddleIdsTask, successionTask);
 
-            // 数据文件缺失/损坏时 DeserializeAsync 返回 null(并已打印"请更新"提示)。
-            // 逐个判空赋值:缺哪个就保留该属性的安全默认(空集合),避免对 null 调 .ToDictionary。
-            // 这样全新用户(还没下数据)选"启动"也能进入主菜单去"更新数据文件",而不是首启即崩。
-            if (eventsTask.Result is { } events) Events = events.ToDictionary(y => y.Id, y => y);
-            if (namesTask.Result is { } names) Names = new(names);
-            if (skillsTask.Result is { } skills)
-                SkillManagerGenerator.Default = new(skills);
-            if (skillUpgradeTask.Result is { } skillUpgrade) SkillUpgradeSpeciality = skillUpgrade.ToDictionary(x => (x.BaseSkillId, x.ScenarioId), x => x).ToFrozenDictionary();
-            if (talentSkillTask.Result is { } talentSkill) TalentSkill = talentSkill;
-            if (factorIdsTask.Result is { } factorIds) FactorIds = factorIds;
-            if (saddleIdsTask.Result is { } saddleIds) SaddleIds = saddleIds;
-            if (successionTask.Result is { } succession) SuccessionRelation = succession;
-            Initialized = true;
+            if (eventsTask.Result is not { } events
+                || namesTask.Result is not { } names
+                || skillsTask.Result is not { } skills
+                || skillUpgradeTask.Result is not { } skillUpgrade
+                || talentSkillTask.Result is not { } talentSkill
+                || factorIdsTask.Result is not { } factorIds
+                || saddleIdsTask.Result is not { } saddleIds
+                || successionTask.Result is not { } succession)
+                return DatabaseAvailability.Unavailable;
+
+            try
+            {
+                var next = new DatabaseSnapshot(
+                    new SkillManagerGenerator(skills),
+                    skillUpgrade.ToFrozenDictionary(x => (x.BaseSkillId, x.ScenarioId)),
+                    events.ToFrozenDictionary(x => x.Id),
+                    new NameManager(names),
+                    talentSkill.ToFrozenDictionary(),
+                    factorIds.ToFrozenDictionary(),
+                    Array.AsReadOnly([.. saddleIds]),
+                    succession);
+                Volatile.Write(ref snapshot, next);
+                return DatabaseAvailability.Ready;
+            }
+            catch (Exception ex)
+            {
+                ReportWarning($"游戏数据无法组成完整快照: {ex.Message}");
+                return DatabaseAvailability.Unavailable;
+            }
         }
-        private static readonly JsonSerializer _serializer = new JsonSerializer();
 
         static void ReportWarning(string message)
         {
@@ -112,7 +143,7 @@ namespace UmamusumeResponseAnalyzer
                 using var streamReader = new StreamReader(brotliStream, Encoding.UTF8);
                 using var jsonReader = new JsonTextReader(streamReader);
 
-                var serializer = settings is null ? _serializer : JsonSerializer.Create(settings);
+                var serializer = settings is null ? JsonSerializer.CreateDefault() : JsonSerializer.Create(settings);
                 if (serializer.Deserialize<T>(jsonReader) is { } value)
                     return value;
 
@@ -129,6 +160,16 @@ namespace UmamusumeResponseAnalyzer
             return default;
         }
     }
+
+    internal sealed record DatabaseSnapshot(
+        SkillManagerGenerator Skills,
+        FrozenDictionary<(int BaseSkillId, int ScenarioId), SkillUpgradeSpeciality> SkillUpgradeSpeciality,
+        FrozenDictionary<int, Story> Events,
+        NameManager Names,
+        FrozenDictionary<int, TalentSkillData[]> TalentSkill,
+        FrozenDictionary<int, string> FactorIds,
+        IReadOnlyList<int> SaddleIds,
+        SuccessionRelationTable SuccessionRelation);
 
     public class NullableIntStringDictionary : Dictionary<int, string>
     {

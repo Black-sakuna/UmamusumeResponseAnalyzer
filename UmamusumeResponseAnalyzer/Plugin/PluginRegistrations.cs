@@ -1,9 +1,8 @@
 using Gallop.Endpoints;
+using System.Collections.Immutable;
 using System.Reflection;
 using System.Runtime.CompilerServices;
-using System.Runtime.ExceptionServices;
-using UmamusumeResponseAnalyzer.TerminalGui;
-using WatsonWebserver.Core;
+using System.Text.RegularExpressions;
 
 namespace UmamusumeResponseAnalyzer.Plugin;
 
@@ -16,350 +15,414 @@ internal sealed record AnalyzerRegistration(
     Func<AnalyzerDispatchContext, ValueTask> Handler,
     string Source);
 
+internal sealed record PluginRegistrationPlan(
+    IReadOnlyList<AnalyzerRegistration> Analyzers,
+    IReadOnlyList<Func<CancellationToken, ValueTask>> BackgroundOperations);
+
 internal sealed class PluginScopedAnalyzerRegistry(IPlugin plugin) : IPluginAnalyzerRegistry
 {
-    public IDisposable RegisterRequest<TEndpoint>(
-        Func<byte[], ValueTask> handler,
-        int priority = 0)
-        where TEndpoint : IGameEndpoint
-    {
-        ArgumentNullException.ThrowIfNull(handler);
-        return RegisterRaw(AnalyzerKind.Request, typeof(TEndpoint), (payload, _) => handler(payload), priority);
-    }
-
-    public IDisposable RegisterRequest<TEndpoint>(
-        Func<byte[], GameHttpHeaders, ValueTask> handler,
-        int priority = 0)
-        where TEndpoint : IGameEndpoint
-        => RegisterRaw(AnalyzerKind.Request, typeof(TEndpoint), handler, priority);
-
-    public IDisposable RegisterResponse<TEndpoint>(
-        Func<byte[], ValueTask> handler,
-        int priority = 0)
-        where TEndpoint : IGameEndpoint
-    {
-        ArgumentNullException.ThrowIfNull(handler);
-        return RegisterRaw(AnalyzerKind.Response, typeof(TEndpoint), (payload, _) => handler(payload), priority);
-    }
-
-    public IDisposable RegisterResponse<TEndpoint>(
-        Func<byte[], GameHttpHeaders, ValueTask> handler,
-        int priority = 0)
-        where TEndpoint : IGameEndpoint
-        => RegisterRaw(AnalyzerKind.Response, typeof(TEndpoint), handler, priority);
-
-    public IDisposable RegisterRequest<TEndpoint, TRequest>(
-        Func<TRequest, ValueTask> handler,
-        int priority = 0)
-        where TEndpoint : IGameEndpoint
-    {
-        ArgumentNullException.ThrowIfNull(handler);
-        return RegisterDto<TRequest>(AnalyzerKind.Request, typeof(TEndpoint), (payload, _) => handler(payload), priority);
-    }
-
-    public IDisposable RegisterRequest<TEndpoint, TRequest>(
-        Func<TRequest, GameHttpHeaders, ValueTask> handler,
-        int priority = 0)
-        where TEndpoint : IGameEndpoint
-        => RegisterDto(AnalyzerKind.Request, typeof(TEndpoint), handler, priority);
-
-    public IDisposable RegisterResponse<TEndpoint, TResponse>(
-        Func<TResponse, ValueTask> handler,
-        int priority = 0)
-        where TEndpoint : IGameEndpoint
-    {
-        ArgumentNullException.ThrowIfNull(handler);
-        return RegisterDto<TResponse>(AnalyzerKind.Response, typeof(TEndpoint), (payload, _) => handler(payload), priority);
-    }
-
-    public IDisposable RegisterResponse<TEndpoint, TResponse>(
-        Func<TResponse, GameHttpHeaders, ValueTask> handler,
-        int priority = 0)
-        where TEndpoint : IGameEndpoint
-        => RegisterDto(AnalyzerKind.Response, typeof(TEndpoint), handler, priority);
-
-    IDisposable RegisterRaw(
+    public void Register<TPayload>(
         AnalyzerKind kind,
-        Type endpointType,
-        Func<byte[], GameHttpHeaders, ValueTask> handler,
-        int priority)
-    {
-        ArgumentNullException.ThrowIfNull(handler);
-        return PluginManager.RegisterProgrammaticAnalyzer(
-            plugin,
-            kind,
-            endpointType,
-            typeof(byte[]),
-            priority,
-            context => handler(context.Payload, context.Headers),
-            "programmatic raw analyzer");
-    }
-
-    IDisposable RegisterDto<TPayload>(
-        AnalyzerKind kind,
-        Type endpointType,
-        Func<TPayload, GameHttpHeaders, ValueTask> handler,
-        int priority)
-    {
-        ArgumentNullException.ThrowIfNull(handler);
-        if (typeof(TPayload) == typeof(byte[]))
-            throw new InvalidOperationException("DTO analyzer 不能使用 byte[]；raw analyzer 请使用单泛型 RegisterRequest/RegisterResponse overload。");
-
-        return PluginManager.RegisterProgrammaticAnalyzer(
-            plugin,
-            kind,
-            endpointType,
-            typeof(TPayload),
-            priority,
-            context => handler((TPayload)context.GetDto(), context.Headers),
-            "programmatic DTO analyzer");
-    }
+        IReadOnlyList<EndpointPattern> patterns,
+        Func<AnalyzerInvocation<TPayload>, ValueTask> handler,
+        int priority = 0)
+        => PluginManager.StageProgrammaticAnalyzers(plugin, kind, patterns, handler, priority);
 }
 
-internal sealed class AnalyzerRegistrationHandle(AnalyzerRegistration registration) : IDisposable
+internal sealed class PluginRegistrationStage(
+    IPlugin plugin,
+    IEnumerable<AnalyzerRegistration>? initialAnalyzers = null) : IDisposable
 {
-    int disposed;
+    readonly List<AnalyzerRegistration> analyzers = initialAnalyzers?.ToList() ?? [];
+    readonly List<Func<CancellationToken, ValueTask>> backgroundOperations = [];
+    bool committed;
+    bool disposed;
+
+    internal IPlugin Plugin { get; } = plugin;
+
+    internal void Add(IEnumerable<AnalyzerRegistration> registrations)
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        analyzers.AddRange(registrations);
+    }
+
+    internal void AddBackground(Func<CancellationToken, ValueTask> operation)
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        backgroundOperations.Add(operation);
+    }
+
+    internal void Commit()
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        if (committed)
+            throw new InvalidOperationException($"插件 registration stage 已提交: {PluginManager.InternalName(Plugin)}");
+
+        PluginManager.CommitRegistrationStage(Plugin, analyzers, backgroundOperations);
+        committed = true;
+    }
 
     public void Dispose()
     {
-        if (Interlocked.Exchange(ref disposed, 1) != 0)
-            return;
-
-        PluginManager.RemoveAnalyzerRegistration(registration);
+        disposed = true;
+        analyzers.Clear();
+        backgroundOperations.Clear();
+        PluginManager.EndRegistrationStage(this);
     }
 }
-
-internal sealed class RouteRegistration(
-    IPlugin plugin,
-    WatsonWebserver.Core.HttpMethod method,
-    string path,
-    Func<HttpContextBase, Task> handler)
-{
-    int removed;
-
-    public IPlugin Plugin { get; } = plugin;
-    public WatsonWebserver.Core.HttpMethod Method { get; } = method;
-    public string Path { get; } = path;
-
-    public async Task InvokeAsync(HttpContextBase ctx)
-    {
-        using var generation = PluginManager.EnterPluginCallback(Plugin);
-        if (Volatile.Read(ref removed) != 0)
-            throw new ObjectDisposedException(Path, $"插件路由已卸载: plugin={PluginManager.InternalName(Plugin)}, path={Path}");
-
-        using var callback = PluginManager.EnterPluginCallbackScope();
-        using var owner = HotkeyManager.RegisterScope(Plugin);
-        try
-        {
-            await handler(ctx);
-        }
-        catch (Exception ex)
-        {
-            var failure = new InvalidOperationException(
-                $"插件路由处理失败: plugin={PluginManager.InternalName(Plugin)}, path={Path}, " +
-                PluginManager.DescribeException(ex));
-            if (PluginManager.ReportPluginFailure("Plugin", failure) is { } diagnosticsError)
-                throw new AggregateException("插件路由处理及 diagnostics 失败。", failure, diagnosticsError);
-            throw failure;
-        }
-    }
-
-    public void MarkRemoved()
-        => Interlocked.Exchange(ref removed, 1);
-}
-
-internal sealed record PluginRegistrationPlan(
-    List<AnalyzerRegistration> Analyzers,
-    List<RouteRegistration> Routes);
 
 internal static partial class PluginManager
 {
-    internal static void RegisterMethods(IPlugin plugin)
-    {
-        var plan = CreateRegistrationPlan(plugin);
-        try
-        {
-            CommitRegistrationPlan(plan);
-        }
-        catch (Exception primary)
-        {
-            List<Exception> failures = [primary];
-            try { RemoveAnalyzerMethods(plugin); }
-            catch (Exception cleanupError) { failures.Add(cleanupError); }
-            RemoveRoutes(plugin, failures);
+    static readonly AsyncLocal<PluginRegistrationStage?> ActiveRegistrationStage = new();
+    static readonly TimeSpan PatternTimeout = TimeSpan.FromMilliseconds(100);
 
-            if (failures.Count != 1)
-                throw new AggregateException("插件 registration 提交失败。", failures);
-            ExceptionDispatchInfo.Capture(primary).Throw();
-            throw;
-        }
+    internal static PluginRegistrationStage BeginRegistrationStage(
+        IPlugin plugin,
+        bool includeAttributeAnalyzers = false)
+    {
+        if (ActiveRegistrationStage.Value is not null)
+            throw new InvalidOperationException("插件 registration stage 不允许嵌套。");
+
+        var stage = new PluginRegistrationStage(
+            plugin,
+            includeAttributeAnalyzers ? CreateAttributeRegistrations(plugin) : null);
+        ActiveRegistrationStage.Value = stage;
+        return stage;
     }
 
-    static PluginRegistrationPlan CreateRegistrationPlan(IPlugin plugin)
+    internal static void EndRegistrationStage(PluginRegistrationStage stage)
     {
-        var analyzers = new List<AnalyzerRegistration>();
-        var routes = new List<RouteRegistration>();
-        foreach (var method in plugin.GetType().GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly))
+        if (ReferenceEquals(ActiveRegistrationStage.Value, stage))
+            ActiveRegistrationStage.Value = null;
+    }
+
+    internal static void StageBackgroundOperation(
+        IPlugin plugin,
+        Func<CancellationToken, ValueTask> operation)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        RequireRegistrationStage(plugin).AddBackground(operation);
+    }
+
+    internal static void ValidateRegistrationStage(IPlugin plugin)
+        => _ = RequireRegistrationStage(plugin);
+
+    internal static void RegisterMethods(IPlugin plugin)
+        => CommitAnalyzerRegistrations(CreateAttributeRegistrations(plugin));
+
+    internal static PluginRegistrationPlan CreateRegistrationPlan(IPlugin plugin)
+        => new(CreateAttributeRegistrations(plugin), []);
+
+    static List<AnalyzerRegistration> CreateAttributeRegistrations(IPlugin plugin)
+    {
+        var registrations = new List<AnalyzerRegistration>();
+        foreach (var method in plugin.GetType().GetMethods(
+                     BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance |
+                     BindingFlags.Static | BindingFlags.DeclaredOnly))
         {
             foreach (var analyzer in method.GetCustomAttributes<AnalyzerAttribute>())
-                analyzers.Add(CreateAnalyzerRegistration(plugin, method, analyzer));
-
-            var route = method.GetCustomAttribute<RouteAttribute>();
-            if (route is not null)
-                routes.Add(CreateRouteRegistration(plugin, method, route));
+                registrations.Add(CreateAttributeRegistration(plugin, method, analyzer));
         }
 
-        return new(analyzers, routes);
+        return registrations;
     }
 
-    static RouteRegistration CreateRouteRegistration(IPlugin plugin, MethodInfo method, RouteAttribute route)
+    static AnalyzerRegistration CreateAttributeRegistration(
+        IPlugin plugin,
+        MethodInfo method,
+        AnalyzerAttribute analyzer)
     {
+        if (method.ContainsGenericParameters || method.ReturnType != typeof(ValueTask))
+            throw AnalyzerRegistrationException(
+                plugin,
+                method,
+                analyzer.EndpointType,
+                analyzer.Kind,
+                "ValueTask analyzer(TConcreteDto payload)",
+                DescribeAnalyzerSignature(method));
+
         var parameters = method.GetParameters();
-        if (parameters.Length != 1 || parameters[0].ParameterType != typeof(HttpContextBase) || method.ReturnType != typeof(Task))
-        {
-            var actualParameters = parameters.Length == 0
-                ? "<none>"
-                : string.Join(", ", parameters.Select(x => x.ParameterType.FullName ?? x.ParameterType.Name));
-            throw new InvalidOperationException(
-                $"插件 Route 签名无效: plugin={plugin.Name} ({InternalName(plugin)}), " +
-                $"method={method.DeclaringType?.FullName}.{method.Name}, path={route.Path}, " +
-                $"expected=Task {nameof(HttpContextBase)}, actual={method.ReturnType.FullName} ({actualParameters})");
-        }
+        if (parameters.Length != 1)
+            throw AnalyzerRegistrationException(
+                plugin,
+                method,
+                analyzer.EndpointType,
+                analyzer.Kind,
+                "ValueTask analyzer(TConcreteDto payload)",
+                DescribeAnalyzerSignature(method));
 
-        var handler = method.IsStatic
-            ? method.CreateDelegate<Func<HttpContextBase, Task>>()
-            : method.CreateDelegate<Func<HttpContextBase, Task>>(plugin);
-        return new(plugin, route.Method, $"/{plugin.Name}/{route.Path}", handler);
+        if (!GameEndpointCatalog.ByEndpointType.TryGetValue(analyzer.EndpointType, out var endpoint))
+            throw AnalyzerRegistrationException(
+                plugin,
+                method,
+                analyzer.EndpointType,
+                analyzer.Kind,
+                "catalog endpoint",
+                "endpoint type is not in GameEndpointCatalog");
+
+        var payloadType = parameters[0].ParameterType;
+        var expected = analyzer.Kind == AnalyzerKind.Request ? endpoint.RequestType : endpoint.ResponseType;
+        if (payloadType != expected)
+            throw AnalyzerRegistrationException(
+                plugin,
+                method,
+                analyzer.EndpointType,
+                analyzer.Kind,
+                expected.FullName ?? expected.Name,
+                payloadType.FullName ?? payloadType.Name);
+
+        var create = typeof(PluginManager)
+            .GetMethod(nameof(CreateAttributeHandler), BindingFlags.NonPublic | BindingFlags.Static)!
+            .MakeGenericMethod(payloadType);
+        var handler = (Func<AnalyzerDispatchContext, ValueTask>)create.Invoke(null, [plugin, method])!;
+        return new(
+            plugin,
+            method,
+            analyzer.EndpointType,
+            analyzer.Kind,
+            analyzer.Priority,
+            handler,
+            $"{method.DeclaringType?.FullName}.{method.Name} [{analyzer.GetType().Name}]");
     }
 
-    static void CommitRegistrationPlan(PluginRegistrationPlan plan)
+    static Func<AnalyzerDispatchContext, ValueTask> CreateAttributeHandler<TPayload>(
+        IPlugin plugin,
+        MethodInfo method)
     {
-        foreach (var registration in plan.Analyzers)
-            CommitAnalyzerRegistration(registration);
-
-        foreach (var route in plan.Routes)
-        {
-            Server.Instance.Routes.PreAuthentication.Static.Add(route.Method, route.Path, route.InvokeAsync);
-            if (!PluginRoutes.TryGetValue(route.Plugin, out var routes))
-            {
-                routes = [];
-                PluginRoutes[route.Plugin] = routes;
-            }
-            routes.Add(route);
-        }
+        var handler = method.IsStatic
+            ? method.CreateDelegate<Func<TPayload, ValueTask>>()
+            : method.CreateDelegate<Func<TPayload, ValueTask>>(plugin);
+        return context => handler((TPayload)context.GetDto(typeof(TPayload)));
     }
 
     internal static IPluginAnalyzerRegistry AnalyzersFor(IPlugin plugin)
         => new PluginScopedAnalyzerRegistry(plugin);
 
-    internal static IDisposable RegisterProgrammaticAnalyzer(
+    internal static void StageProgrammaticAnalyzers<TPayload>(
         IPlugin plugin,
         AnalyzerKind kind,
-        Type endpointType,
-        Type payloadType,
-        int priority,
-        Func<AnalyzerDispatchContext, ValueTask> handler,
-        string source)
+        IReadOnlyList<EndpointPattern> patterns,
+        Func<AnalyzerInvocation<TPayload>, ValueTask> handler,
+        int priority)
     {
-        using var admission = EnterPluginRegistration(plugin);
-        var registration = RegisterAnalyzerCore(plugin, kind, endpointType, payloadType, priority, handler, source, method: null);
-        CommitAnalyzerRegistration(registration);
-        return new AnalyzerRegistrationHandle(registration);
-    }
+        ArgumentNullException.ThrowIfNull(patterns);
+        ArgumentNullException.ThrowIfNull(handler);
+        if (!Enum.IsDefined(kind))
+            throw new ArgumentOutOfRangeException(nameof(kind));
+        if (patterns.Count == 0)
+            throw new ArgumentException("Analyzer 至少需要一个 endpoint pattern。", nameof(patterns));
 
-    static AnalyzerRegistration CreateAnalyzerRegistration(IPlugin plugin, MethodInfo method, AnalyzerAttribute analyzer)
-    {
-        var (payloadType, hasHeaders) = ValidateAttributeAnalyzerSignature(plugin, method, analyzer);
-        var source = $"{method.DeclaringType?.FullName}.{method.Name}";
-        Func<AnalyzerDispatchContext, ValueTask> handler = payloadType == typeof(byte[])
-            ? context => InvokeAttributeAnalyzer(plugin, method, context.Payload, hasHeaders ? context.Headers : null)
-            : context => InvokeAttributeAnalyzer(plugin, method, context.GetDto(), hasHeaders ? context.Headers : null);
-
-        return RegisterAnalyzerCore(
+        var payloadType = typeof(TPayload);
+        ValidateProgrammaticPayload(kind, payloadType);
+        var endpoints = ExpandEndpointPatterns(patterns);
+        var registrations = endpoints.Select(endpoint => new AnalyzerRegistration(
             plugin,
-            analyzer.Kind,
-            analyzer.EndpointType,
-            payloadType,
-            analyzer.Priority,
-            handler,
-            source,
-            method,
-            attribute: analyzer);
-    }
-
-    static (Type PayloadType, bool HasHeaders) ValidateAttributeAnalyzerSignature(IPlugin plugin, MethodInfo method, AnalyzerAttribute analyzer)
-    {
-        var parameters = method.GetParameters();
-        if ((parameters.Length is not 1 and not 2) || method.ReturnType != typeof(ValueTask))
-            throw AnalyzerRegistrationException(
-                plugin,
-                method,
-                analyzer.EndpointType,
-                analyzer.Kind,
-                "<signature>",
-                "ValueTask analyzer(TPayload payload) or ValueTask analyzer(TPayload payload, GameHttpHeaders headers)",
-                DescribeAnalyzerSignature(method));
-
-        if (parameters.Length == 2 && parameters[1].ParameterType != typeof(GameHttpHeaders))
-            throw AnalyzerRegistrationException(
-                plugin,
-                method,
-                analyzer.EndpointType,
-                analyzer.Kind,
-                "<signature>",
-                "ValueTask analyzer(TPayload payload, GameHttpHeaders headers)",
-                DescribeAnalyzerSignature(method));
-
-        return (parameters[0].ParameterType, parameters.Length == 2);
-    }
-
-    static AnalyzerRegistration RegisterAnalyzerCore(
-        IPlugin plugin,
-        AnalyzerKind kind,
-        Type endpointType,
-        Type payloadType,
-        int priority,
-        Func<AnalyzerDispatchContext, ValueTask> handler,
-        string source,
-        MethodInfo? method,
-        AnalyzerAttribute? attribute = null)
-    {
-        if (!GameEndpointCatalog.ByEndpointType.TryGetValue(endpointType, out var endpoint))
-            throw AnalyzerRegistrationException(
-                plugin,
-                method,
-                endpointType,
-                kind,
-                "<signature>",
-                "catalog endpoint",
-                $"未在 {nameof(GameEndpointCatalog)}.{nameof(GameEndpointCatalog.ByEndpointType)} 注册");
-
-        var expected = payloadType == typeof(byte[])
-            ? typeof(byte[])
-            : kind == AnalyzerKind.Request
-                ? endpoint.RequestType
-                : endpoint.ResponseType;
-        if (payloadType != expected)
-            throw AnalyzerRegistrationException(
-                plugin,
-                method,
-                endpointType,
-                kind,
-                payloadType == typeof(byte[]) ? "raw" : "DTO",
-                expected.FullName ?? expected.Name,
-                method is null
-                    ? payloadType.FullName ?? payloadType.Name
-                    : DescribeAnalyzerSignature(method));
-
-        return new(
-            plugin,
-            method,
-            endpointType,
+            null,
+            endpoint.EndpointType,
             kind,
             priority,
-            handler,
-            attribute is null ? source : $"{source} [{attribute.GetType().Name}]");
+            payloadType == typeof(ReadOnlyMemory<byte>)
+                ? context => handler(new(endpoint, (TPayload)(object)context.Payload, context.Headers))
+                : context => handler(new(endpoint, (TPayload)context.GetDto(payloadType), context.Headers)),
+            $"programmatic {payloadType.FullName} analyzer")).ToList();
+
+        RequireRegistrationStage(plugin).Add(registrations);
     }
+
+    static PluginRegistrationStage RequireRegistrationStage(IPlugin plugin)
+    {
+        var stage = ActiveRegistrationStage.Value;
+        if (stage is null || !ReferenceEquals(stage.Plugin, plugin))
+            throw new InvalidOperationException(
+                $"Analyzer 与 background operation 只能在 Initialize 或 Host 执行的 OnStarted 回调中注册: plugin={InternalName(plugin)}");
+        return stage;
+    }
+
+    static void ValidateProgrammaticPayload(AnalyzerKind kind, Type payloadType)
+    {
+        if (payloadType == typeof(ReadOnlyMemory<byte>))
+            return;
+
+        if (payloadType == typeof(object) || payloadType == typeof(byte[]) || payloadType.IsInterface ||
+            payloadType.IsAbstract || payloadType.ContainsGenericParameters)
+            throw new InvalidOperationException($"Analyzer payload 必须是 Host 中现有的闭合具体 Gallop DTO: {payloadType.FullName}");
+
+        var known = GameEndpointCatalog.ByEndpointType.Values.Any(endpoint =>
+            (kind == AnalyzerKind.Request ? endpoint.RequestType : endpoint.ResponseType) == payloadType);
+        if (!known)
+            throw new InvalidOperationException(
+                $"Analyzer payload 不是当前方向的 Host Gallop DTO: kind={kind}, payload={payloadType.FullName}");
+    }
+
+    internal static IReadOnlyList<GameEndpointDescriptor> ExpandEndpointPatterns(
+        IReadOnlyList<EndpointPattern> patterns)
+    {
+        var endpoints = new Dictionary<Type, GameEndpointDescriptor>();
+        foreach (var pattern in patterns)
+        {
+            var matcher = CreatePatternMatcher(pattern);
+            var matches = GameEndpointCatalog.ByEndpointType.Values
+                .Where(endpoint => matcher(endpoint.Path))
+                .OrderBy(endpoint => endpoint.Path, StringComparer.Ordinal)
+                .ToList();
+            if (matches.Count == 0)
+                throw new InvalidOperationException(
+                    $"Endpoint pattern 未命中当前 catalog: kind={pattern.Kind}, pattern={pattern.Pattern}");
+
+            foreach (var endpoint in matches)
+                endpoints.TryAdd(endpoint.EndpointType, endpoint);
+        }
+
+        return endpoints.Values.OrderBy(endpoint => endpoint.Path, StringComparer.Ordinal).ToList();
+    }
+
+    static Func<string, bool> CreatePatternMatcher(EndpointPattern pattern)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(pattern.Pattern);
+        return pattern.Kind switch
+        {
+            EndpointPatternKind.Exact => CreateExactMatcher(pattern.Pattern),
+            EndpointPatternKind.Wildcard => CreateWildcardMatcher(pattern.Pattern),
+            EndpointPatternKind.Regex => CreateRegexMatcher(pattern.Pattern),
+            _ => throw new ArgumentOutOfRangeException(nameof(pattern), pattern.Kind, "未知 endpoint pattern 类型。"),
+        };
+    }
+
+    static Func<string, bool> CreateExactMatcher(string path)
+    {
+        ValidateCanonicalPathPattern(path, allowWildcard: false);
+        return candidate => string.Equals(candidate, path, StringComparison.Ordinal);
+    }
+
+    static Func<string, bool> CreateWildcardMatcher(string pattern)
+    {
+        ValidateCanonicalPathPattern(pattern, allowWildcard: true);
+        if (!pattern.Contains('*', StringComparison.Ordinal))
+            throw new ArgumentException($"Wildcard endpoint pattern 必须包含 *: {pattern}", nameof(pattern));
+
+        return CreateRegexMatcher(
+            Regex.Escape(pattern).Replace("\\*", "[^/]*", StringComparison.Ordinal));
+    }
+
+    static void ValidateCanonicalPathPattern(string pattern, bool allowWildcard)
+    {
+        if (pattern[0] != '/' || pattern.Length == 1 || pattern[^1] == '/' ||
+            pattern.Contains('\\', StringComparison.Ordinal) ||
+            pattern.Contains('?', StringComparison.Ordinal) ||
+            pattern.Contains('#', StringComparison.Ordinal))
+            throw new ArgumentException($"Endpoint pattern 必须是 canonical absolute path: {pattern}", nameof(pattern));
+
+        foreach (var segment in pattern[1..].Split('/'))
+        {
+            if (segment.Length == 0 || segment is "." or "..")
+                throw new ArgumentException($"Endpoint pattern 包含非 canonical path segment: {pattern}", nameof(pattern));
+            if (!allowWildcard && segment.Contains('*', StringComparison.Ordinal))
+                throw new ArgumentException($"Exact endpoint pattern 不能包含 *: {pattern}", nameof(pattern));
+            if (allowWildcard && segment.Contains("**", StringComparison.Ordinal))
+                throw new ArgumentException($"Wildcard endpoint pattern 不支持相邻 **: {pattern}", nameof(pattern));
+        }
+    }
+
+    static Func<string, bool> CreateRegexMatcher(string pattern)
+    {
+        var regex = new Regex(
+            $"\\A(?:{pattern})\\z",
+            RegexOptions.CultureInvariant | RegexOptions.NonBacktracking,
+            PatternTimeout);
+        return regex.IsMatch;
+    }
+
+    internal static void CommitRegistrationStage(
+        IPlugin plugin,
+        IReadOnlyList<AnalyzerRegistration> analyzers,
+        IReadOnlyList<Func<CancellationToken, ValueTask>> backgroundOperations)
+    {
+        var generation = RequireGeneration(plugin);
+        var plan = new PluginRegistrationPlan([.. analyzers], [.. backgroundOperations]);
+        if (generation.TryStageRegistration(plan))
+            return;
+
+        generation.ValidateBackgroundAdmission();
+        CommitAnalyzerRegistrations(plan.Analyzers);
+        generation.RunBackground(plan.BackgroundOperations);
+    }
+
+    internal static void CommitPendingRegistrations(IEnumerable<IPlugin> plugins)
+    {
+        var pending = plugins
+            .Select(plugin => (Generation: RequireGeneration(plugin), Plan: RequireGeneration(plugin).TakePendingRegistration()))
+            .ToList();
+        CommitAnalyzerRegistrations(pending.SelectMany(item => item.Plan.Analyzers));
+        foreach (var item in pending)
+            item.Generation.Open();
+        foreach (var item in pending)
+            item.Generation.RunBackground(item.Plan.BackgroundOperations);
+    }
+
+    internal static void CommitAnalyzerRegistrations(IEnumerable<AnalyzerRegistration> registrations)
+    {
+        var added = registrations.ToArray();
+        if (added.Length == 0)
+            return;
+
+        var current = Runtime.ReadAnalyzers();
+        Runtime.PublishAnalyzers(new(
+            AppendInDispatchOrder(
+                current.Request,
+                added.Where(registration => registration.Kind == AnalyzerKind.Request)),
+            AppendInDispatchOrder(
+                current.Response,
+                added.Where(registration => registration.Kind == AnalyzerKind.Response))));
+    }
+
+    internal static void RemoveAnalyzerRegistration(AnalyzerRegistration registration)
+        => RemoveAnalyzerRegistrations([registration]);
+
+    internal static void RemoveAnalyzerRegistrations(IEnumerable<AnalyzerRegistration> registrations)
+    {
+        var removed = registrations.ToHashSet(ReferenceEqualityComparer.Instance);
+        if (removed.Count == 0)
+            return;
+
+        var current = Runtime.ReadAnalyzers();
+        Runtime.PublishAnalyzers(new(
+            current.Request.Where(registration => !removed.Contains(registration)).ToImmutableArray(),
+            current.Response.Where(registration => !removed.Contains(registration)).ToImmutableArray()));
+    }
+
+    internal static PluginCallbackSnapshot<AnalyzerRegistration> SnapshotAnalyzerRegistrations(
+        AnalyzerKind kind,
+        Type endpointType)
+    {
+        var snapshot = Runtime.ReadAnalyzers();
+        var registrations = kind == AnalyzerKind.Request ? snapshot.Request : snapshot.Response;
+        return PluginCallbackSnapshot<AnalyzerRegistration>.Create(
+            registrations.Where(registration => registration.EndpointType == endpointType),
+            static registration => registration.Plugin);
+    }
+
+    static void RemoveAnalyzerMethods(IPlugin plugin)
+        => RemoveAnalyzerMethods([plugin]);
+
+    static void RemoveAnalyzerMethods(IEnumerable<IPlugin> plugins)
+    {
+        var removed = plugins.ToHashSet<IPlugin>(ReferenceEqualityComparer.Instance);
+        var current = Runtime.ReadAnalyzers();
+        Runtime.PublishAnalyzers(new(
+            current.Request.Where(registration => !removed.Contains(registration.Plugin)).ToImmutableArray(),
+            current.Response.Where(registration => !removed.Contains(registration.Plugin)).ToImmutableArray()));
+    }
+
+    static ImmutableArray<AnalyzerRegistration> AppendInDispatchOrder(
+        ImmutableArray<AnalyzerRegistration> current,
+        IEnumerable<AnalyzerRegistration> added)
+        => current
+            .AddRange(added)
+            .OrderBy(registration => registration.Priority)
+            .ToImmutableArray();
+
+    static void ClearAnalyzerRegistrations()
+        => Runtime.PublishAnalyzers(AnalyzerRuntimeSnapshot.Empty);
 
     static string DescribeAnalyzerSignature(MethodInfo method)
     {
@@ -367,121 +430,21 @@ internal static partial class PluginManager
         var parameterText = parameters.Length == 0
             ? "<none>"
             : string.Join(", ", parameters.Select(p => p.ParameterType.FullName ?? p.ParameterType.Name));
-        var asyncVoid = method.GetCustomAttribute<AsyncStateMachineAttribute>() is null ? string.Empty : ", async-state-machine";
-        return $"return={method.ReturnType.FullName ?? method.ReturnType.Name}, parameters=({parameterText}){asyncVoid}";
-    }
-
-    static ValueTask InvokeAttributeAnalyzer(IPlugin plugin, MethodInfo method, object payload, GameHttpHeaders? headers)
-    {
-        var target = method.IsStatic ? null : plugin;
-        object?[] args = headers is null ? [payload] : [payload, headers];
-        return (ValueTask)method.Invoke(target, args)!;
-    }
-
-    static void CommitAnalyzerRegistration(AnalyzerRegistration registration)
-    {
-        lock (AnalyzerGate)
-        {
-            var dict = registration.Kind == AnalyzerKind.Response ? ResponseAnalyzerMethods : RequestAnalyzerMethods;
-            if (!dict.TryGetValue(registration.Priority, out var list))
-            {
-                list = [];
-                dict[registration.Priority] = list;
-            }
-
-            list.Add(registration);
-        }
-    }
-
-    internal static void RemoveAnalyzerRegistration(AnalyzerRegistration registration)
-    {
-        lock (AnalyzerGate)
-            RemoveAnalyzerRegistrationLocked(registration);
-    }
-
-    static void RemoveAnalyzerRegistrationLocked(AnalyzerRegistration registration)
-    {
-        var dict = registration.Kind == AnalyzerKind.Response ? ResponseAnalyzerMethods : RequestAnalyzerMethods;
-        if (!dict.TryGetValue(registration.Priority, out var list))
-            return;
-
-        list.Remove(registration);
-        if (list.Count == 0)
-            dict.Remove(registration.Priority);
-    }
-
-    internal static PluginCallbackSnapshot<AnalyzerRegistration> SnapshotAnalyzerRegistrations(AnalyzerKind kind, Type endpointType)
-    {
-        lock (AnalyzerGate)
-        {
-            var dict = kind == AnalyzerKind.Request ? RequestAnalyzerMethods : ResponseAnalyzerMethods;
-            return PluginCallbackSnapshot<AnalyzerRegistration>.Create(
-                dict
-                    .SelectMany(x => x.Value)
-                    .Where(x => x.EndpointType == endpointType),
-                static registration => registration.Plugin);
-        }
+        var asyncStateMachine = method.GetCustomAttribute<AsyncStateMachineAttribute>() is null
+            ? string.Empty
+            : ", async-state-machine";
+        return $"return={method.ReturnType.FullName ?? method.ReturnType.Name}, parameters=({parameterText}){asyncStateMachine}";
     }
 
     static InvalidOperationException AnalyzerRegistrationException(
         IPlugin plugin,
-        MethodInfo? method,
+        MethodInfo method,
         Type endpointType,
         AnalyzerKind kind,
-        string payload,
         string expected,
         string actual)
-    {
-        var methodName = method is null
-            ? "<programmatic>"
-            : $"{method.DeclaringType?.FullName}.{method.Name}";
-        return new InvalidOperationException(
-            $"插件 analyzer 签名无效: plugin={plugin.Name} ({InternalName(plugin)}), " +
-            $"method={methodName}, endpoint={endpointType.FullName}, kind={kind}, payload={payload}, " +
-            $"expected={expected}, actual={actual}");
-    }
-
-    static void RemoveAnalyzerMethods(IPlugin plugin)
-    {
-        lock (AnalyzerGate)
-        {
-            foreach (var dict in (SortedDictionary<int, List<AnalyzerRegistration>>[])[RequestAnalyzerMethods, ResponseAnalyzerMethods])
-            {
-                foreach (var priority in dict.Keys.ToList())
-                {
-                    var list = dict[priority];
-                    list.RemoveAll(x => ReferenceEquals(x.Plugin, plugin));
-                    if (list.Count == 0)
-                        dict.Remove(priority);
-                }
-            }
-        }
-    }
-
-    static void RemoveRoutes(IPlugin plugin, List<Exception> failures)
-    {
-        if (!PluginRoutes.Remove(plugin, out var routes))
-            return;
-        foreach (var route in routes)
-            RemoveRoute(route, "RegistrationRollback", failures);
-    }
-
-    static void RemoveRoute(
-        RouteRegistration route,
-        string phase,
-        List<Exception> failures)
-    {
-        try
-        {
-            route.MarkRemoved();
-            if (Server.Instance.Routes.PreAuthentication.Static.Exists(route.Method, route.Path))
-                Server.Instance.Routes.PreAuthentication.Static.Remove(route.Method, route.Path);
-        }
-        catch (Exception cleanupError)
-        {
-            failures.Add(new InvalidOperationException(
-                $"插件 route 清理失败: plugin={InternalName(route.Plugin)}, phase={phase}, path={route.Path}",
-                cleanupError));
-        }
-    }
+        => new(
+            $"插件 analyzer 签名无效: plugin={InternalName(plugin)}, " +
+            $"method={method.DeclaringType?.FullName}.{method.Name}, endpoint={endpointType.FullName}, " +
+            $"kind={kind}, expected={expected}, actual={actual}");
 }

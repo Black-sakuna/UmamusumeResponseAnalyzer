@@ -1,65 +1,98 @@
-﻿using UmamusumeResponseAnalyzer.Entities;
+using System.Collections.Frozen;
+using System.Diagnostics.CodeAnalysis;
+using UmamusumeResponseAnalyzer.Entities;
 using static UmamusumeResponseAnalyzer.Localization.NameManager;
 
 namespace UmamusumeResponseAnalyzer
 {
-    public class NameManager
+    public sealed class NameManager
     {
-        private static readonly BaseName nullBaseName = new(int.MinValue, I18N_Unknown);
-        private static readonly SupportCardName nullSupportCardName = new(int.MinValue, I18N_Unknown, int.MinValue, int.MinValue);
-        private static readonly UmaName nullUmaName = new(int.MinValue, I18N_Unknown, int.MinValue);
-        private readonly Dictionary<int, BaseName> names;
+        private readonly FrozenDictionary<int, BaseName> names;
 
-        public NameManager(List<BaseName> data)
+        public NameManager(IEnumerable<BaseName> data)
         {
-            names = data.ToDictionary(x => x.Id, x => x);
-            foreach (var i in names.Where(x => x.Value is SupportCardName))
-            {
-                i.Value.Nickname = $"{((SupportCardName)i.Value).TypeName}{i.Value.Nickname}";
-            }
+            names = data.Select(Clone).ToFrozenDictionary(x => x.Id);
         }
 
-        /// <param name="id">唯一ID，CharaId及CardId均可。</param>
-        /// <returns>10x为各剧本的NPC<c>BaseName</c><br/>
-        /// CharaId为人物<c>BaseName</c><br/>
-        /// CardId则为S卡<c>SupportCardName</c>或角色<c>UmaName</c></returns>
-        public string this[int id] => names.TryGetValue(id, out var value)
+        public string DisplayName(int id) => names.TryGetValue(id, out var value)
             ? value switch
             {
-                SupportCardName supportCard => supportCard.SimpleName,
-                UmaName uma => uma.CharacterName,
+                SupportCardName supportCard => $"{supportCard.TypeName}{DisplayName(supportCard.CharaId)}",
+                UmaName uma => DisplayName(uma.CharaId),
                 _ => value.Name,
             }
-            : I18N_Unknown;
-        /// <param name="id">唯一ID，CharaId及CardId均可。</param>
-        /// <returns>10x为各剧本的NPC<c>BaseName</c><br/>
-        /// 其他则为人物<c>BaseName</c></returns>
-        public BaseName GetCharacter(int id) => names.TryGetValue(id, out var value) ? value : nullBaseName;
-        public SupportCardName GetSupportCard(int id)
+            : $"{I18N_Unknown} ({id})";
+
+        public string DisplayNickname(int id) => names.TryGetValue(id, out var value)
+            ? value is SupportCardName supportCard
+                ? $"{supportCard.TypeName}{supportCard.Nickname}"
+                : value.Nickname
+            : $"{I18N_Unknown} ({id})";
+
+        public bool TryGetCharacter(int id, [NotNullWhen(true)] out BaseName? character)
         {
-            if (!names.TryGetValue(id, out var value)) return nullSupportCardName;
-            if (value is not SupportCardName) throw new Exception(string.Format(I18N_CastToSupportCardNameFail, value.GetType()));
-            return (SupportCardName)value;
+            if (names.TryGetValue(id, out var value)
+                && value is not SupportCardName
+                && value is not UmaName)
+            {
+                character = value;
+                return true;
+            }
+
+            character = null;
+            return false;
         }
-        public UmaName GetUmamusume(int id)
+
+        public BaseName GetRequiredCharacter(int id)
+            => TryGetCharacter(id, out var character)
+                ? character
+                : throw Missing(id, nameof(BaseName));
+
+        public bool TryGetSupportCard(int id, [NotNullWhen(true)] out SupportCardName? supportCard)
         {
-            if (!names.TryGetValue(id, out var value)) return nullUmaName;
-            if (value is not UmaName) throw new Exception(string.Format(I18N_CastToUmaNameFail, value.GetType()));
-            return (UmaName)value;
+            supportCard = names.GetValueOrDefault(id) as SupportCardName;
+            return supportCard is not null;
         }
-        public int GetRSupportCardTypeByCharaId(int charaId)
+
+        public SupportCardName GetRequiredSupportCard(int id)
+            => TryGetSupportCard(id, out var supportCard)
+                ? supportCard
+                : throw Missing(id, nameof(SupportCardName));
+
+        public bool TryGetUmamusume(int id, [NotNullWhen(true)] out UmaName? umamusume)
         {
-            var matchingCards = names.Values
+            umamusume = names.GetValueOrDefault(id) as UmaName;
+            return umamusume is not null;
+        }
+
+        public UmaName GetRequiredUmamusume(int id)
+            => TryGetUmamusume(id, out var umamusume)
+                ? umamusume
+                : throw Missing(id, nameof(UmaName));
+
+        public int GetRequiredRSupportCardTypeByCharaId(int charaId)
+        {
+            var matches = names.Values
                 .OfType<SupportCardName>()
-                .Where(card => card.Id >= 10000 && card.Id <= 12000 && card.CharaId == charaId)
-                .ToList();
-
-            if (matchingCards.Count == 0)
-                return -1;
-            if (matchingCards.Count > 1)
-                throw new Exception($"找到多个CharaId为{charaId}且ID介于10000和12000之间的SupportCardName。");
-
-            return matchingCards[0].Type;
+                .Where(card => card.Id is >= 10000 and <= 12000 && card.CharaId == charaId)
+                .Take(2)
+                .ToArray();
+            return matches.Length switch
+            {
+                1 => matches[0].Type,
+                0 => throw new KeyNotFoundException($"R 支援卡数据不存在: charaId={charaId}"),
+                _ => throw new InvalidDataException($"R 支援卡数据不唯一: charaId={charaId}")
+            };
         }
+
+        private static BaseName Clone(BaseName value) => value switch
+        {
+            SupportCardName card => new SupportCardName(card.Id, card.Name, card.Nickname, card.Type, card.CharaId),
+            UmaName uma => new UmaName(uma.Id, uma.Name, uma.Nickname, uma.CharaId),
+            _ => new BaseName(value.Id, value.Name, value.Nickname)
+        };
+
+        private static Exception Missing(int id, string expectedType)
+            => new KeyNotFoundException($"名称数据不存在或类型不符: id={id}, expected={expectedType}");
     }
 }

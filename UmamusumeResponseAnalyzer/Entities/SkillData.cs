@@ -8,7 +8,7 @@ namespace UmamusumeResponseAnalyzer.Entities
 {
     public class SkillData
     {
-        private string translatedName = null!;
+        private string? translatedName;
         public bool? IsScenarioEvolution { get; set; }
         public List<SkillData> Upgrades { get; set; } = [];
         /// <summary>
@@ -73,9 +73,38 @@ namespace UmamusumeResponseAnalyzer.Entities
         public SkillCategory Category { get; init; }
 
         public (int GroupId, int Rarity, int Rate) Deconstruction() => (GroupId, Rarity, Rate);
-        public SkillData Clone()
+        public SkillData Clone() => Clone(new(ReferenceEqualityComparer.Instance));
+
+        private SkillData Clone(Dictionary<SkillData, SkillData> clones)
         {
-            var clone = (SkillData)MemberwiseClone();
+            if (clones.TryGetValue(this, out var existing))
+                return existing;
+
+            var clone = new SkillData
+            {
+                IsScenarioEvolution = IsScenarioEvolution,
+                Name = Name,
+                translatedName = translatedName,
+                Id = Id,
+                GroupId = GroupId,
+                Rarity = Rarity,
+                Rate = Rate,
+                Grade = Grade,
+                Cost = Cost,
+                HintLevel = HintLevel,
+                DisplayOrder = DisplayOrder,
+                Propers = [.. Propers.Select(x => new SkillProper
+                {
+                    Ground = x.Ground,
+                    Distance = x.Distance,
+                    Style = x.Style
+                })],
+                Category = Category
+            };
+            clones.Add(this, clone);
+            clone.Upgrades = [.. Upgrades.Select(x => x.Clone(clones))];
+            clone.Superior = Superior?.Clone(clones);
+            clone.Inferior = Inferior?.Clone(clones);
             return clone;
         }
     }
@@ -150,13 +179,10 @@ namespace UmamusumeResponseAnalyzer.Entities
         public bool CanUpgrade(SingleModeChara chara_info, out int upgradedSkillId, IEnumerable<SkillData> skills)
         {
             upgradedSkillId = default;
-            // 不存在技能进化信息时直接返回，是针对繁中服的兼容性判断
-            if (chara_info.skill_upgrade_info_array == null) return false;
             // 角色天赋等级低于该技能所需的天赋等级，无法进化
             if (chara_info.talent_level < Rank) return false;
 
             // 当前剧本所拥有的、针对当前天赋技能的特殊条件
-#warning TODO
             // 剧本6满足要求后所有技能都能进化，但其他剧本不全是，需要挨个检查
             var currentScenarioConditions = SCENARIO_CONDITIONS.Where(x => x.ScenarioId == chara_info.scenario_id && x.Rank == Rank);
             if (currentScenarioConditions.Any())
@@ -249,7 +275,7 @@ namespace UmamusumeResponseAnalyzer.Entities
                                 var properType = SkillProper.GroundType.Dirt;
                                 return currentCount + skills.Count(x => x.Propers.Any(y => y.Ground == properType)) >= AdditionalRequirement;
                             }
-                            throw new Exception($"出现了预料外的Requirement");
+                            throw new InvalidDataException($"未知的技能适性进化条件: conditionId={ConditionId}, requirement={Requirement}");
                         }
                     case ConditionType.Specific:
                         return skills.Any(x => x.Id == Requirement);
@@ -264,7 +290,7 @@ namespace UmamusumeResponseAnalyzer.Entities
                     case ConditionType.Stat:
                         return currentCount + skills.Count(x => x.Category == SkillCategory.Stat) >= Requirement;
                 }
-                return false;
+                throw new InvalidDataException($"未知的技能进化条件类型: conditionId={ConditionId}, type={Type}");
             }
             public enum ConditionType
             {

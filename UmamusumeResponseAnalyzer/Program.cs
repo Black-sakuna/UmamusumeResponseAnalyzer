@@ -15,37 +15,31 @@ namespace UmamusumeResponseAnalyzer
 {
     public static class UmamusumeResponseAnalyzer
     {
-        internal static Task _database_initialize_task = null!;
+        internal static Task<DatabaseAvailability> _database_initialize_task = null!;
         internal static Task _plugin_initialize_task = null!;
         public static bool Started => Server.IsRunning;
         const string PORTABLE_WORKING_DIRECTORY = "./.portable";
         public readonly static string WORKING_DIRECTORY = Directory.Exists(PORTABLE_WORKING_DIRECTORY) ? PORTABLE_WORKING_DIRECTORY : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UmamusumeResponseAnalyzer");
         public static async Task Main(string[] args)
         {
-            if (args is ["-v" or "--version"])
-            {
-                Console.Write(Assembly.GetExecutingAssembly().GetName().Version);
-                return;
-            }
-
             Console.Title = $"UmamusumeResponseAnalyzer v{Assembly.GetExecutingAssembly().GetName().Version}";
             Console.OutputEncoding = Encoding.UTF8;
             Environment.SetEnvironmentVariable("DOTNET_SYSTEM_NET_DISABLEIPV6", "true");
             if (!Directory.Exists(WORKING_DIRECTORY)) Directory.CreateDirectory(WORKING_DIRECTORY);
             Directory.SetCurrentDirectory(WORKING_DIRECTORY);
-            if (await TryHandleCliOnlyArgumentsAsync(args))
-                return;
-
-            if (Console.IsInputRedirected || Console.IsOutputRedirected)
-            {
-                Console.Error.WriteLine(
-                    "无法启动交互界面：stdin 或 stdout 已被重定向。请在 Windows Terminal 等交互式终端中直接运行 URA。");
-                Environment.ExitCode = 1;
-                return;
-            }
-
             try
             {
+                if (TryHandleCliOnlyArguments(args))
+                    return;
+
+                if (Console.IsInputRedirected || Console.IsOutputRedirected)
+                {
+                    Console.Error.WriteLine(
+                        "无法启动交互界面：stdin 或 stdout 已被重定向。请在 Windows Terminal 等交互式终端中直接运行 URA。");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+
                 await RunInteractiveOnDedicatedThreadAsync();
             }
             catch (PostShutdownProcessRequestedException ex)
@@ -150,7 +144,7 @@ namespace UmamusumeResponseAnalyzer
                 shutdownBindingAdded = true;
                 HotkeyManager.OverlaySink = uiHost;
 
-                await ResourceUpdater.TryUpdateProgram(cancellationToken: lifetimeCts.Token);
+                await ResourceUpdater.HandleStartupProgramUpdateAsync(lifetimeCts.Token);
                 if (Config.Core.ShowFirstRunPrompt)
                 {
                     try
@@ -205,8 +199,19 @@ namespace UmamusumeResponseAnalyzer
                         {
                             bootstrap.SetPhase("database", "数据文件", UiSeverity.Info, "正在加载事件、技能、名称等数据。");
                             _database_initialize_task = Database.Initialize();
-                            await Task.WhenAll(_database_initialize_task, _plugin_initialize_task);
-                            bootstrap.SetPhase("database", "数据文件", UiSeverity.Success, "加载完成；缺失或损坏项见日志。");
+                            var databaseAvailability = await _database_initialize_task;
+                            await _plugin_initialize_task;
+                            if (databaseAvailability != DatabaseAvailability.Ready)
+                            {
+                                const string message = "数据文件不完整或损坏；请更新全部数据文件后重新启动。";
+                                bootstrap.SetPhase("database", "数据文件", UiSeverity.Error, message);
+                                bootstrap.SetPhase("plugin-init", "插件初始化", UiSeverity.Error, "数据不可用，未初始化插件。");
+                                bootstrap.SetPhase("server", "HTTP server", UiSeverity.Error, "数据不可用，未启动监听。");
+                                bootstrap.Log("Database", message, UiSeverity.Error);
+                                Environment.ExitCode = 1;
+                                return false;
+                            }
+                            bootstrap.SetPhase("database", "数据文件", UiSeverity.Success, "已加载完整数据快照。");
 
                             lifetimeCts.Token.ThrowIfCancellationRequested();
                             bootstrap.SetPhase("plugin-init", "插件初始化", UiSeverity.Info, "正在调用插件 Initialize。");
@@ -749,7 +754,7 @@ namespace UmamusumeResponseAnalyzer
                 results.Count == 0 ? "未安装 Mod。" : string.Join(Environment.NewLine, results),
                 cancellationToken);
         }
-        static async Task<bool> TryHandleCliOnlyArgumentsAsync(string[] args)
+        static bool TryHandleCliOnlyArguments(string[] args)
         {
             switch (args)
             {
@@ -757,10 +762,7 @@ namespace UmamusumeResponseAnalyzer
                     Console.Write(Assembly.GetExecutingAssembly().GetName().Version);
                     return true;
                 case ["--update", var savePath]:
-                    await ResourceUpdater.TryUpdateProgram(savePath);
-                    return true;
-                case ["--update-data", var archivePath]:
-                    ZipFile.ExtractToDirectory(archivePath, "./");
+                    ResourceUpdater.InstallProgramUpdate(savePath);
                     return true;
                 case ["--enable-dll-redirection", "--confirmed"]:
                     UraCoreHelper.EnableDllRedirection();
@@ -770,8 +772,12 @@ namespace UmamusumeResponseAnalyzer
                         "拒绝修改注册表：缺少确认参数。请从 URA 的 Mod 安装流程发起该操作。");
                     Environment.ExitCode = 1;
                     return true;
-                default:
+                case []:
                     return false;
+                default:
+                    Console.Error.WriteLine($"未知命令行选项: {string.Join(' ', args)}");
+                    Environment.ExitCode = 2;
+                    return true;
             }
         }
         internal static void ApplyCultureInfo()

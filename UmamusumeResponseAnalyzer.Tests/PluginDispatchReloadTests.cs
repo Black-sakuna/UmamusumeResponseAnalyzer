@@ -1,8 +1,12 @@
+using System.Net;
+using System.Net.Sockets;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Runtime.Loader;
 using Terminal.Gui.Input;
 using UmamusumeResponseAnalyzer.Plugin;
 using UmamusumeResponseAnalyzer.TerminalGui;
+using WatsonWebserver.Lite;
 using Xunit;
 
 namespace UmamusumeResponseAnalyzer.Tests;
@@ -12,6 +16,9 @@ public sealed class PluginDispatchReloadTests : IDisposable
 {
     const string PluginName = "DisposeBarrierPlugin";
     const string StartedPluginName = "StartedBarrierPlugin";
+    const string CallbackFriendPluginName = "PluginRuntimeSmoke";
+    const string AccountIndexPath = "/umamusume/account/index";
+    const string CreatedPhaseScenario = "dispatch-reload-created-phase";
 
     readonly string originalCwd = Directory.GetCurrentDirectory();
     readonly string tempDir = Path.Combine(Path.GetTempPath(), "ura-dispatch-reload-" + Guid.NewGuid().ToString("N"));
@@ -19,7 +26,6 @@ public sealed class PluginDispatchReloadTests : IDisposable
     readonly string disposeEntered;
     readonly string disposeRelease;
     readonly string callbackLog;
-    readonly string statusGetterLog;
     readonly string startedDisposeEntered;
     readonly string startedDisposeRelease;
     readonly string startedDisposeLog;
@@ -28,7 +34,11 @@ public sealed class PluginDispatchReloadTests : IDisposable
     public PluginDispatchReloadTests(PluginRuntimeFixture runtime)
     {
         SeedConfig();
-        ResetPluginState();
+        if (!string.Equals(
+                Environment.GetEnvironmentVariable(TerminalUiLifecycleChildProcess.ScenarioEnvironmentVariable),
+                CreatedPhaseScenario,
+                StringComparison.Ordinal))
+            PluginManager.ShutdownAsync().GetAwaiter().GetResult();
         HotkeyManager.UnregisterAll();
         HotkeyManager.OverlaySink = runtime.Host;
 
@@ -38,7 +48,6 @@ public sealed class PluginDispatchReloadTests : IDisposable
         disposeEntered = Path.Combine(tempDir, "dispose-entered");
         disposeRelease = Path.Combine(tempDir, "dispose-release");
         callbackLog = Path.Combine(tempDir, "callback.log");
-        statusGetterLog = Path.Combine(tempDir, "status-getter.log");
         startedDisposeEntered = Path.Combine(tempDir, "started-dispose-entered");
         startedDisposeRelease = Path.Combine(tempDir, "started-dispose-release");
         startedDisposeLog = Path.Combine(tempDir, "started-dispose.log");
@@ -47,163 +56,187 @@ public sealed class PluginDispatchReloadTests : IDisposable
 
     public void Dispose()
     {
-        ResetPluginState();
-        HotkeyManager.UnregisterAll();
-        Directory.SetCurrentDirectory(originalCwd);
-        try { Directory.Delete(tempDir, recursive: true); }
-        catch { }
+        foreach (var release in new[]
+                 {
+                     disposeRelease,
+                     startedDisposeRelease,
+                     Path.Combine(tempDir, "snapshot-release"),
+                     Path.Combine(tempDir, "background-release"),
+                 })
+            File.WriteAllText(release, "release");
+
+        try
+        {
+            PluginManager.ShutdownAsync().GetAwaiter().GetResult();
+        }
+        finally
+        {
+            HotkeyManager.UnregisterAll();
+            Directory.SetCurrentDirectory(originalCwd);
+            try { Directory.Delete(tempDir, recursive: true); }
+            catch { }
+        }
     }
 
     [Fact]
-    public async Task ReloadClosesAdmissionBeforeDisposeAndUnloadsContext()
+    public async Task ReloadClosesAdmissionBeforeDisposeAndReplacesGeneration()
     {
-        var oldContext = await ReloadWhileDisposeIsBlockedAsync();
-
-        for (var i = 0; oldContext.IsAlive && i < 20; i++)
+        const string scenario = "dispatch-reload-dispose-barrier";
+        if (TerminalUiLifecycleChildProcess.IsChild(scenario))
         {
-            GC.Collect();
-            GC.WaitForPendingFinalizers();
-            GC.Collect();
+            await ReloadWhileDisposeIsBlockedAsync();
+            TerminalUiLifecycleChildProcess.WriteResult("ok");
+            return;
         }
 
-        Assert.False(oldContext.IsAlive, "reload 后旧 collectible ALC 未被回收");
+        Assert.Equal(
+            "ok",
+            await TerminalUiLifecycleProcessTests.RunChildAsync(
+                scenario,
+                typeof(PluginDispatchReloadTests),
+                nameof(ReloadClosesAdmissionBeforeDisposeAndReplacesGeneration)));
     }
 
     [Fact]
     public async Task AnalyzerSnapshotLeasesLaterGenerationUntilBlockedCallbackCompletes()
     {
-        var laterContext = await UnloadSnapshottedAnalyzerBehindBlockedCallbackAsync();
-
-        for (var i = 0; laterContext.IsAlive && i < 20; i++)
+        const string scenario = "dispatch-reload-snapshot-lease";
+        if (TerminalUiLifecycleChildProcess.IsChild(scenario))
         {
-            GC.Collect();
-            GC.WaitForPendingFinalizers();
-            GC.Collect();
+            await UnloadSnapshottedAnalyzerBehindBlockedCallbackAsync();
+            TerminalUiLifecycleChildProcess.WriteResult("ok");
+            return;
         }
 
-        Assert.False(laterContext.IsAlive, "unload 返回后 analyzer snapshot 仍钉住后续 plugin ALC");
-    }
-
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    async Task<WeakReference> UnloadSnapshottedAnalyzerBehindBlockedCallbackAsync()
-    {
-        const string blockingName = "SnapshotBlockingAnalyzer";
-        const string laterName = "SnapshotLaterAnalyzer";
-        var entered = Path.Combine(tempDir, "snapshot-entered");
-        var release = Path.Combine(tempDir, "snapshot-release");
-        var lifecycle = Path.Combine(tempDir, "snapshot-lifecycle.log");
-        PluginCompiler.Compile(
-            SnapshotAnalyzerPluginSource(blockingName, lifecycle, priority: -10, entered, release),
-            blockingName,
-            Path.Combine(tempDir, "Plugins", $"{blockingName}.dll"));
-        PluginCompiler.Compile(
-            SnapshotAnalyzerPluginSource(laterName, lifecycle, priority: 10),
-            laterName,
-            Path.Combine(tempDir, "Plugins", $"{laterName}.dll"));
-        PluginManager.Init();
-        PluginManager.InitializeLoadedPlugins();
-        var laterContext = new WeakReference(PluginManager.Contexts[laterName]);
-
-        var dispatch = Task.Run(async () =>
-            await Server.DispatchResponse("/umamusume/account/index", [0xC0]));
-        await WaitUntilAsync(() => File.Exists(entered));
-        var unload = Task.Run(() => PluginManager.UnloadPluginsAsync(laterName));
-        Assert.False(unload.IsCompleted);
-        Assert.Equal([$"{blockingName}:entered"], File.ReadAllLines(lifecycle));
-
-        File.WriteAllText(release, "release");
-        await dispatch.WaitAsync(TimeSpan.FromSeconds(5));
-        AssertLifecycleOutcome(
-            await unload.WaitAsync(TimeSpan.FromSeconds(5)),
-            laterName);
         Assert.Equal(
-            [
-                $"{blockingName}:entered",
-                $"{blockingName}:released",
-                $"{laterName}:callback",
-                $"{laterName}:dispose",
-            ],
-            File.ReadAllLines(lifecycle));
-        return laterContext;
+            "ok",
+            await TerminalUiLifecycleProcessTests.RunChildAsync(
+                scenario,
+                typeof(PluginDispatchReloadTests),
+                nameof(AnalyzerSnapshotLeasesLaterGenerationUntilBlockedCallbackCompletes)));
     }
 
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    async Task<WeakReference> ReloadWhileDisposeIsBlockedAsync()
+    [Fact]
+    public async Task SamePriorityDispatchPreservesPackageAndDeclarationOrder()
     {
-        PluginCompiler.Compile(
-            PluginSource(),
-            PluginName,
-            Path.Combine(tempDir, "Plugins", $"{PluginName}.dll"));
+        const string scenario = "dispatch-reload-stable-order";
+        if (TerminalUiLifecycleChildProcess.IsChild(scenario))
+        {
+            var log = Path.Combine(tempDir, "stable-order.log");
+            CompilePackage(StableOrderPluginSource("AOrderPlugin", log));
+            CompilePackage(StableOrderPluginSource("BOrderPlugin", log));
+            PluginManager.Init();
+            PluginManager.InitializeLoadedPlugins();
+
+            await WithServerAsync(port => PostPacketAsync(port, AnalyzerKind.Response, AccountIndexPath, [0xC0]));
+
+            Assert.Equal(["AOrderPlugin:1", "AOrderPlugin:2", "BOrderPlugin:1", "BOrderPlugin:2"], File.ReadAllLines(log));
+            TerminalUiLifecycleChildProcess.WriteResult("ok");
+            return;
+        }
+
+        Assert.Equal(
+            "ok",
+            await TerminalUiLifecycleProcessTests.RunChildAsync(
+                scenario,
+                typeof(PluginDispatchReloadTests),
+                nameof(SamePriorityDispatchPreservesPackageAndDeclarationOrder)));
+    }
+
+    [Fact]
+    public async Task FailedInitializePublishesNeitherAnalyzerNorBackgroundOperation()
+    {
+        const string scenario = "dispatch-reload-initialize-atomic";
+        if (TerminalUiLifecycleChildProcess.IsChild(scenario))
+        {
+            const string pluginName = "AtomicInitializePlugin";
+            var analyzerLog = Path.Combine(tempDir, "atomic-initialize-analyzer.log");
+            var backgroundLog = Path.Combine(tempDir, "atomic-initialize-background.log");
+            CompilePackage(AtomicInitializePluginSource(pluginName, analyzerLog, backgroundLog));
+            PluginManager.Init();
+            PluginManager.InitializeLoadedPlugins();
+
+            var status = Assert.Single(
+                PluginManager.InspectPluginStatuses(),
+                candidate => candidate.InternalName == pluginName);
+            Assert.False(status.IsLoaded);
+            Assert.True(status.IsAvailable);
+            await WithServerAsync(port => PostPacketAsync(port, AnalyzerKind.Response, AccountIndexPath, [0xC0]));
+            Assert.False(File.Exists(analyzerLog));
+            Assert.False(File.Exists(backgroundLog));
+
+            TerminalUiLifecycleChildProcess.WriteResult("ok");
+            return;
+        }
+
+        Assert.Equal(
+            "ok",
+            await TerminalUiLifecycleProcessTests.RunChildAsync(
+                scenario,
+                typeof(PluginDispatchReloadTests),
+                nameof(FailedInitializePublishesNeitherAnalyzerNorBackgroundOperation)));
+    }
+
+    [Fact]
+    public async Task FailedStartedCallbackPublishesNeitherAnalyzerNorBackgroundOperation()
+    {
+        const string scenario = "dispatch-reload-started-atomic";
+        if (TerminalUiLifecycleChildProcess.IsChild(scenario))
+        {
+            const string pluginName = "AtomicStartedPlugin";
+            var analyzerLog = Path.Combine(tempDir, "atomic-started-analyzer.log");
+            var backgroundLog = Path.Combine(tempDir, "atomic-started-background.log");
+            CompilePackage(AtomicStartedPluginSource(pluginName, analyzerLog, backgroundLog));
+            PluginManager.Init();
+            PluginManager.InitializeLoadedPlugins();
+            await PluginManager.TriggerStartedAsync();
+
+            await WithServerAsync(port => PostPacketAsync(port, AnalyzerKind.Response, AccountIndexPath, [0xC0]));
+            Assert.False(File.Exists(analyzerLog));
+            Assert.False(File.Exists(backgroundLog));
+
+            TerminalUiLifecycleChildProcess.WriteResult("ok");
+            return;
+        }
+
+        Assert.Equal(
+            "ok",
+            await TerminalUiLifecycleProcessTests.RunChildAsync(
+                scenario,
+                typeof(PluginDispatchReloadTests),
+                nameof(FailedStartedCallbackPublishesNeitherAnalyzerNorBackgroundOperation)));
+    }
+
+    [Fact]
+    public async Task UnloadCancelsAndDrainsBackgroundBeforeDispose()
+    {
+        const string pluginName = "BackgroundBarrierPlugin";
+        var entered = Path.Combine(tempDir, "background-entered");
+        var release = Path.Combine(tempDir, "background-release");
+        var lifecycle = Path.Combine(tempDir, "background-lifecycle.log");
+        CompilePackage(BackgroundBarrierPluginSource(pluginName, entered, release, lifecycle));
         PluginManager.Init();
         PluginManager.InitializeLoadedPlugins();
+        await WaitUntilAsync(() => File.Exists(entered));
 
-        var initialStatus = Assert.Single(
-            PluginManager.InspectPluginStatuses(),
-            status => status.InternalName == PluginName);
-        Assert.True(initialStatus.IsLoaded);
-        var statusGettersBeforeReload = File.ReadAllLines(statusGetterLog);
+        var unload = PluginManager.UnloadPluginsAsync(pluginName);
+        await WaitUntilAsync(() => File.Exists(lifecycle) &&
+                                   File.ReadAllLines(lifecycle).Contains("background-canceled"));
 
-        var oldContext = new WeakReference(PluginManager.Contexts[PluginName]);
-        await Server.DispatchResponse("/umamusume/account/index", [0xC0]);
-        Assert.Equal(["entered"], File.ReadAllLines(callbackLog));
+        Assert.False(unload.IsCompleted);
+        Assert.DoesNotContain("disposed", File.ReadAllLines(lifecycle));
+        File.WriteAllText(release, "release");
 
-        var reload = Task.Run(async () =>
-            await PluginManager.ReloadPluginsAsync(PluginName));
-        var reloadWaited = false;
-        Exception? observationError = null;
-        Exception? lateDispatchError = null;
-        string[] callbacksWhileDisposing = [];
-        PluginManager.PluginRuntimeStatus? statusWhileDisposing = null;
-        string[] statusGettersWhileDisposing = [];
-        try
-        {
-            await WaitUntilAsync(() => File.Exists(disposeEntered));
-            reloadWaited = !reload.IsCompleted;
-            statusWhileDisposing = Assert.Single(
-                PluginManager.InspectPluginStatuses(),
-                status => status.InternalName == PluginName);
-            statusGettersWhileDisposing = File.ReadAllLines(statusGetterLog);
-            lateDispatchError = await Record.ExceptionAsync(async () =>
-                await Server.DispatchResponse("/umamusume/account/index", [0xC0]).AsTask()
-                    .WaitAsync(TimeSpan.FromSeconds(5)));
-            callbacksWhileDisposing = File.ReadAllLines(callbackLog);
-        }
-        catch (Exception ex)
-        {
-            observationError = ex;
-        }
-        finally
-        {
-            File.WriteAllText(disposeRelease, "release");
-        }
-
-        IReadOnlyList<PluginManager.PluginLifecycleResult>? reloadResults = null;
-        var reloadError = await Record.ExceptionAsync(async () =>
-        {
-            reloadResults = await reload.WaitAsync(TimeSpan.FromSeconds(5));
-        });
-
-        Assert.Null(observationError);
-        Assert.True(reloadWaited, "plugin Dispose 尚未返回时 reload 不应完成");
-        Assert.NotNull(statusWhileDisposing);
-        Assert.False(statusWhileDisposing.IsLoaded);
-        Assert.Equal(statusGettersBeforeReload, statusGettersWhileDisposing);
-        Assert.Null(lateDispatchError);
-        Assert.Equal(["entered"], callbacksWhileDisposing);
-        Assert.IsNotType<SynchronizationLockException>(reloadError);
-        Assert.Null(reloadError);
-        AssertLifecycleOutcome(reloadResults!, PluginName);
-        Assert.Equal("disposed", File.ReadAllText(disposeLog));
-        return oldContext;
+        AssertLifecycleOutcome(await unload.WaitAsync(TimeSpan.FromSeconds(5)), pluginName);
+        Assert.Equal(
+            ["background-entered", "background-canceled", "background-drained", "disposed"],
+            File.ReadAllLines(lifecycle));
     }
 
     [Fact]
     public async Task StartedEventIsRejectedWhileUnloadDisposeIsBlocked()
     {
-        PluginCompiler.Compile(
-            StartedPluginSource(),
-            StartedPluginName,
-            Path.Combine(tempDir, "Plugins", $"{StartedPluginName}.dll"));
+        CompilePackage(StartedPluginSource());
         PluginManager.Init();
         PluginManager.InitializeLoadedPlugins();
         var plugin = Assert.Single(
@@ -239,7 +272,7 @@ public sealed class PluginDispatchReloadTests : IDisposable
 
         Assert.Null(observationError);
         Assert.True(unloadWaited, "plugin Dispose 尚未返回时 unload 不应完成");
-        Assert.Null(lateStartedError);
+        Assert.IsType<InvalidOperationException>(lateStartedError);
         Assert.Empty(callbackOutput);
         AssertLifecycleOutcome(unloadResults, StartedPluginName);
         Assert.Equal("disposed", File.ReadAllText(startedDisposeLog));
@@ -252,14 +285,8 @@ public sealed class PluginDispatchReloadTests : IDisposable
         const string healthyName = "HealthyDisposePlugin";
         var failingLog = Path.Combine(tempDir, "failing-dispose.log");
         var healthyLog = Path.Combine(tempDir, "healthy-dispose.log");
-        PluginCompiler.Compile(
-            DisposePluginSource(failingName, failingLog, fail: true),
-            failingName,
-            Path.Combine(tempDir, "Plugins", $"{failingName}.dll"));
-        PluginCompiler.Compile(
-            DisposePluginSource(healthyName, healthyLog, fail: false),
-            healthyName,
-            Path.Combine(tempDir, "Plugins", $"{healthyName}.dll"));
+        CompilePackage(DisposePluginSource(failingName, failingLog, fail: true));
+        CompilePackage(DisposePluginSource(healthyName, healthyLog, fail: false));
         PluginManager.Init();
         PluginManager.InitializeLoadedPlugins();
 
@@ -279,10 +306,7 @@ public sealed class PluginDispatchReloadTests : IDisposable
         const string pluginName = "BlockingConstructorPlugin";
         var constructorEntered = Path.Combine(tempDir, "constructor-entered");
         var constructorRelease = Path.Combine(tempDir, "constructor-release");
-        PluginCompiler.Compile(
-            BlockingConstructorPluginSource(pluginName, constructorEntered, constructorRelease),
-            pluginName,
-            Path.Combine(tempDir, "Plugins", $"{pluginName}.dll"));
+        CompilePackage(BlockingConstructorPluginSource(pluginName, constructorEntered, constructorRelease));
 
         var initialize = Task.Run(PluginManager.Init);
         try
@@ -292,7 +316,7 @@ public sealed class PluginDispatchReloadTests : IDisposable
             Assert.Contains("已有插件 lifecycle 事务", secondInit.Message, StringComparison.Ordinal);
             var unload = await Assert.ThrowsAsync<InvalidOperationException>(
                 () => PluginManager.UnloadPluginsAsync(pluginName));
-            Assert.Contains("已有插件热重载事务", unload.Message, StringComparison.Ordinal);
+            Assert.Contains("已有插件 lifecycle 事务", unload.Message, StringComparison.Ordinal);
         }
         finally
         {
@@ -309,10 +333,7 @@ public sealed class PluginDispatchReloadTests : IDisposable
         var initializeEntered = Path.Combine(tempDir, "initialize-entered");
         var initializeRelease = Path.Combine(tempDir, "initialize-release");
         var disposeOutput = Path.Combine(tempDir, "initialize-dispose.log");
-        PluginCompiler.Compile(
-            BlockingInitializePluginSource(pluginName, initializeEntered, initializeRelease, disposeOutput),
-            pluginName,
-            Path.Combine(tempDir, "Plugins", $"{pluginName}.dll"));
+        CompilePackage(BlockingInitializePluginSource(pluginName, initializeEntered, initializeRelease, disposeOutput));
         PluginManager.Init();
 
         var initialize = Task.Run(PluginManager.InitializeLoadedPlugins);
@@ -331,7 +352,7 @@ public sealed class PluginDispatchReloadTests : IDisposable
 
         await initialize.WaitAsync(TimeSpan.FromSeconds(5));
         var transactionError = Assert.IsType<InvalidOperationException>(concurrentUnloadError);
-        Assert.Contains("已有插件热重载事务", transactionError.Message, StringComparison.Ordinal);
+        Assert.Contains("已有插件 lifecycle 事务", transactionError.Message, StringComparison.Ordinal);
 
         AssertLifecycleOutcome(await PluginManager.UnloadPluginsAsync(pluginName), pluginName);
         Assert.Equal(["disposed"], File.ReadAllLines(disposeOutput));
@@ -344,10 +365,7 @@ public sealed class PluginDispatchReloadTests : IDisposable
         var callbackEntered = Path.Combine(tempDir, "hotkey-callback-entered");
         var callbackRelease = Path.Combine(tempDir, "hotkey-callback-release");
         var lifecycleLog = Path.Combine(tempDir, "hotkey-lifecycle.log");
-        PluginCompiler.Compile(
-            HotkeyBarrierPluginSource(pluginName, callbackEntered, callbackRelease, lifecycleLog),
-            pluginName,
-            Path.Combine(tempDir, "Plugins", $"{pluginName}.dll"));
+        CompilePackage(HotkeyBarrierPluginSource(pluginName, callbackEntered, callbackRelease, lifecycleLog));
         PluginManager.Init();
         Assert.False(Server.IsRunning, "前置条件:Hotkey unload barrier 测试中 HTTP server 未启动");
         PluginManager.InitializeLoadedPlugins();
@@ -374,14 +392,386 @@ public sealed class PluginDispatchReloadTests : IDisposable
 
         File.WriteAllText(callbackRelease, "release");
         await callback.WaitAsync(TimeSpan.FromSeconds(5));
-        AssertLifecycleOutcome(
-            await unload.WaitAsync(TimeSpan.FromSeconds(5)),
-            pluginName);
+        AssertLifecycleOutcome(await unload.WaitAsync(TimeSpan.FromSeconds(5)), pluginName);
         Assert.Equal(
             ["callback-entered", "callback-released", "disposed"],
             File.ReadAllLines(lifecycleLog));
         Assert.False(await HotkeyManager.HandleKeyAsync(Key.F6));
     }
+
+    [Fact]
+    public async Task CreatedPhaseAllowsOnlyInitAndRejectsOtherLifecycleOperations()
+    {
+        if (TerminalUiLifecycleChildProcess.IsChild(CreatedPhaseScenario))
+        {
+            const string pluginName = "CreatedPhasePlugin";
+            CompilePackage(NoopPluginSource(pluginName));
+
+            AssertPhaseFailure(
+                Assert.Throws<InvalidOperationException>(PluginManager.InitializeLoadedPlugins),
+                "Created");
+            AssertPhaseFailure(
+                await Assert.ThrowsAsync<InvalidOperationException>(() => PluginManager.TriggerStartedAsync()),
+                "Created");
+            AssertHotLifecyclePhaseFailure(
+                await Assert.ThrowsAsync<InvalidOperationException>(() => PluginManager.LoadPluginsAsync(pluginName)),
+                "Created");
+            AssertHotLifecyclePhaseFailure(
+                await Assert.ThrowsAsync<InvalidOperationException>(() => PluginManager.ReloadPluginsAsync(pluginName)),
+                "Created");
+            AssertHotLifecyclePhaseFailure(
+                await Assert.ThrowsAsync<InvalidOperationException>(() => PluginManager.UnloadPluginsAsync(pluginName)),
+                "Created");
+
+            PluginManager.Init();
+            Assert.Contains(
+                PluginManager.SnapshotLoadedPlugins(),
+                plugin => PluginManager.InternalName(plugin) == pluginName);
+            TerminalUiLifecycleChildProcess.WriteResult("ok");
+            return;
+        }
+
+        Assert.Equal(
+            "ok",
+            await TerminalUiLifecycleProcessTests.RunChildAsync(
+                CreatedPhaseScenario,
+                typeof(PluginDispatchReloadTests),
+                nameof(CreatedPhaseAllowsOnlyInitAndRejectsOtherLifecycleOperations)));
+    }
+
+    [Fact]
+    public async Task LifecyclePhasesAreMonotonicAndIdempotent()
+    {
+        const string scenario = "dispatch-reload-phase-contract";
+        if (!TerminalUiLifecycleChildProcess.IsChild(scenario))
+        {
+            Assert.Equal(
+                "ok",
+                await TerminalUiLifecycleProcessTests.RunChildAsync(
+                    scenario,
+                    typeof(PluginDispatchReloadTests),
+                    nameof(LifecyclePhasesAreMonotonicAndIdempotent)));
+            return;
+        }
+
+        const string pluginName = "PhaseContractPlugin";
+        var lifecycleLog = Path.Combine(tempDir, "phase-contract.log");
+        CompilePackage(PhaseContractPluginSource(pluginName, lifecycleLog));
+
+        PluginManager.Init();
+        AssertPhaseFailure(Assert.Throws<InvalidOperationException>(PluginManager.Init), "Loaded");
+        AssertLifecycleOutcome(await PluginManager.LoadPluginsAsync(pluginName), pluginName);
+        AssertLifecycleOutcome(await PluginManager.ReloadPluginsAsync(pluginName), pluginName);
+        AssertLifecycleOutcome(await PluginManager.UnloadPluginsAsync(pluginName), pluginName);
+        AssertLifecycleOutcome(await PluginManager.LoadPluginsAsync(pluginName), pluginName);
+        AssertPhaseFailure(
+            await Assert.ThrowsAsync<InvalidOperationException>(() => PluginManager.TriggerStartedAsync()),
+            "Loaded");
+
+        PluginManager.InitializeLoadedPlugins();
+        AssertPhaseFailure(Assert.Throws<InvalidOperationException>(PluginManager.Init), "Initialized");
+        PluginManager.InitializeLoadedPlugins();
+        Assert.Equal(["initialize"], File.ReadAllLines(lifecycleLog));
+
+        await PluginManager.TriggerStartedAsync();
+        await PluginManager.TriggerStartedAsync();
+        AssertPhaseFailure(Assert.Throws<InvalidOperationException>(PluginManager.Init), "Started");
+        PluginManager.InitializeLoadedPlugins();
+        await PluginManager.TriggerStartedAsync();
+        Assert.Equal(["initialize", "started"], File.ReadAllLines(lifecycleLog));
+
+        await PluginManager.ShutdownAsync();
+        Assert.Empty(PluginManager.SnapshotLoadedPlugins());
+        Assert.Empty(PluginManager.Metadatas);
+        AssertPhaseFailure(
+            Assert.Throws<InvalidOperationException>(PluginManager.InitializeLoadedPlugins),
+            "Stopped");
+        AssertPhaseFailure(
+            await Assert.ThrowsAsync<InvalidOperationException>(() => PluginManager.TriggerStartedAsync()),
+            "Stopped");
+        AssertHotLifecyclePhaseFailure(
+            await Assert.ThrowsAsync<InvalidOperationException>(() => PluginManager.LoadPluginsAsync(pluginName)),
+            "Stopped");
+        AssertHotLifecyclePhaseFailure(
+            await Assert.ThrowsAsync<InvalidOperationException>(() => PluginManager.ReloadPluginsAsync(pluginName)),
+            "Stopped");
+        AssertHotLifecyclePhaseFailure(
+            await Assert.ThrowsAsync<InvalidOperationException>(() => PluginManager.UnloadPluginsAsync(pluginName)),
+            "Stopped");
+
+        PluginManager.Init();
+        Assert.Contains(
+            PluginManager.SnapshotLoadedPlugins(),
+            plugin => PluginManager.InternalName(plugin) == pluginName);
+        TerminalUiLifecycleChildProcess.WriteResult("ok");
+    }
+
+    [Fact]
+    public async Task ShuttingDownPhaseRejectsOtherLifecycleOperations()
+    {
+        const string scenario = "dispatch-reload-shutting-down-phase";
+        if (!TerminalUiLifecycleChildProcess.IsChild(scenario))
+        {
+            Assert.Equal(
+                "ok",
+                await TerminalUiLifecycleProcessTests.RunChildAsync(
+                    scenario,
+                    typeof(PluginDispatchReloadTests),
+                    nameof(ShuttingDownPhaseRejectsOtherLifecycleOperations)));
+            return;
+        }
+
+        CompilePackage(PluginSource());
+        PluginManager.Init();
+        PluginManager.InitializeLoadedPlugins();
+
+        var shutdown = Task.Run(PluginManager.ShutdownAsync);
+        try
+        {
+            await WaitUntilAsync(() => File.Exists(disposeEntered));
+            AssertPhaseFailure(Assert.Throws<InvalidOperationException>(PluginManager.Init), "ShuttingDown");
+            AssertPhaseFailure(
+                Assert.Throws<InvalidOperationException>(PluginManager.InitializeLoadedPlugins),
+                "ShuttingDown");
+            AssertPhaseFailure(
+                await Assert.ThrowsAsync<InvalidOperationException>(() => PluginManager.TriggerStartedAsync()),
+                "ShuttingDown");
+            AssertHotLifecyclePhaseFailure(
+                await Assert.ThrowsAsync<InvalidOperationException>(() => PluginManager.LoadPluginsAsync(PluginName)),
+                "ShuttingDown");
+            AssertHotLifecyclePhaseFailure(
+                await Assert.ThrowsAsync<InvalidOperationException>(() => PluginManager.ReloadPluginsAsync(PluginName)),
+                "ShuttingDown");
+            AssertHotLifecyclePhaseFailure(
+                await Assert.ThrowsAsync<InvalidOperationException>(() => PluginManager.UnloadPluginsAsync(PluginName)),
+                "ShuttingDown");
+        }
+        finally
+        {
+            File.WriteAllText(disposeRelease, "release");
+        }
+
+        await shutdown.WaitAsync(TimeSpan.FromSeconds(5));
+        TerminalUiLifecycleChildProcess.WriteResult("ok");
+    }
+
+    [Fact]
+    public async Task AnalyzerCallbackAwaitingSelfUnloadFailsFastWithoutDeadlock()
+    {
+        const string scenario = "dispatch-reload-self-unload";
+        if (TerminalUiLifecycleChildProcess.IsChild(scenario))
+        {
+            await AssertAnalyzerCallbackLifecycleReentryFailsFastAsync(shutdown: false);
+            TerminalUiLifecycleChildProcess.WriteResult("ok");
+            return;
+        }
+
+        Assert.Equal(
+            "ok",
+            await TerminalUiLifecycleProcessTests.RunChildAsync(
+                scenario,
+                typeof(PluginDispatchReloadTests),
+                nameof(AnalyzerCallbackAwaitingSelfUnloadFailsFastWithoutDeadlock)));
+    }
+
+    [Fact]
+    public async Task AnalyzerCallbackAwaitingShutdownFailsFastWithoutDeadlock()
+    {
+        const string scenario = "dispatch-reload-self-shutdown";
+        if (TerminalUiLifecycleChildProcess.IsChild(scenario))
+        {
+            await AssertAnalyzerCallbackLifecycleReentryFailsFastAsync(shutdown: true);
+            TerminalUiLifecycleChildProcess.WriteResult("ok");
+            return;
+        }
+
+        Assert.Equal(
+            "ok",
+            await TerminalUiLifecycleProcessTests.RunChildAsync(
+                scenario,
+                typeof(PluginDispatchReloadTests),
+                nameof(AnalyzerCallbackAwaitingShutdownFailsFastWithoutDeadlock)));
+    }
+
+    async Task AssertAnalyzerCallbackLifecycleReentryFailsFastAsync(bool shutdown)
+    {
+        var failureLog = Path.Combine(tempDir, shutdown ? "self-shutdown.log" : "self-unload.log");
+        CompilePackage(SelfLifecyclePluginSource(failureLog, shutdown));
+        PluginManager.Init();
+        PluginManager.InitializeLoadedPlugins();
+
+        await WithServerAsync(port => PostPacketAsync(
+                port,
+                AnalyzerKind.Response,
+                AccountIndexPath,
+                [0xC0]))
+            .WaitAsync(TimeSpan.FromSeconds(5));
+
+        var failure = File.ReadAllLines(failureLog);
+        Assert.True(failure.Length >= 2, $"callback lifecycle 结果不完整: {string.Join(" | ", failure)}");
+        Assert.Equal(typeof(InvalidOperationException).FullName, failure[0]);
+        Assert.Contains("插件 callback 内禁止启动 lifecycle 操作", failure[1], StringComparison.Ordinal);
+        Assert.Contains(
+            PluginManager.SnapshotLoadedPlugins(),
+            plugin => PluginManager.InternalName(plugin) == CallbackFriendPluginName);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    async Task UnloadSnapshottedAnalyzerBehindBlockedCallbackAsync()
+    {
+        const string blockingName = "SnapshotBlockingAnalyzer";
+        const string laterName = "SnapshotLaterAnalyzer";
+        var entered = Path.Combine(tempDir, "snapshot-entered");
+        var release = Path.Combine(tempDir, "snapshot-release");
+        var lifecycle = Path.Combine(tempDir, "snapshot-lifecycle.log");
+        CompilePackage(SnapshotAnalyzerPluginSource(blockingName, lifecycle, priority: -10, entered, release));
+        CompilePackage(SnapshotAnalyzerPluginSource(laterName, lifecycle, priority: 10));
+        PluginManager.Init();
+        PluginManager.InitializeLoadedPlugins();
+        await WithServerAsync(async port =>
+        {
+            var dispatch = PostPacketAsync(port, AnalyzerKind.Response, AccountIndexPath, [0xC0]);
+            await WaitUntilAsync(() => File.Exists(entered));
+            var unload = Task.Run(() => PluginManager.UnloadPluginsAsync(laterName));
+            Assert.False(unload.IsCompleted);
+            Assert.Equal([$"{blockingName}:entered"], File.ReadAllLines(lifecycle));
+
+            File.WriteAllText(release, "release");
+            await dispatch.WaitAsync(TimeSpan.FromSeconds(5));
+            AssertLifecycleOutcome(await unload.WaitAsync(TimeSpan.FromSeconds(5)), laterName);
+            Assert.Equal(
+                [
+                    $"{blockingName}:entered",
+                    $"{blockingName}:released",
+                    $"{laterName}:callback",
+                    $"{laterName}:dispose",
+                ],
+                File.ReadAllLines(lifecycle));
+        });
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    async Task ReloadWhileDisposeIsBlockedAsync()
+    {
+        CompilePackage(PluginSource());
+        PluginManager.Init();
+        PluginManager.InitializeLoadedPlugins();
+
+        var initialStatus = Assert.Single(
+            PluginManager.InspectPluginStatuses(),
+            status => status.InternalName == PluginName);
+        Assert.True(initialStatus.IsLoaded);
+        var oldContext = CapturePluginLoadContext(PluginName);
+
+        await WithServerAsync(async port =>
+        {
+            await PostPacketAsync(port, AnalyzerKind.Response, AccountIndexPath, [0xC0]);
+            Assert.Equal(["entered"], File.ReadAllLines(callbackLog));
+
+            var reload = Task.Run(() => PluginManager.ReloadPluginsAsync(PluginName));
+            var reloadWaited = false;
+            Exception? observationError = null;
+            Exception? lateDispatchError = null;
+            string[] callbacksWhileDisposing = [];
+            PluginManager.PluginRuntimeStatus? statusWhileDisposing = null;
+            try
+            {
+                await WaitUntilAsync(() => File.Exists(disposeEntered));
+                reloadWaited = !reload.IsCompleted;
+                statusWhileDisposing = Assert.Single(
+                    PluginManager.InspectPluginStatuses(),
+                    status => status.InternalName == PluginName);
+                lateDispatchError = await Record.ExceptionAsync(async () =>
+                    await PostPacketAsync(port, AnalyzerKind.Response, AccountIndexPath, [0xC0])
+                        .WaitAsync(TimeSpan.FromSeconds(5)));
+                callbacksWhileDisposing = File.ReadAllLines(callbackLog);
+            }
+            catch (Exception ex)
+            {
+                observationError = ex;
+            }
+            finally
+            {
+                File.WriteAllText(disposeRelease, "release");
+            }
+
+            IReadOnlyList<PluginManager.PluginLifecycleResult>? reloadResults = null;
+            var reloadError = await Record.ExceptionAsync(async () =>
+            {
+                reloadResults = await reload.WaitAsync(TimeSpan.FromSeconds(5));
+            });
+
+            Assert.Null(observationError);
+            Assert.True(reloadWaited, "plugin Dispose 尚未返回时 reload 不应完成");
+            Assert.NotNull(statusWhileDisposing);
+            Assert.False(statusWhileDisposing.IsLoaded);
+            Assert.Null(lateDispatchError);
+            Assert.Equal(["entered"], callbacksWhileDisposing);
+            Assert.IsNotType<SynchronizationLockException>(reloadError);
+            Assert.Null(reloadError);
+            AssertLifecycleOutcome(reloadResults!, PluginName);
+            Assert.Equal("disposed", File.ReadAllText(disposeLog));
+        });
+        Assert.NotSame(oldContext, CapturePluginLoadContext(PluginName));
+    }
+
+    async Task WithServerAsync(Func<int, Task> action)
+    {
+        var port = GetFreeTcpPort();
+        Server.Instance = new(
+            new WatsonWebserver.Core.WebserverSettings("127.0.0.1", port),
+            context => context.Response.Send(string.Empty));
+        Server.Start(TestContext.Current.CancellationToken);
+        try
+        {
+            await action(port);
+        }
+        finally
+        {
+            await Server.StopAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            Server.Instance = new(
+                new WatsonWebserver.Core.WebserverSettings("127.0.0.1", GetFreeTcpPort()),
+                context => context.Response.Send(string.Empty));
+        }
+    }
+
+    static async Task PostPacketAsync(
+        int port,
+        AnalyzerKind kind,
+        string canonicalUrl,
+        byte[] payload)
+    {
+        using var client = new HttpClient();
+        using var request = new HttpRequestMessage(
+            HttpMethod.Post,
+            $"http://127.0.0.1:{port}/notify/{kind.ToString().ToLowerInvariant()}");
+        request.Headers.Add("X-Hachimi-Game-Url", canonicalUrl);
+        request.Content = new ByteArrayContent(payload);
+        using var response = await client.SendAsync(request, TestContext.Current.CancellationToken);
+        response.EnsureSuccessStatusCode();
+    }
+
+    static int GetFreeTcpPort()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        return ((IPEndPoint)listener.LocalEndpoint).Port;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static AssemblyLoadContext CapturePluginLoadContext(string pluginName)
+    {
+        var plugin = Assert.Single(
+            PluginManager.SnapshotLoadedPlugins(),
+            candidate => PluginManager.InternalName(candidate) == pluginName);
+        return AssemblyLoadContext.GetLoadContext(plugin.GetType().Assembly)!;
+    }
+
+    void CompilePackage((string Name, string Source) plugin)
+        => PluginCompiler.CompilePackage(
+            plugin.Source,
+            plugin.Name,
+            Path.Combine(tempDir, "Plugins", $"{plugin.Name}.zip"));
 
     static async Task WaitUntilAsync(Func<bool> condition)
     {
@@ -399,54 +789,104 @@ public sealed class PluginDispatchReloadTests : IDisposable
         Assert.Equal(PluginManager.PluginLifecycleOutcome.Succeeded, result.Outcome);
     }
 
-    string PluginSource() => $$"""
+    static void AssertPhaseFailure(InvalidOperationException failure, string phase)
+        => Assert.Contains($"当前 phase={phase}", failure.Message, StringComparison.Ordinal);
+
+    static void AssertHotLifecyclePhaseFailure(InvalidOperationException failure, string phase)
+    {
+        AssertPhaseFailure(failure, phase);
+        Assert.Contains("不允许执行插件 load/reload/unload", failure.Message, StringComparison.Ordinal);
+    }
+
+    static (string Name, string Source) NoopPluginSource(string pluginName) => (pluginName, $$"""
+        using UmamusumeResponseAnalyzer.Plugin;
+
+        namespace {{pluginName}}Ns;
+
+        public sealed class Plugin : IPlugin
+        {
+            public void Initialize(IPluginContext context) { }
+        }
+        """);
+
+    static (string Name, string Source) PhaseContractPluginSource(string pluginName, string lifecycleLog) =>
+        (pluginName, $$"""
+        using System;
+        using System.IO;
+        using System.Threading.Tasks;
+        using UmamusumeResponseAnalyzer.Plugin;
+
+        namespace {{pluginName}}Ns;
+
+        public sealed class Plugin : IPlugin
+        {
+            public void Initialize(IPluginContext context)
+            {
+                File.AppendAllText(@"{{lifecycleLog}}", "initialize" + Environment.NewLine);
+                context.Events.OnStarted(_ =>
+                {
+                    File.AppendAllText(@"{{lifecycleLog}}", "started" + Environment.NewLine);
+                    return ValueTask.CompletedTask;
+                });
+            }
+        }
+        """);
+
+    static (string Name, string Source) SelfLifecyclePluginSource(string failureLog, bool shutdown)
+    {
+        var lifecycleCall = shutdown
+            ? "await PluginManager.ShutdownAsync();"
+            : $"await PluginManager.UnloadPluginsAsync(\"{CallbackFriendPluginName}\");";
+        return (CallbackFriendPluginName, $$"""
+            using System;
+            using System.IO;
+            using System.Threading.Tasks;
+            using UmamusumeResponseAnalyzer.Plugin;
+
+            namespace CallbackLifecycleReentry;
+
+            public sealed class Plugin : IPlugin
+            {
+                public void Initialize(IPluginContext context)
+                    => context.Analyzers.Register<ReadOnlyMemory<byte>>(
+                        AnalyzerKind.Response,
+                        [EndpointPattern.Exact("{{AccountIndexPath}}")],
+                        async _ =>
+                        {
+                            try
+                            {
+                                {{lifecycleCall}}
+                                File.WriteAllText(@"{{failureLog}}", "completed");
+                            }
+                            catch (Exception ex)
+                            {
+                                File.WriteAllLines(@"{{failureLog}}", [ex.GetType().FullName, ex.Message]);
+                            }
+                        });
+            }
+            """);
+    }
+
+    (string Name, string Source) PluginSource() => (PluginName, $$"""
         using System;
         using System.IO;
         using System.Threading;
         using System.Threading.Tasks;
-        using Gallop.Endpoints;
         using UmamusumeResponseAnalyzer.Plugin;
 
         namespace {{PluginName}}Ns;
 
         public sealed class Plugin : IPlugin
         {
-            public string Name
-            {
-                get
-                {
-                    File.AppendAllText(@"{{statusGetterLog}}", "Name" + Environment.NewLine);
-                    return "{{PluginName}}";
-                }
-            }
-
-            public string Author
-            {
-                get
-                {
-                    File.AppendAllText(@"{{statusGetterLog}}", "Author" + Environment.NewLine);
-                    return "test";
-                }
-            }
-
-            public Version Version
-            {
-                get
-                {
-                    File.AppendAllText(@"{{statusGetterLog}}", "Version" + Environment.NewLine);
-                    return new Version(1, 0);
-                }
-            }
-            public string[] Targets => Array.Empty<string>();
-
-            public void Initialize(IPluginContext context) { }
-
-            [ResponseAnalyzer<GameApi.Account.Index>]
-            public ValueTask Analyze(byte[] payload)
-            {
-                File.AppendAllText(@"{{callbackLog}}", "entered" + Environment.NewLine);
-                return ValueTask.CompletedTask;
-            }
+            public void Initialize(IPluginContext context)
+                => context.Analyzers.Register<ReadOnlyMemory<byte>>(
+                    AnalyzerKind.Response,
+                    new[] { EndpointPattern.Exact("{{AccountIndexPath}}") },
+                    invocation =>
+                    {
+                        File.AppendAllText(@"{{callbackLog}}", "entered" + Environment.NewLine);
+                        return ValueTask.CompletedTask;
+                    });
 
             public void Dispose()
             {
@@ -456,9 +896,10 @@ public sealed class PluginDispatchReloadTests : IDisposable
                 File.WriteAllText(@"{{disposeLog}}", "disposed");
             }
         }
-        """;
+        """);
 
-    static string DisposePluginSource(string pluginName, string disposeLog, bool fail) => $$"""
+    static (string Name, string Source) DisposePluginSource(string pluginName, string disposeLog, bool fail) =>
+        (pluginName, $$"""
         using System;
         using System.IO;
         using UmamusumeResponseAnalyzer.Plugin;
@@ -467,10 +908,6 @@ public sealed class PluginDispatchReloadTests : IDisposable
 
         public sealed class Plugin : IPlugin
         {
-            public string Name => "{{pluginName}}";
-            public string Author => "test";
-            public string[] Targets => Array.Empty<string>();
-
             public void Initialize(IPluginContext context) { }
 
             public void Dispose()
@@ -486,13 +923,12 @@ public sealed class PluginDispatchReloadTests : IDisposable
             public override string Message => throw new InvalidOperationException("Message getter failed");
             public override string ToString() => throw new InvalidOperationException("ToString failed");
         }
-        """;
+        """);
 
-    static string BlockingConstructorPluginSource(
+    static (string Name, string Source) BlockingConstructorPluginSource(
         string pluginName,
         string constructorEntered,
-        string constructorRelease) => $$"""
-        using System;
+        string constructorRelease) => (pluginName, $$"""
         using System.IO;
         using System.Threading;
         using UmamusumeResponseAnalyzer.Plugin;
@@ -508,18 +944,15 @@ public sealed class PluginDispatchReloadTests : IDisposable
                     Thread.Sleep(10);
             }
 
-            public string Name => "{{pluginName}}";
-            public string Author => "test";
-            public string[] Targets => Array.Empty<string>();
             public void Initialize(IPluginContext context) { }
         }
-        """;
+        """);
 
-    static string BlockingInitializePluginSource(
+    static (string Name, string Source) BlockingInitializePluginSource(
         string pluginName,
         string initializeEntered,
         string initializeRelease,
-        string disposeOutput) => $$"""
+        string disposeOutput) => (pluginName, $$"""
         using System;
         using System.IO;
         using System.Threading;
@@ -529,10 +962,6 @@ public sealed class PluginDispatchReloadTests : IDisposable
 
         public sealed class Plugin : IPlugin
         {
-            public string Name => "{{pluginName}}";
-            public string Author => "test";
-            public string[] Targets => Array.Empty<string>();
-
             public void Initialize(IPluginContext context)
             {
                 File.WriteAllText(@"{{initializeEntered}}", "entered");
@@ -543,9 +972,9 @@ public sealed class PluginDispatchReloadTests : IDisposable
             public void Dispose()
                 => File.AppendAllText(@"{{disposeOutput}}", "disposed" + Environment.NewLine);
         }
-        """;
+        """);
 
-    string StartedPluginSource() => $$"""
+    (string Name, string Source) StartedPluginSource() => (StartedPluginName, $$"""
         using System;
         using System.IO;
         using System.Threading;
@@ -556,10 +985,6 @@ public sealed class PluginDispatchReloadTests : IDisposable
 
         public sealed class Plugin : IPlugin
         {
-            public string Name => "{{StartedPluginName}}";
-            public string Author => "test";
-            public string[] Targets => Array.Empty<string>();
-
             public void Initialize(IPluginContext context)
             {
                 context.Events.OnStarted(_ =>
@@ -577,9 +1002,9 @@ public sealed class PluginDispatchReloadTests : IDisposable
                 File.WriteAllText(@"{{startedDisposeLog}}", "disposed");
             }
         }
-        """;
+        """);
 
-    static string SnapshotAnalyzerPluginSource(
+    static (string Name, string Source) SnapshotAnalyzerPluginSource(
         string pluginName,
         string lifecycle,
         int priority,
@@ -597,39 +1022,176 @@ public sealed class PluginDispatchReloadTests : IDisposable
                     await Task.Delay(10);
                 File.AppendAllText(@"{{lifecycle}}", "{{pluginName}}:released" + Environment.NewLine);
                 """;
-        return $$"""
+        return (pluginName, $$"""
             using System;
             using System.IO;
             using System.Threading.Tasks;
-            using Gallop.Endpoints;
             using UmamusumeResponseAnalyzer.Plugin;
 
             namespace {{pluginName}}Ns;
 
             public sealed class Plugin : IPlugin
             {
-                public string Name => "{{pluginName}}";
-                public string Author => "test";
-                public string[] Targets => Array.Empty<string>();
-                public void Initialize(IPluginContext context) { }
-
-                [ResponseAnalyzer<GameApi.Account.Index>({{priority}})]
-                public async ValueTask Analyze(byte[] payload)
-                {
-                    {{callback}}
-                }
+                public void Initialize(IPluginContext context)
+                    => context.Analyzers.Register<ReadOnlyMemory<byte>>(
+                        AnalyzerKind.Response,
+                        new[] { EndpointPattern.Exact("{{AccountIndexPath}}") },
+                        async invocation =>
+                        {
+                            {{callback}}
+                        },
+                        {{priority}});
 
                 public void Dispose()
                     => File.AppendAllText(@"{{lifecycle}}", "{{pluginName}}:dispose" + Environment.NewLine);
             }
-            """;
+            """);
     }
 
-    static string HotkeyBarrierPluginSource(
+    static (string Name, string Source) StableOrderPluginSource(string pluginName, string log) =>
+        (pluginName, $$"""
+        using System;
+        using System.IO;
+        using System.Threading.Tasks;
+        using UmamusumeResponseAnalyzer.Plugin;
+
+        namespace {{pluginName}}Ns;
+
+        public sealed class Plugin : IPlugin
+        {
+            public void Initialize(IPluginContext context)
+            {
+                var endpoint = new[] { EndpointPattern.Exact("{{AccountIndexPath}}") };
+                context.Analyzers.Register<ReadOnlyMemory<byte>>(
+                    AnalyzerKind.Response,
+                    endpoint,
+                    _ =>
+                    {
+                        File.AppendAllText(@"{{log}}", "{{pluginName}}:1" + Environment.NewLine);
+                        return ValueTask.CompletedTask;
+                    });
+                context.Analyzers.Register<ReadOnlyMemory<byte>>(
+                    AnalyzerKind.Response,
+                    endpoint,
+                    _ =>
+                    {
+                        File.AppendAllText(@"{{log}}", "{{pluginName}}:2" + Environment.NewLine);
+                        return ValueTask.CompletedTask;
+                    });
+            }
+        }
+        """);
+
+    static (string Name, string Source) AtomicInitializePluginSource(
+        string pluginName,
+        string analyzerLog,
+        string backgroundLog) => (pluginName, $$"""
+        using System;
+        using System.IO;
+        using System.Threading.Tasks;
+        using UmamusumeResponseAnalyzer.Plugin;
+
+        namespace {{pluginName}}Ns;
+
+        public sealed class Plugin : IPlugin
+        {
+            public void Initialize(IPluginContext context)
+            {
+                context.Analyzers.Register<ReadOnlyMemory<byte>>(
+                    AnalyzerKind.Response,
+                    new[] { EndpointPattern.Exact("{{AccountIndexPath}}") },
+                    _ =>
+                    {
+                        File.WriteAllText(@"{{analyzerLog}}", "called");
+                        return ValueTask.CompletedTask;
+                    });
+                context.RunBackground(_ =>
+                {
+                    File.WriteAllText(@"{{backgroundLog}}", "started");
+                    return ValueTask.CompletedTask;
+                });
+                throw new InvalidOperationException("initialize failed");
+            }
+        }
+        """);
+
+    static (string Name, string Source) AtomicStartedPluginSource(
+        string pluginName,
+        string analyzerLog,
+        string backgroundLog) => (pluginName, $$"""
+        using System;
+        using System.IO;
+        using System.Threading.Tasks;
+        using UmamusumeResponseAnalyzer.Plugin;
+
+        namespace {{pluginName}}Ns;
+
+        public sealed class Plugin : IPlugin
+        {
+            public void Initialize(IPluginContext context)
+                => context.Events.OnStarted(cancellationToken =>
+                {
+                    context.Analyzers.Register<ReadOnlyMemory<byte>>(
+                        AnalyzerKind.Response,
+                        new[] { EndpointPattern.Exact("{{AccountIndexPath}}") },
+                        invocation =>
+                        {
+                            File.WriteAllText(@"{{analyzerLog}}", "called");
+                            return ValueTask.CompletedTask;
+                        });
+                    context.RunBackground(backgroundToken =>
+                    {
+                        File.WriteAllText(@"{{backgroundLog}}", "started");
+                        return ValueTask.CompletedTask;
+                    });
+                    return ValueTask.FromException(new InvalidOperationException("started failed"));
+                });
+        }
+        """);
+
+    static (string Name, string Source) BackgroundBarrierPluginSource(
+        string pluginName,
+        string entered,
+        string release,
+        string lifecycle) => (pluginName, $$"""
+        using System;
+        using System.IO;
+        using System.Threading;
+        using System.Threading.Tasks;
+        using UmamusumeResponseAnalyzer.Plugin;
+
+        namespace {{pluginName}}Ns;
+
+        public sealed class Plugin : IPlugin
+        {
+            public void Initialize(IPluginContext context)
+                => context.RunBackground(async cancellationToken =>
+                {
+                    File.AppendAllText(@"{{lifecycle}}", "background-entered" + Environment.NewLine);
+                    File.WriteAllText(@"{{entered}}", "entered");
+                    try
+                    {
+                        await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        File.AppendAllText(@"{{lifecycle}}", "background-canceled" + Environment.NewLine);
+                    }
+                    while (!File.Exists(@"{{release}}"))
+                        await Task.Delay(10);
+                    File.AppendAllText(@"{{lifecycle}}", "background-drained" + Environment.NewLine);
+                });
+
+            public void Dispose()
+                => File.AppendAllText(@"{{lifecycle}}", "disposed" + Environment.NewLine);
+        }
+        """);
+
+    static (string Name, string Source) HotkeyBarrierPluginSource(
         string pluginName,
         string callbackEntered,
         string callbackRelease,
-        string lifecycleLog) => $$"""
+        string lifecycleLog) => (pluginName, $$"""
         using System;
         using System.IO;
         using System.Threading.Tasks;
@@ -640,10 +1202,6 @@ public sealed class PluginDispatchReloadTests : IDisposable
 
         public sealed class Plugin : IPlugin
         {
-            public string Name => "{{pluginName}}";
-            public string Author => "test";
-            public string[] Targets => Array.Empty<string>();
-
             public void Initialize(IPluginContext context)
             {
                 HotkeyManager.Register(ConsoleKey.F6, "blocking plugin callback", async () =>
@@ -659,7 +1217,7 @@ public sealed class PluginDispatchReloadTests : IDisposable
             public void Dispose()
                 => File.AppendAllText(@"{{lifecycleLog}}", "disposed" + Environment.NewLine);
         }
-        """;
+        """);
 
     static void SeedConfig()
     {
@@ -674,24 +1232,5 @@ public sealed class PluginDispatchReloadTests : IDisposable
                 Language = new(),
                 Misc = new(),
             });
-    }
-
-    static void ResetPluginState()
-    {
-        PluginManager.RequestAnalyzerMethods.Clear();
-        PluginManager.ResponseAnalyzerMethods.Clear();
-        PluginManager.ClearHostEventSubscriptions();
-        PluginManager.Metadatas.Clear();
-        PluginManager.AssemblyMetadatas.Clear();
-        PluginManager.FailedPlugins.Clear();
-        PluginManager.ContextGroups.Clear();
-        foreach (var context in PluginManager.Contexts.Values)
-            context.Unload();
-        PluginManager.Contexts.Clear();
-        PluginManager.AssemblyMap.Clear();
-        PluginManager.Assemblies.Clear();
-        foreach (var plugin in PluginManager.LoadedPlugins.ToList())
-            HotkeyManager.UnregisterByOwner(plugin);
-        PluginManager.LoadedPlugins.Clear();
     }
 }

@@ -1,4 +1,3 @@
-using System.Reflection;
 using UmamusumeResponseAnalyzer;
 using UmamusumeResponseAnalyzer.Entities;
 using Xunit;
@@ -22,7 +21,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         public void UmaName_CharaId_FourDigitNon9_TakesAsIs()
         {
             // "1004"[..4] => 1004
-            var uma = new UmaName(1004, "测试");
+            var uma = new UmaName(1004, "测试", "测试");
             Assert.Equal(1004, uma.CharaId);
         }
 
@@ -30,7 +29,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         public void UmaName_CharaId_FiveDigitNon9_TakesFirstFour()
         {
             // "10046"[..4] => "1004" => 1004（末位被切掉）
-            var uma = new UmaName(10046, "测试");
+            var uma = new UmaName(10046, "测试", "测试");
             Assert.Equal(1004, uma.CharaId);
         }
 
@@ -38,7 +37,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         public void UmaName_CharaId_NinePrefixed_SkipsLeading9_TakesNextFour()
         {
             // 首字符'9' 走 [1..5] 分支："90004"[1..5] => "0004" => 4
-            var uma = new UmaName(90004, "测试");
+            var uma = new UmaName(90004, "测试", "测试");
             Assert.Equal(4, uma.CharaId);
         }
 
@@ -46,7 +45,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         public void UmaName_CharaId_NinePrefixed_PreservesInnerDigits()
         {
             // "91234"[1..5] => "1234" => 1234
-            var uma = new UmaName(91234, "测试");
+            var uma = new UmaName(91234, "测试", "测试");
             Assert.Equal(1234, uma.CharaId);
         }
 
@@ -54,12 +53,12 @@ namespace UmamusumeResponseAnalyzer.Tests
         public void UmaName_CharaId_ExplicitNonZero_BypassesSlicing()
         {
             // charaId 非0 → 直接用 2002，忽略 id(99999) 的切片
-            var uma = new UmaName(99999, "测试", 2002);
+            var uma = new UmaName(99999, "测试", "测试", 2002);
             Assert.Equal(2002, uma.CharaId);
         }
 
         // ---------- SupportCardName.TypeName 映射 ----------
-        // 101=>[速] 102=>[力] 103=>[根] 105=>[耐] 106=>[智] 0=>[友] 其它=>""（注意 104 未定义）
+        // 101=>[速] 102=>[力] 103=>[根] 105=>[耐] 106=>[智] 0=>[友]，其它显式显示类型 ID。
         [Theory]
         [InlineData(101, "[速]")]
         [InlineData(102, "[力]")]
@@ -67,11 +66,11 @@ namespace UmamusumeResponseAnalyzer.Tests
         [InlineData(105, "[耐]")]
         [InlineData(106, "[智]")]
         [InlineData(0, "[友]")]
-        [InlineData(104, "")]   // 未在 switch 中列出 → default 空串
-        [InlineData(999, "")]
+        [InlineData(104, "[104]")]
+        [InlineData(999, "[999]")]
         public void SupportCardName_TypeName_MapsByType(int type, string expected)
         {
-            var card = new SupportCardName(10001, "卡名", type, 1004);
+            var card = new SupportCardName(10001, "卡名", "简称", type, 1004);
             Assert.Equal(expected, card.TypeName);
         }
 
@@ -84,7 +83,7 @@ namespace UmamusumeResponseAnalyzer.Tests
             int trainingType,
             bool expected)
         {
-            var card = new SupportCardName(30001, "卡名", cardType, 1004);
+            var card = new SupportCardName(30001, "卡名", "简称", cardType, 1004);
 
             Assert.Equal(expected, card.CanTriggerFriendshipTraining(trainingType));
         }
@@ -97,7 +96,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         [InlineData(106)]
         public void SupportCardName_CanTriggerFriendshipTraining_TreatsLegendGroupCardAsEligible(int trainingType)
         {
-            var card = new SupportCardName(30241, "团体卡", 0, 9047);
+            var card = new SupportCardName(30241, "团体卡", "团体", 0, 9047);
 
             Assert.True(card.CanTriggerFriendshipTraining(trainingType));
         }
@@ -131,6 +130,63 @@ namespace UmamusumeResponseAnalyzer.Tests
 
     }
 
+    public class NameManagerTests
+    {
+        [Fact]
+        public void DisplayApis_IncludeUnknownIdAndDoNotMutateSourceNames()
+        {
+            var source = new SupportCardName(30001, "卡名", "波旁", 101, 1001);
+            var names = new NameManager([source, new BaseName(1001, "美浦波旁", "波旁")]);
+
+            Assert.Equal("[速]美浦波旁", names.DisplayName(30001));
+            Assert.Equal("[速]波旁", names.DisplayNickname(30001));
+            Assert.Equal("波旁", source.Nickname);
+            Assert.NotSame(source, names.GetRequiredSupportCard(30001));
+            Assert.Contains("9999", names.DisplayName(9999), StringComparison.Ordinal);
+            Assert.Contains("9999", names.DisplayNickname(9999), StringComparison.Ordinal);
+        }
+
+        [Fact]
+        public void TypedApis_DistinguishTryFromRequired()
+        {
+            var names = new NameManager(
+            [
+                new BaseName(1001, "美浦波旁", "波旁"),
+                new SupportCardName(30001, "卡名", "波旁", 0, 1001),
+                new UmaName(100101, "育成卡", "波旁", 1001)
+            ]);
+
+            Assert.True(names.TryGetCharacter(1001, out var character));
+            Assert.Equal("美浦波旁", character.Name);
+            Assert.Same(character, names.GetRequiredCharacter(1001));
+            Assert.True(names.GetRequiredSupportCard(30001).IsFriendCard);
+            Assert.True(names.TryGetUmamusume(100101, out var umamusume));
+            Assert.Same(umamusume, names.GetRequiredUmamusume(100101));
+            Assert.False(names.TryGetSupportCard(1001, out _));
+            Assert.Throws<KeyNotFoundException>(() => names.GetRequiredSupportCard(1001));
+            Assert.Throws<KeyNotFoundException>(() => names.GetRequiredUmamusume(1001));
+        }
+
+        [Fact]
+        public void RequiredRSupportCardType_FailsForMissingOrDuplicateData()
+        {
+            var single = new NameManager(
+            [
+                new BaseName(1001, "美浦波旁", "波旁"),
+                new SupportCardName(10001, "R卡", "波旁", 101, 1001)
+            ]);
+            Assert.Equal(101, single.GetRequiredRSupportCardTypeByCharaId(1001));
+            Assert.Throws<KeyNotFoundException>(() => single.GetRequiredRSupportCardTypeByCharaId(9999));
+
+            var duplicate = new NameManager(
+            [
+                new SupportCardName(10001, "R卡1", "波旁", 101, 1001),
+                new SupportCardName(10002, "R卡2", "波旁", 106, 1001)
+            ]);
+            Assert.Throws<InvalidDataException>(() => duplicate.GetRequiredRSupportCardTypeByCharaId(1001));
+        }
+    }
+
     /// <summary>
     /// 需要查 <see cref="Database.Names"/> 的 Entities 逻辑（CharacterName / FullName / SimpleName）。
     /// 归入 "Database" collection 串行执行，避免与其它 seed 全局静态状态的测试竞争。
@@ -138,38 +194,11 @@ namespace UmamusumeResponseAnalyzer.Tests
     [Collection("Database")]
     public class EntitiesDatabaseTests
     {
-        public EntitiesDatabaseTests()
-        {
-            // 触碰 Database 任意成员都会跑其静态构造器，而那里(Database.cs)用到 Config.Updater，
-            // 测试环境下 Config 未初始化会 NRE。沿用 ConfigDatabaseTests 的约定：反射注入一个
-            // YamlConfig 到 private static Config.Current（避开会写 config.yaml 的 Config.Initialize），
-            // 让 Database 的静态初始化拿得到非 null 的 Updater。
-            var currentProp = typeof(Config).GetProperty("Current", BindingFlags.NonPublic | BindingFlags.Static)!;
-            if (currentProp.GetValue(null) is null)
-                currentProp.SetValue(null, new YamlConfig
-                {
-                    Core = new(),
-                    Repository = new(),
-                    Plugin = new(),
-                    Updater = new(),
-                    Language = new(),
-                    Misc = new()
-                });
-
-            // 用普通 BaseName 作为角色条目：NameManager[id] 对 BaseName 走 _ => value.Name。
-            // CharaId=1004 -> 本名"美浦波旁"；1006 -> "无声铃鹿"。
-            Database.Names = new NameManager(
-            [
-                new BaseName(1004, "美浦波旁"),
-                new BaseName(1006, "无声铃鹿"),
-            ]);
-        }
-
         [Fact]
         public void UmaName_CharacterName_LooksUpByCharaId()
         {
             // id=1004 → CharaId 切片得 1004 → 查表 "美浦波旁"
-            var uma = new UmaName(1004, "[CODE：グラサージュ]");
+            var uma = new UmaName(1004, "[CODE：グラサージュ]", "波旁");
             Assert.Equal("美浦波旁", uma.CharacterName);
         }
 
@@ -177,7 +206,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         public void UmaName_FullName_ConcatenatesNameAndCharacterName()
         {
             // FullName = Name + CharacterName
-            var uma = new UmaName(1004, "[CODE：グラサージュ]");
+            var uma = new UmaName(1004, "[CODE：グラサージュ]", "波旁");
             Assert.Equal("[CODE：グラサージュ]美浦波旁", uma.FullName);
         }
 
@@ -185,16 +214,15 @@ namespace UmamusumeResponseAnalyzer.Tests
         public void UmaName_CharacterName_UnknownCharaId_ReturnsUnknownPlaceholder()
         {
             // 表中无 1999 → NameManager 返回 I18N_Unknown；这里只断言非空、与已知名不同
-            var uma = new UmaName(1999, "某卡");
-            Assert.False(string.IsNullOrEmpty(uma.CharacterName));
-            Assert.NotEqual("美浦波旁", uma.CharacterName);
+            var uma = new UmaName(1999, "某卡", "某卡");
+            Assert.Contains("1999", uma.CharacterName, StringComparison.Ordinal);
         }
 
         [Fact]
         public void SupportCardName_CharacterName_LooksUpByCharaId()
         {
             // CharaId=1006 → "无声铃鹿"
-            var card = new SupportCardName(20001, "卡名", 106, 1006);
+            var card = new SupportCardName(20001, "卡名", "铃鹿", 106, 1006);
             Assert.Equal("无声铃鹿", card.CharacterName);
         }
 
@@ -202,7 +230,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         public void SupportCardName_FullName_IsCardNamePlusCharacterName()
         {
             // FullName = Name + CharacterName
-            var card = new SupportCardName(20001, "[ミッション]", 106, 1004);
+            var card = new SupportCardName(20001, "[ミッション]", "波旁", 106, 1004);
             Assert.Equal("[ミッション]美浦波旁", card.FullName);
         }
 
@@ -210,7 +238,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         public void SupportCardName_SimpleName_IsTypeNamePlusCharacterName()
         {
             // SimpleName = TypeName + CharacterName，例如 [智]美浦波旁
-            var card = new SupportCardName(20001, "[ミッション]", 106, 1004);
+            var card = new SupportCardName(20001, "[ミッション]", "波旁", 106, 1004);
             Assert.Equal("[智]美浦波旁", card.SimpleName);
         }
     }

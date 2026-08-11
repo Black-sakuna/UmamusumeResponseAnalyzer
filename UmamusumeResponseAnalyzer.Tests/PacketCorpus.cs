@@ -2,6 +2,7 @@ using Gallop;
 using Gallop.Endpoints;
 using MessagePack;
 using Newtonsoft.Json.Linq;
+using System.Text.RegularExpressions;
 using UmamusumeResponseAnalyzer;
 using UmamusumeResponseAnalyzer.Plugin;
 
@@ -55,10 +56,14 @@ namespace UmamusumeResponseAnalyzer.Tests
             [.. ResponseFiles.Select(TryCreateUnresolvedResponseEndpointPacket).OfType<UnresolvedEndpointPacket>()]);
         public static IReadOnlyList<UnresolvedEndpointPacket> UnresolvedResponseEndpointPackets => _unresolvedResponseEndpointPackets.Value;
 
-        // 领域层只消费 SingleModeCheckEventResponse；其它单人模式 DTO 由 catalog descriptor 测试覆盖。
+        static readonly Regex _singleModeResponsePath = new(
+            @"^/umamusume/single_mode(?:_[^/]+)?/(?:check_event|exec_command)$",
+            RegexOptions.CultureInvariant);
+
+        // 领域层只消费可投影到 SingleModeCheckEventResponse 的 canonical wire 响应。
         static readonly Lazy<IReadOnlyList<string>> _singleMode = new(() =>
             [.. ResponseEndpointPackets
-                .Where(x => x.Endpoint.ResponseType == typeof(SingleModeCheckEventResponse))
+                .Where(x => _singleModeResponsePath.IsMatch(x.Endpoint.Path))
                 .Select(x => x.Path)]);
         public static IReadOnlyList<string> SingleModeResponseFiles => _singleMode.Value;
 

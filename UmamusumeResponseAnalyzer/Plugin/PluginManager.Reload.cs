@@ -11,32 +11,28 @@ namespace UmamusumeResponseAnalyzer.Plugin
         // ── 热重载 ───────────────────────────────────────────────────────────
 
         /// <summary>
-        /// 批量应用插件重载，逐项返回成功、失败或需重启。
+        /// 批量应用插件重载，逐项返回成功或失败。
         /// 新安装的共享上下文成员会先把已加载的同组插件排入重载顺序，避免共享锚点被加载进两个 ALC。
         /// </summary>
         internal static async Task<IReadOnlyList<PluginLifecycleResult>> ReloadPluginsAsync(params string[] pluginNames)
         {
+            using var transaction = EnterReloadTransaction("load/reload/unload");
+            RequireOperationalLifecyclePhase();
             var requested = pluginNames.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
             if (requested.Count == 0) return [];
 
-            using var transaction = EnterReloadTransaction();
             var startedPluginBatches = new List<IPlugin[]>();
-            var (scanned, assemblyMetadatas) = ScanPluginMetadata();
+            var scanned = ScanPluginMetadata();
             List<string> ordered;
-            StateLock.EnterWriteLock();
-            try
-            {
-                ReplaceAssemblyMetadatas(assemblyMetadatas);
-                requested = requested
-                    .Select(name => ResolvePluginName(name, scanned.Keys, Metadatas.Keys, LoadedPlugins.Select(InternalName)))
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .ToList();
-                ordered = BuildReloadOrder(requested, scanned);
-            }
-            finally
-            {
-                StateLock.ExitWriteLock();
-            }
+            requested = requested
+                .Select(name => ResolvePluginName(
+                    name,
+                    scanned.Keys,
+                    LifecycleMetadatas.Keys,
+                    LifecycleLoadedPlugins.Select(InternalName)))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            ordered = BuildReloadOrder(requested, scanned);
 
             var outcomes = new Dictionary<string, PluginLifecycleOutcome>(StringComparer.OrdinalIgnoreCase);
             foreach (var name in ordered)
@@ -77,35 +73,32 @@ namespace UmamusumeResponseAnalyzer.Plugin
 
         internal static async Task<IReadOnlyList<PluginLifecycleResult>> LoadPluginsAsync(params string[] pluginNames)
         {
+            using var transaction = EnterReloadTransaction("load/reload/unload");
+            RequireOperationalLifecyclePhase();
             var requested = pluginNames.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
             if (requested.Count == 0) return [];
 
-            using var transaction = EnterReloadTransaction();
             var startedPluginBatches = new List<IPlugin[]>();
-            var (scanned, assemblyMetadatas) = ScanPluginMetadata();
+            var scanned = ScanPluginMetadata();
             List<(string Raw, string Name, bool Available, bool Loaded)> resolved;
             List<string> ordered;
-            StateLock.EnterWriteLock();
-            try
+            resolved = requested.Select(raw =>
             {
-                ReplaceAssemblyMetadatas(assemblyMetadatas);
-                resolved = requested.Select(raw =>
-                {
-                    var name = ResolvePluginName(raw, scanned.Keys, Metadatas.Keys, LoadedPlugins.Select(InternalName));
-                    return (
-                        raw,
-                        name,
-                        scanned.ContainsKey(name) || Metadatas.ContainsKey(name),
-                        LoadedPlugins.Any(plugin => string.Equals(InternalName(plugin), name, StringComparison.OrdinalIgnoreCase)));
-                }).ToList();
-                ordered = BuildReloadOrder(
-                    resolved.Where(item => item.Available && !item.Loaded).Select(item => item.Name).ToList(),
-                    scanned);
-            }
-            finally
-            {
-                StateLock.ExitWriteLock();
-            }
+                var name = ResolvePluginName(
+                    raw,
+                    scanned.Keys,
+                    LifecycleMetadatas.Keys,
+                    LifecycleLoadedPlugins.Select(InternalName));
+                return (
+                    raw,
+                    name,
+                    scanned.ContainsKey(name) || LifecycleMetadatas.ContainsKey(name),
+                    LifecycleLoadedPlugins.Any(plugin =>
+                        string.Equals(InternalName(plugin), name, StringComparison.OrdinalIgnoreCase)));
+            }).ToList();
+            ordered = BuildReloadOrder(
+                resolved.Where(item => item.Available && !item.Loaded).Select(item => item.Name).ToList(),
+                scanned);
 
             var outcomes = new Dictionary<string, PluginLifecycleOutcome>(StringComparer.OrdinalIgnoreCase);
             foreach (var name in ordered)
@@ -143,28 +136,20 @@ namespace UmamusumeResponseAnalyzer.Plugin
 
         internal static async Task<IReadOnlyList<PluginLifecycleResult>> UnloadPluginsAsync(params string[] pluginNames)
         {
+            using var transaction = EnterReloadTransaction("load/reload/unload");
+            RequireOperationalLifecyclePhase();
             var requested = pluginNames.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
             if (requested.Count == 0) return [];
 
-            using var transaction = EnterReloadTransaction();
             var outcomes = new Dictionary<string, PluginLifecycleOutcome>(StringComparer.OrdinalIgnoreCase);
             List<Exception> failures = [];
             foreach (var rawName in requested)
             {
-                string name;
-                StateLock.EnterReadLock();
-                try
-                {
-                    name = ResolvePluginName(
-                        rawName,
-                        Metadatas.Keys,
-                        LoadedPlugins.Select(InternalName),
-                        ContextGroups.SelectMany(x => x));
-                }
-                finally
-                {
-                    StateLock.ExitReadLock();
-                }
+                var name = ResolvePluginName(
+                    rawName,
+                    LifecycleMetadatas.Keys,
+                    LifecycleLoadedPlugins.Select(InternalName),
+                    LifecycleContextGroups.SelectMany(group => group));
 
                 try
                 {
@@ -185,25 +170,28 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 .ToList();
         }
 
-        static IDisposable EnterReloadTransaction()
+        static IDisposable EnterReloadTransaction(string operation)
         {
-            if (PluginCallbackDepth.Value != 0)
-                throw new InvalidOperationException("插件回调内禁止执行热重载；请在当前回调返回后由宿主侧重新发起 reload。");
-
-            lock (ReloadTransactionGate)
+            RejectCallbackLifecycleReentry();
+            if (Runtime.ShutdownRequested)
+                throw LifecyclePhaseFailure(operation);
+            if (!Runtime.LifecycleGate.Wait(0))
             {
-                if (shuttingDown)
-                    throw new InvalidOperationException("插件系统正在关闭，拒绝执行热重载。");
-                if (reloadTransactionActive)
-                    throw new InvalidOperationException("已有插件热重载事务正在运行，拒绝并发或重入 reload。");
-
-                reloadTransactionActive = true;
-                reloadCompleted = NewTaskSource();
-                return new ReloadTransaction();
+                if (Runtime.ShutdownRequested)
+                    throw LifecyclePhaseFailure(operation);
+                throw new InvalidOperationException(
+                    "已有插件 lifecycle 事务正在运行，拒绝并发或重入操作。");
             }
+            if (Runtime.ShutdownRequested)
+            {
+                Runtime.LifecycleGate.Release();
+                throw LifecyclePhaseFailure(operation);
+            }
+
+            return new LifecycleTransaction();
         }
 
-        sealed class ReloadTransaction : IDisposable
+        sealed class LifecycleTransaction : IDisposable
         {
             int disposed;
 
@@ -212,56 +200,68 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 if (Interlocked.Exchange(ref disposed, 1) != 0)
                     return;
 
-                TaskCompletionSource? completion;
-                lock (ReloadTransactionGate)
+                try
                 {
-                    reloadTransactionActive = false;
-                    completion = reloadCompleted;
-                    reloadCompleted = null;
+                    Runtime.Publish();
                 }
-                completion?.TrySetResult();
-            }
-        }
-
-        internal static IDisposable EnterPluginCallbackScope()
-        {
-            PluginCallbackDepth.Value++;
-            return new PluginCallbackScope();
-        }
-
-        sealed class PluginCallbackScope : IDisposable
-        {
-            bool disposed;
-
-            public void Dispose()
-            {
-                if (disposed)
-                    return;
-
-                PluginCallbackDepth.Value--;
-                disposed = true;
+                finally
+                {
+                    Runtime.LifecycleGate.Release();
+                }
             }
         }
 
         static List<string> BuildReloadOrder(IReadOnlyList<string> requested, IReadOnlyDictionary<string, PluginMetadata> scanned)
         {
+            _ = TopologicalOrder(scanned, scanned.Keys);
             var ordered = new List<string>();
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var name in requested)
             {
-                if (scanned.TryGetValue(name, out var metadata))
-                {
-                    foreach (var share in metadata.SharedContextsWith)
-                    {
-                        var group = ContextGroups.FirstOrDefault(g => g.Contains(share, StringComparer.OrdinalIgnoreCase));
-                        if (group == null) continue;
-                        foreach (var member in group)
-                            if (seen.Add(member)) ordered.Add(member);
-                    }
-                }
+                var existingGroup = LifecycleContextGroups.FirstOrDefault(group =>
+                    group.Contains(name, StringComparer.OrdinalIgnoreCase));
+                if (existingGroup is not null)
+                    foreach (var member in existingGroup.Order(StringComparer.OrdinalIgnoreCase))
+                        if (seen.Add(member))
+                            ordered.Add(member);
+
+                foreach (var member in DependencyComponent(name, scanned))
+                    if (seen.Add(member))
+                        ordered.Add(member);
                 if (seen.Add(name)) ordered.Add(name);
             }
             return ordered;
+        }
+
+        static IReadOnlyList<string> DependencyComponent(
+            string pluginName,
+            IReadOnlyDictionary<string, PluginMetadata> source)
+        {
+            if (!source.ContainsKey(pluginName))
+                return [];
+
+            var component = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { pluginName };
+            Queue<string> pending = new([pluginName]);
+            while (pending.TryDequeue(out var name))
+            {
+                if (!source.TryGetValue(name, out var metadata))
+                    throw new InvalidDataException($"插件依赖图包含未安装插件: {name}");
+
+                foreach (var candidate in source.Values)
+                    if (candidate.Dependencies.Contains(name, StringComparer.OrdinalIgnoreCase) &&
+                        component.Add(candidate.PluginName))
+                        pending.Enqueue(candidate.PluginName);
+
+                foreach (var dependency in metadata.Dependencies)
+                {
+                    if (!source.ContainsKey(dependency))
+                        throw new InvalidDataException(
+                            $"插件 {metadata.PluginName} 缺少 manifest 依赖 {dependency}。");
+                    if (component.Add(dependency))
+                        pending.Enqueue(dependency);
+                }
+            }
+            return source.Keys.Where(component.Contains).ToArray();
         }
 
         static async Task<PluginLifecycleOutcome> ReloadPluginAsync(
@@ -273,73 +273,49 @@ namespace UmamusumeResponseAnalyzer.Plugin
             if (outcomes.TryGetValue(pluginName, out var prior)) return prior;
 
             var affectedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { pluginName };
-            PendingPluginUnload? unload = null;
-            var loadInHost = false;
-            StateLock.EnterWriteLock();
-            try
+            List<PendingPluginUnload> unloads = [];
+            var existing = GetValueIgnoreCase(LifecycleMetadatas, pluginName);
+            affectedNames.UnionWith(DependencyComponent(pluginName, scanned));
+            if (existing is not null)
             {
-                var loadedPlugin = LoadedPlugins.FirstOrDefault(plugin =>
-                    string.Equals(InternalName(plugin), pluginName, StringComparison.OrdinalIgnoreCase));
-                var existing = GetValueIgnoreCase(Metadatas, pluginName);
-                loadInHost = loadedPlugin is not null && ReferenceEquals(
-                    AssemblyLoadContext.GetLoadContext(loadedPlugin.GetType().Assembly),
-                    AssemblyLoadContext.Default);
-                loadInHost |= existing is { LoadInHost: true };
-                var group = existing is null
-                    ? null
-                    : ContextGroups.FirstOrDefault(x => x.Contains(pluginName, StringComparer.OrdinalIgnoreCase));
+                var group = LifecycleContextGroups.FirstOrDefault(candidate =>
+                    candidate.Contains(pluginName, StringComparer.OrdinalIgnoreCase));
                 if (group is not null)
                     affectedNames.UnionWith(group);
-
-                loadInHost |= affectedNames.Any(name => scanned.TryGetValue(name, out var metadata) && metadata.LoadInHost);
-                if (!loadInHost && group is not null && Contexts.ContainsKey(GroupKey(group)))
-                    unload = PrepareUnloadGroupLocked(group);
-            }
-            finally
-            {
-                StateLock.ExitWriteLock();
             }
 
-            if (loadInHost)
+            var affectedGroups = LifecycleContextGroups
+                .Where(group => group.Any(affectedNames.Contains))
+                .Select(group => group.ToHashSet(StringComparer.OrdinalIgnoreCase))
+                .ToList();
+            foreach (var group in affectedGroups)
             {
-                TerminalUi.Log("Plugin", $"插件 {pluginName} 在宿主上下文加载，不支持热重载，请重启。", UiSeverity.Warning);
-                foreach (var name in affectedNames)
-                    outcomes[name] = PluginLifecycleOutcome.RestartRequired;
-                return PluginLifecycleOutcome.RestartRequired;
+                if (LifecycleContexts.ContainsKey(GroupKey(group)))
+                {
+                    unloads.Add(PrepareUnloadGroup(group));
+                    continue;
+                }
+
+                foreach (var name in group)
+                    LifecycleMetadatas.Remove(name);
+                LifecycleContextGroups.RemoveAll(candidate => candidate.SetEquals(group));
             }
 
-            if (unload is not null)
+            if (unloads.Count != 0)
             {
-                await CompletePendingUnloadsAsync([unload], clearAll: false);
-                unload = null;
+                await CompletePendingUnloadsAsync(unloads, clearAll: false);
+                unloads.Clear();
             }
 
-            bool missing;
-            bool becameLoadInHost;
-            StateLock.EnterWriteLock();
-            try
-            {
-                MergeUnloadedMetadatas(scanned);
-                missing = !Metadatas.ContainsKey(pluginName);
-                becameLoadInHost = !missing && Metadatas[pluginName].LoadInHost;
-                BuildGroups();
-            }
-            finally
-            {
-                StateLock.ExitWriteLock();
-            }
+            MergeUnloadedMetadatas(scanned);
+            var missing = !LifecycleMetadatas.ContainsKey(pluginName);
+            BuildGroups();
 
             if (missing)
             {
                 TerminalUi.Log("Plugin", $"插件 {pluginName} 的文件已不存在，已卸载。", UiSeverity.Warning);
                 await LoadAffectedGroupsAsync(affectedNames, outcomes, startedPluginBatches);
                 return outcomes[pluginName] = PluginLifecycleOutcome.Succeeded;
-            }
-
-            if (becameLoadInHost)
-            {
-                TerminalUi.Log("Plugin", $"插件 {pluginName} 在宿主上下文加载，不支持热重载，请重启。", UiSeverity.Warning);
-                return outcomes[pluginName] = PluginLifecycleOutcome.RestartRequired;
             }
 
             await LoadAffectedGroupsAsync(affectedNames, outcomes, startedPluginBatches);
@@ -360,56 +336,33 @@ namespace UmamusumeResponseAnalyzer.Plugin
 
             PendingPluginUnload? unload = null;
             HashSet<string>? group = null;
-            var loadInHost = false;
             var notLoaded = false;
-            StateLock.EnterWriteLock();
-            try
+            var loadedPlugin = LifecycleLoadedPlugins.FirstOrDefault(plugin =>
+                string.Equals(InternalName(plugin), pluginName, StringComparison.OrdinalIgnoreCase));
+            var existing = GetValueIgnoreCase(LifecycleMetadatas, pluginName);
+            group = LifecycleContextGroups.FirstOrDefault(candidate =>
+                candidate.Contains(pluginName, StringComparer.OrdinalIgnoreCase));
+            if (group is null)
             {
-                var loadedPlugin = LoadedPlugins.FirstOrDefault(plugin =>
-                    string.Equals(InternalName(plugin), pluginName, StringComparison.OrdinalIgnoreCase));
-                var existing = GetValueIgnoreCase(Metadatas, pluginName);
-                loadInHost = loadedPlugin is not null && ReferenceEquals(
-                    AssemblyLoadContext.GetLoadContext(loadedPlugin.GetType().Assembly),
-                    AssemblyLoadContext.Default);
-                group = ContextGroups.FirstOrDefault(x => x.Contains(pluginName, StringComparer.OrdinalIgnoreCase));
-                if (!loadInHost && group is null)
-                {
-                    if (loadedPlugin is not null)
-                        throw new InvalidOperationException($"已加载插件缺少 context group: {pluginName}");
-                    if (existing is not null)
-                        Metadatas.Remove(existing.PluginName);
-                    notLoaded = true;
-                }
-                else if (!loadInHost)
-                {
-                    var unloadGroup = group!;
-                    if (unloadGroup.Any(name => GetValueIgnoreCase(Metadatas, name) is { LoadInHost: true }))
-                    {
-                        loadInHost = true;
-                    }
-                    else if (Contexts.ContainsKey(GroupKey(unloadGroup)))
-                    {
-                        unload = PrepareUnloadGroupLocked(unloadGroup);
-                    }
-                    else
-                    {
-                        foreach (var name in unloadGroup)
-                            Metadatas.Remove(name);
-                        ContextGroups.RemoveAll(x => x.SetEquals(unloadGroup));
-                    }
-                }
+                if (loadedPlugin is not null)
+                    throw new InvalidOperationException($"已加载插件缺少 context group: {pluginName}");
+                if (existing is not null)
+                    LifecycleMetadatas.Remove(existing.PluginName);
+                notLoaded = true;
             }
-            finally
+            else
             {
-                StateLock.ExitWriteLock();
-            }
-
-            if (loadInHost)
-            {
-                TerminalUi.Log("Plugin", $"插件 {string.Join("、", group ?? [pluginName])} 在宿主上下文加载，不支持卸载，请重启。", UiSeverity.Warning);
-                foreach (var name in group ?? [pluginName])
-                    outcomes[name] = PluginLifecycleOutcome.RestartRequired;
-                return outcomes[pluginName] = PluginLifecycleOutcome.RestartRequired;
+                var unloadGroup = group;
+                if (LifecycleContexts.ContainsKey(GroupKey(unloadGroup)))
+                {
+                    unload = PrepareUnloadGroup(unloadGroup);
+                }
+                else
+                {
+                    foreach (var name in unloadGroup)
+                        LifecycleMetadatas.Remove(name);
+                    LifecycleContextGroups.RemoveAll(candidate => candidate.SetEquals(unloadGroup));
+                }
             }
 
             if (notLoaded)
@@ -439,61 +392,59 @@ namespace UmamusumeResponseAnalyzer.Plugin
             Dictionary<string, PluginLifecycleOutcome> outcomes,
             List<IPlugin[]> startedPluginBatches)
         {
-            bool initialize;
-            bool deliverStarted;
-            lock (ReloadTransactionGate)
-            {
-                initialize = initializationComplete;
-                deliverStarted = startedComplete;
-            }
+            var initialize = Lifecycle.Phase is
+                PluginLifecyclePhase.Initialized or PluginLifecyclePhase.Started;
+            var deliverStarted = Lifecycle.Phase == PluginLifecyclePhase.Started;
 
             var affected = affectedNames.ToHashSet(StringComparer.OrdinalIgnoreCase);
-            List<HashSet<string>> pendingGroups;
-            StateLock.EnterWriteLock();
-            try
-            {
-                pendingGroups = ContextGroups
-                    .Where(group => group.Any(affected.Contains) && !Contexts.ContainsKey(GroupKey(group)))
-                    .Select(group => group.ToHashSet(StringComparer.OrdinalIgnoreCase))
-                    .ToList();
-                foreach (var group in pendingGroups)
-                    foreach (var name in group)
-                        if (Metadatas.TryGetValue(name, out var metadata))
-                            FailedPlugins.Remove(metadata.FilePath);
-            }
-            finally
-            {
-                StateLock.ExitWriteLock();
-            }
+            var pendingGroups = LifecycleContextGroups
+                .Where(group => group.Any(affected.Contains) &&
+                                !LifecycleContexts.ContainsKey(GroupKey(group)))
+                .Select(group => group.ToHashSet(StringComparer.OrdinalIgnoreCase))
+                .ToList();
+            foreach (var group in pendingGroups)
+                foreach (var name in group)
+                    if (LifecycleMetadatas.TryGetValue(name, out var metadata))
+                        LifecycleFailedPlugins.Remove(metadata.FilePath);
 
             foreach (var group in pendingGroups)
             {
                 var staged = await StageGroupLoadAsync(group);
                 if (staged is null)
                 {
-                    foreach (var name in group.Where(Metadatas.ContainsKey))
+                    foreach (var name in group.Where(LifecycleMetadatas.ContainsKey))
                         outcomes[name] = PluginLifecycleOutcome.Failed;
                     continue;
                 }
 
                 if (initialize)
                 {
-                    if (!InitializeStagedPlugins(staged))
+                    if (InitializeStagedPlugins(staged) is { } initializationFailure)
                     {
-                        foreach (var name in group.Where(Metadatas.ContainsKey))
+                        foreach (var name in group.Where(LifecycleMetadatas.ContainsKey))
                             outcomes[name] = PluginLifecycleOutcome.Failed;
-                        await DisposeStagedGroupAsync(staged, flush: true);
+                        try
+                        {
+                            await DisposeStagedGroupAsync(staged, flush: true);
+                        }
+                        catch (Exception cleanupFailure)
+                        {
+                            throw new AggregateException(
+                                "插件组初始化及清理失败。",
+                                initializationFailure,
+                                cleanupFailure);
+                        }
                         continue;
                     }
                 }
 
                 try
                 {
-                    CommitStagedGroupLoad(staged);
+                    CommitStagedGroupLoad(staged, initialize);
                 }
                 catch (Exception commitError)
                 {
-                    foreach (var name in group.Where(Metadatas.ContainsKey))
+                    foreach (var name in group.Where(LifecycleMetadatas.ContainsKey))
                         outcomes[name] = PluginLifecycleOutcome.Failed;
                     try
                     {
@@ -510,15 +461,10 @@ namespace UmamusumeResponseAnalyzer.Plugin
                     throw;
                 }
 
-                if (initialize && staged.Plugins.Count != 0)
-                {
-                    foreach (var plugin in staged.Plugins)
-                        RequireGeneration(plugin.Plugin).Open();
-                    if (deliverStarted)
-                        startedPluginBatches.Add([.. staged.Plugins.Select(x => x.Plugin)]);
-                }
+                if (initialize && deliverStarted && staged.Plugins.Count != 0)
+                    startedPluginBatches.Add([.. staged.Plugins.Select(x => x.Plugin)]);
 
-                foreach (var name in group.Where(Metadatas.ContainsKey))
+                foreach (var name in group.Where(LifecycleMetadatas.ContainsKey))
                     outcomes[name] = IsPluginLoaded(name)
                         ? PluginLifecycleOutcome.Succeeded
                         : PluginLifecycleOutcome.Failed;
@@ -527,37 +473,54 @@ namespace UmamusumeResponseAnalyzer.Plugin
 
         static async Task<StagedGroupLoad?> StageGroupLoadAsync(HashSet<string> group)
         {
-            var missing = group.Where(name => !Metadatas.ContainsKey(name)).ToList();
+            var missing = group.Where(name => !LifecycleMetadatas.ContainsKey(name)).ToList();
             if (missing.Count != 0)
             {
                 foreach (var name in group)
-                    if (Metadatas.TryGetValue(name, out var present))
+                    if (LifecycleMetadatas.TryGetValue(name, out var present))
                     {
                         ReportPluginDiagnostic(
                             $"插件 {name} 加载失败: 依赖的共享上下文插件 {string.Join("、", missing)} 未安装。",
                             UiSeverity.Error);
-                        if (!FailedPlugins.Contains(present.FilePath)) FailedPlugins.Add(present.FilePath);
+                        if (!LifecycleFailedPlugins.Contains(present.FilePath))
+                            LifecycleFailedPlugins.Add(present.FilePath);
                     }
                 return null;
             }
 
+            var ordered = TopologicalOrder(group);
             var key = GroupKey(group);
-            var ctx = new PluginLoadContext(key);
+            var ctx = new PluginLoadContext(key, ordered.Select(name => LifecycleMetadatas[name]));
             var staged = new StagedGroupLoad(group, key, ctx, [], []);
 
-            foreach (var name in group)
+            foreach (var name in ordered)
             {
-                if (await StageIntoContextAsync(staged, Metadatas[name]))
+                var metadata = LifecycleMetadatas[name];
+                var failure = await StageIntoContextAsync(staged, metadata);
+                if (failure is null)
                     continue;
 
-                await DisposeStagedGroupAsync(staged, flush: false);
+                try
+                {
+                    await DisposeStagedGroupAsync(staged, flush: false);
+                }
+                catch (Exception cleanupFailure)
+                {
+                    failure = new AggregateException(
+                        "插件组加载及清理失败。",
+                        failure,
+                        cleanupFailure);
+                }
+                ReportPluginDiagnostic(failure);
+                if (!LifecycleFailedPlugins.Contains(metadata.FilePath))
+                    LifecycleFailedPlugins.Add(metadata.FilePath);
                 return null;
             }
 
             return staged;
         }
 
-        static async Task<bool> StageIntoContextAsync(StagedGroupLoad staged, PluginMetadata metadata)
+        static async Task<Exception?> StageIntoContextAsync(StagedGroupLoad staged, PluginMetadata metadata)
         {
             IPlugin? plugin = null;
             var phase = "读取插件程序集";
@@ -565,142 +528,87 @@ namespace UmamusumeResponseAnalyzer.Plugin
             {
                 using var stream = CreateStream(metadata);
                 var assembly = staged.Context.LoadFromStream(stream);
-                if (assembly.GetName().Name is { } assemblyName)
-                {
-                    staged.Context.TrackAssembly(assemblyName, assembly);
-                    staged.Assemblies.Add(new(assemblyName, assembly));
-                }
+                var assemblyName = assembly.GetName().Name;
+                PluginPackageValidator.ValidateAssemblyIdentity(assemblyName, metadata.PluginName);
+
+                if (!ShouldLoadPluginForCurrentTargets(metadata))
+                    return null;
 
                 phase = "读取插件导出类型";
-                var type = assembly.GetExportedTypes().FirstOrDefault(x => typeof(IPlugin).IsAssignableFrom(x));
+                var type = assembly.GetExportedTypes().FirstOrDefault(candidate =>
+                    typeof(IPlugin).IsAssignableFrom(candidate) && !candidate.IsAbstract);
                 if (type is null)
-                {
-                    ReportPluginDiagnostic(
-                        $"插件 {metadata.PluginName} 加载失败: 未找到实现 {nameof(IPlugin)} 的公开类型。",
-                        UiSeverity.Error);
-                    FailedPlugins.Add(metadata.FilePath);
-                    return false;
-                }
+                    throw new InvalidDataException($"未找到实现 {nameof(IPlugin)} 的公开具体类型。");
 
                 phase = "创建插件实例";
                 if (Activator.CreateInstance(type) is not IPlugin createdPlugin)
-                {
-                    ReportPluginDiagnostic(
-                        $"插件 {metadata.PluginName} 加载失败: 无法创建插件实例。type={type.FullName ?? type.Name}",
-                        UiSeverity.Error);
-                    FailedPlugins.Add(metadata.FilePath);
-                    return false;
-                }
+                    throw new InvalidDataException($"无法创建插件实例: type={type.FullName ?? type.Name}");
                 plugin = createdPlugin;
                 _ = GenerationFor(plugin);
 
-                if (!ShouldLoadPluginForCurrentTargets(plugin))
-                    return true;
-
-                phase = "注册插件入口";
-                staged.Plugins.Add(new(plugin, CreateRegistrationPlan(plugin)));
-                return true;
+                staged.Plugins.Add(new(plugin));
+                return null;
             }
             catch (Exception ex)
             {
+                Exception failure = PluginLoadException(metadata, phase, ex);
                 if (plugin is not null)
                 {
                     try { await CompleteFailedPluginLoadAsync(plugin, flush: false); }
-                    catch (Exception cleanupEx) { ReportPluginDiagnostic(cleanupEx); }
+                    catch (Exception cleanupEx)
+                    {
+                        failure = new AggregateException(
+                            "插件加载及清理失败。",
+                            failure,
+                            cleanupEx);
+                    }
                 }
 
-                ReportPluginDiagnostic(PluginLoadException(metadata, phase, ex));
-                FailedPlugins.Add(metadata.FilePath);
-                return false;
+                return failure;
             }
         }
 
-        static bool InitializeStagedPlugins(StagedGroupLoad staged)
+        static Exception? InitializeStagedPlugins(StagedGroupLoad staged)
         {
             foreach (var plugin in staged.Plugins)
-                if (!TryInitializePlugin(plugin.Plugin, committed: false))
-                    return false;
+                if (!TryInitializePlugin(plugin.Plugin, committed: false, out var failure))
+                    return failure;
 
-            return true;
+            return null;
         }
 
-        static void CommitStagedGroupLoad(StagedGroupLoad staged)
+        static void CommitStagedGroupLoad(StagedGroupLoad staged, bool initialize)
         {
-            var analyzers = staged.Plugins.SelectMany(plugin => plugin.Plan.Analyzers).ToList();
-            var routes = staged.Plugins.SelectMany(plugin => plugin.Plan.Routes).ToList();
-            var addedRouteCount = 0;
             try
             {
-                foreach (var analyzer in analyzers)
-                    CommitAnalyzerRegistration(analyzer);
-
-                foreach (var route in routes)
-                {
-                    Server.Instance.Routes.PreAuthentication.Static.Add(route.Method, route.Path, route.InvokeAsync);
-                    addedRouteCount++;
-                }
-
-                StateLock.EnterWriteLock();
-                try
-                {
-                    foreach (var assembly in staged.Assemblies)
-                    {
-                        AssemblyMap.Add(assembly.Name, assembly.Assembly);
-                        Assemblies.Add(assembly.Assembly);
-                    }
-
-                    foreach (var plugin in staged.Plugins)
-                    {
-                        LoadedPlugins.Add(plugin.Plugin);
-                        if (plugin.Plan.Routes.Count != 0)
-                            PluginRoutes.Add(plugin.Plugin, [.. plugin.Plan.Routes]);
-                    }
-
-                    Contexts.Add(staged.Key, staged.Context);
-                }
-                finally
-                {
-                    StateLock.ExitWriteLock();
-                }
+                foreach (var plugin in staged.Plugins)
+                    LifecycleLoadedPlugins.Add(plugin.Plugin);
+                LifecycleContexts.Add(staged.Key, staged.Context);
+                if (initialize)
+                    CommitPendingRegistrations(staged.Plugins.Select(plugin => plugin.Plugin));
             }
             catch (Exception commitError)
             {
                 List<Exception> failures = [commitError];
                 try
                 {
-                    StateLock.EnterWriteLock();
-                    try
+                    if (LifecycleContexts.TryGetValue(staged.Key, out var context) &&
+                        ReferenceEquals(context, staged.Context))
+                        LifecycleContexts.Remove(staged.Key);
+                    foreach (var plugin in staged.Plugins)
                     {
-                        if (Contexts.TryGetValue(staged.Key, out var context) && ReferenceEquals(context, staged.Context))
-                            Contexts.Remove(staged.Key);
-                        foreach (var plugin in staged.Plugins)
-                        {
-                            var index = LoadedPlugins.FindIndex(candidate => ReferenceEquals(candidate, plugin.Plugin));
-                            if (index >= 0)
-                                LoadedPlugins.RemoveAt(index);
-                            PluginRoutes.Remove(plugin.Plugin);
-                        }
-                        foreach (var assembly in staged.Assemblies)
-                        {
-                            if (AssemblyMap.TryGetValue(assembly.Name, out var mapped) && ReferenceEquals(mapped, assembly.Assembly))
-                                AssemblyMap.Remove(assembly.Name);
-                            Assemblies.RemoveAll(candidate => ReferenceEquals(candidate, assembly.Assembly));
-                        }
+                        var index = LifecycleLoadedPlugins.FindIndex(candidate =>
+                            ReferenceEquals(candidate, plugin.Plugin));
+                        if (index >= 0)
+                            LifecycleLoadedPlugins.RemoveAt(index);
                     }
-                    finally { StateLock.ExitWriteLock(); }
                 }
                 catch (Exception ex)
                 {
                     failures.Add(new InvalidOperationException("插件 staged state 回滚失败。", ex));
                 }
-                foreach (var analyzer in analyzers)
-                {
-                    try { RemoveAnalyzerRegistration(analyzer); }
-                    catch (Exception ex) { failures.Add(ex); }
-                }
-                for (var i = 0; i < addedRouteCount; i++)
-                    RemoveRoute(routes[i], "StagedRegistrationRollback", failures);
-
+                try { RemoveAnalyzerMethods(staged.Plugins.Select(plugin => plugin.Plugin)); }
+                catch (Exception ex) { failures.Add(ex); }
                 if (failures.Count != 1)
                     throw new AggregateException("插件 staged registration 提交失败。", failures);
                 ExceptionDispatchInfo.Capture(commitError).Throw();
@@ -710,7 +618,11 @@ namespace UmamusumeResponseAnalyzer.Plugin
 
         static async Task DisposeStagedGroupAsync(StagedGroupLoad staged, bool flush)
         {
-            var generations = staged.Plugins.Select(x => RequireGeneration(x.Plugin)).ToList();
+            var generations = staged.Plugins
+                .AsEnumerable()
+                .Reverse()
+                .Select(plugin => RequireGeneration(plugin.Plugin))
+                .ToList();
             foreach (var generation in generations)
                 _ = generation.Close();
             await CompletePendingUnloadsAsync(
@@ -723,38 +635,32 @@ namespace UmamusumeResponseAnalyzer.Plugin
         {
             foreach (var (name, m) in scanned)
             {
-                if (Metadatas.ContainsKey(name)) continue; // 仍加载中的插件不动
-                Metadatas[name] = m;
+                if (LifecycleMetadatas.ContainsKey(name)) continue;
+                LifecycleMetadatas[name] = m;
             }
         }
 
         static bool IsPluginLoaded(string pluginName)
-        {
-            StateLock.EnterReadLock();
-            try
-            {
-                return LoadedPlugins.Any(plugin =>
-                    string.Equals(InternalName(plugin), pluginName, StringComparison.OrdinalIgnoreCase));
-            }
-            finally
-            {
-                StateLock.ExitReadLock();
-            }
-        }
+            => LifecycleLoadedPlugins.Any(plugin =>
+                string.Equals(InternalName(plugin), pluginName, StringComparison.OrdinalIgnoreCase));
 
-        static PendingPluginUnload PrepareUnloadGroupLocked(HashSet<string> group)
+        static PendingPluginUnload PrepareUnloadGroup(HashSet<string> group)
         {
             var key = GroupKey(group);
-            var generations = LoadedPlugins
+            var loadedByName = LifecycleLoadedPlugins
                 .Where(plugin => group.Contains(InternalName(plugin)))
-                .Select(RequireGeneration)
+                .ToDictionary(InternalName, StringComparer.OrdinalIgnoreCase);
+            var generations = TopologicalOrder(group)
+                .Reverse()
+                .Where(loadedByName.ContainsKey)
+                .Select(name => RequireGeneration(loadedByName[name]))
                 .ToList();
             foreach (var generation in generations)
                 _ = generation.Close();
             return new(
                 group.ToHashSet(StringComparer.OrdinalIgnoreCase),
                 key,
-                Contexts[key],
+                LifecycleContexts[key],
                 generations,
                 true);
         }
@@ -778,9 +684,22 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 .SelectMany(unload => unload.Generations)
                 .Distinct()
                 .ToList();
-            await Task.WhenAll(generations.Select(generation => generation.Close()));
-
             List<Exception> failures = [];
+            var closeTasks = generations.Select(generation => generation.Close()).ToArray();
+            for (var i = 0; i < closeTasks.Length; i++)
+            {
+                try
+                {
+                    await closeTasks[i];
+                }
+                catch (Exception ex)
+                {
+                    failures.Add(new InvalidOperationException(
+                        $"插件清理失败: plugin={InternalName(generations[i].Plugin)}, phase=Close",
+                        ex));
+                }
+            }
+
             var plugins = generations
                 .Select(generation => generation.Plugin)
                 .ToList();
@@ -814,7 +733,6 @@ namespace UmamusumeResponseAnalyzer.Plugin
             List<Exception> failures)
         {
             using (HotkeyManager.RegisterScope(plugin))
-            using (EnterPluginCallbackScope())
             {
                 try
                 {
@@ -848,70 +766,41 @@ namespace UmamusumeResponseAnalyzer.Plugin
             List<IPlugin> plugins,
             List<Exception> failures)
         {
-            List<RouteRegistration> routes = [];
-            StateLock.EnterWriteLock();
             try
             {
                 foreach (var plugin in plugins)
                 {
-                    var index = LoadedPlugins.FindIndex(candidate => ReferenceEquals(candidate, plugin));
+                    var index = LifecycleLoadedPlugins.FindIndex(candidate => ReferenceEquals(candidate, plugin));
                     if (index >= 0)
-                        LoadedPlugins.RemoveAt(index);
-                    RemoveAnalyzerMethods(plugin);
-                    if (PluginRoutes.Remove(plugin, out var pluginRoutes))
-                        routes.AddRange(pluginRoutes);
+                        LifecycleLoadedPlugins.RemoveAt(index);
                     PluginGenerations.Remove(plugin);
                 }
+                RemoveAnalyzerMethods(plugins);
 
                 foreach (var unload in pendingUnloads)
                 {
-                    if (unload.Context is not null)
-                    {
-                        foreach (var name in AssemblyMap
-                                     .Where(pair => ReferenceEquals(AssemblyLoadContext.GetLoadContext(pair.Value), unload.Context))
-                                     .Select(pair => pair.Key)
-                                     .ToList())
-                            AssemblyMap.Remove(name);
-                        Assemblies.RemoveAll(assembly =>
-                            ReferenceEquals(AssemblyLoadContext.GetLoadContext(assembly), unload.Context));
-                    }
-
                     if (unload.Key is not null)
-                        Contexts.Remove(unload.Key);
+                        LifecycleContexts.Remove(unload.Key);
                     if (!unload.RemoveGroupState)
                         continue;
                     foreach (var name in unload.Names)
-                        Metadatas.Remove(name);
-                    ContextGroups.RemoveAll(group => group.SetEquals(unload.Names));
+                        LifecycleMetadatas.Remove(name);
+                    LifecycleContextGroups.RemoveAll(group => group.SetEquals(unload.Names));
                 }
 
                 if (clearAll)
                 {
-                    foreach (var pluginRoutes in PluginRoutes.Values)
-                        routes.AddRange(pluginRoutes);
-                    LoadedPlugins.Clear();
-                    Metadatas.Clear();
-                    AssemblyMetadatas.Clear();
-                    FailedPlugins.Clear();
-                    ContextGroups.Clear();
-                    Contexts.Clear();
-                    AssemblyMap.Clear();
-                    Assemblies.Clear();
-                    PluginRoutes.Clear();
-                    lock (AnalyzerGate)
-                    {
-                        RequestAnalyzerMethods.Clear();
-                        ResponseAnalyzerMethods.Clear();
-                    }
+                    LifecycleLoadedPlugins.Clear();
+                    LifecycleMetadatas.Clear();
+                    LifecycleFailedPlugins.Clear();
+                    LifecycleContextGroups.Clear();
+                    LifecycleContexts.Clear();
+                    ClearAnalyzerRegistrations();
                 }
             }
             catch (Exception ex)
             {
                 failures.Add(new InvalidOperationException("插件 registration/context 清理失败。", ex));
-            }
-            finally
-            {
-                StateLock.ExitWriteLock();
             }
 
             foreach (var plugin in plugins)
@@ -929,9 +818,6 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 try { ClearHostEventSubscriptions(); }
                 catch (Exception ex) { failures.Add(new InvalidOperationException("插件 HostEvents 清理失败。", ex)); }
             }
-
-            foreach (var route in routes)
-                RemoveRoute(route, "Unload", failures);
 
             var contexts = pendingUnloads
                 .Select(unload => unload.Context)
@@ -952,7 +838,6 @@ namespace UmamusumeResponseAnalyzer.Plugin
             foreach (var unload in pendingUnloads)
                 unload.Release();
             contexts.Clear();
-            routes.Clear();
             plugins.Clear();
             generations.Clear();
 

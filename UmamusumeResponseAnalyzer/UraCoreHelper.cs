@@ -6,15 +6,9 @@ namespace UmamusumeResponseAnalyzer
     public static class UraCoreHelper
     {
         private const string GameExeName = "umamusume.exe";
-        private static readonly Lazy<List<string>> _lazyGamePaths = new(LoadGamePaths, LazyThreadSafetyMode.ExecutionAndPublication);
-        private static List<string> _overrideGamePaths = [];
+        private static readonly Lazy<IReadOnlyList<string>> _lazyGamePaths = new(LoadGamePaths, LazyThreadSafetyMode.ExecutionAndPublication);
 
-        public static List<string> GamePaths
-        {
-            get => _overrideGamePaths.Count != 0 ? _overrideGamePaths : _lazyGamePaths.Value;
-            [Obsolete("Migrate to caller-owned game path selection instead of setting GamePaths.", false)]
-            set => _overrideGamePaths = value;
-        }
+        public static IReadOnlyList<string> GamePaths => _lazyGamePaths.Value;
 
         /// <summary>
         /// 从一个可能内嵌 umamusume.exe 全路径的注册表值里提取游戏安装目录前缀；不含 exe 名则返回 null。
@@ -25,7 +19,7 @@ namespace UmamusumeResponseAnalyzer
             return idx >= 0 ? candidate[..idx] : null;
         }
 
-        private static List<string> LoadGamePaths()
+        private static IReadOnlyList<string> LoadGamePaths()
         {
             if (!OperatingSystem.IsWindows())
                 return [];
@@ -53,7 +47,7 @@ namespace UmamusumeResponseAnalyzer
             // GameConfigStore — each child subkey has MatchedExeFullPath value
             TryExtractFromGameConfigStore(paths);
 
-            return [.. paths];
+            return Array.AsReadOnly(paths.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToArray());
         }
 
         /// <summary>

@@ -1,10 +1,21 @@
-﻿using System.Collections.Generic;
+using System.Collections.Frozen;
+using Newtonsoft.Json;
 
 namespace UmamusumeResponseAnalyzer.Entities
 {
-    public class SuccessionRelationTable
+    public sealed class SuccessionRelationTable
     {
-        public Dictionary<int, int> PointDictionary { get; set; } = [];
-        public Dictionary<int, List<int>> MemberDictionary { get; set; } = [];
+        [JsonConstructor]
+        public SuccessionRelationTable(
+            IReadOnlyDictionary<int, int>? pointDictionary = null,
+            IReadOnlyDictionary<int, int[]>? memberDictionary = null)
+        {
+            PointDictionary = (pointDictionary ?? new Dictionary<int, int>()).ToFrozenDictionary();
+            MemberDictionary = (memberDictionary ?? new Dictionary<int, int[]>())
+                .ToFrozenDictionary(x => x.Key, x => x.Value.ToArray());
+        }
+
+        public FrozenDictionary<int, int> PointDictionary { get; }
+        public FrozenDictionary<int, int[]> MemberDictionary { get; }
     }
 }

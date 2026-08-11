@@ -1,26 +1,22 @@
-using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System.Diagnostics;
-using System.Globalization;
-using System.Net;
 using System.Reflection;
 using System.Security.Cryptography;
 using UmamusumeResponseAnalyzer.TerminalGui;
-using UmamusumeResponseAnalyzer.Plugin;
 using static UmamusumeResponseAnalyzer.Localization.ResourceUpdater;
 
 namespace UmamusumeResponseAnalyzer
 {
     public static class ResourceUpdater
     {
-        public static HttpClient HttpClient = new()
+        internal static HttpClient HttpClient { get; set; } = new()
         {
             DefaultRequestHeaders =
             {
                 UserAgent = { new System.Net.Http.Headers.ProductInfoHeaderValue("UmamusumeResponseAnalyzer", Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "Unknown Version") }
             }
         };
-        public static async Task<bool> NeedUpdate(CancellationToken cancellationToken = default)
+        internal static async Task<bool> NeedUpdate(CancellationToken cancellationToken = default)
         {
             var json = JObject.Parse(await HttpClient.GetStringAsync(
                 "https://api.github.com/repos/UmamusumeResponseAnalyzer/UmamusumeResponseAnalyzer/releases/latest",
@@ -28,7 +24,7 @@ namespace UmamusumeResponseAnalyzer
             var latestVersion = json["tag_name"]?.ToString() ?? string.Empty;
             return !latestVersion.Equals("v" + Assembly.GetExecutingAssembly().GetName().Version);
         }
-        public static async Task UpdateProgram(CancellationToken cancellationToken = default)
+        internal static async Task UpdateProgram(CancellationToken cancellationToken = default)
         {
             if (!await NeedUpdate(cancellationToken))
             {
@@ -50,9 +46,10 @@ namespace UmamusumeResponseAnalyzer
                     cancellationToken))
                 return;
 
-            CloseToUpdate();
+            LaunchDownloadedProgram(path);
         }
-        public static void CloseToUpdate()
+
+        private static void LaunchDownloadedProgram(string path)
         {
             using (var proc = new Process()) //检查下载的文件是否正常
             {
@@ -61,8 +58,8 @@ namespace UmamusumeResponseAnalyzer
                 {
                     proc.StartInfo = new ProcessStartInfo
                     {
-                        FileName = Path.Combine(Path.GetTempPath(), "latest-UmamusumeResponseAnalyzer.exe"),
-                        Arguments = $"-v",
+                        FileName = path,
+                        Arguments = "-v",
                         UseShellExecute = false,
                         RedirectStandardOutput = true,
                         CreateNoWindow = true
@@ -80,50 +77,45 @@ namespace UmamusumeResponseAnalyzer
                 {
                     TerminalUi.Log("URA", I18N_UpdatedFileCorrupted, UiSeverity.Error);
                     TerminalUi.Notify("URA", I18N_UpdatedFileCorrupted, UiSeverity.Error);
-                    File.Delete(Path.Combine(Path.GetTempPath(), "latest-UmamusumeResponseAnalyzer.exe"));
+                    File.Delete(path);
                     return;
                 }
             }
             UmamusumeResponseAnalyzer.StartAfterTerminalCleanup(new ProcessStartInfo
             {
-                FileName = Path.Combine(Path.GetTempPath(), "latest-UmamusumeResponseAnalyzer.exe"),
+                FileName = path,
                 Arguments = $"--update \"{Environment.ProcessPath}\"",
                 UseShellExecute = true
             });
         }
-        public static async Task TryUpdateProgram(
-            string savepath = null!,
-            CancellationToken cancellationToken = default)
+        public static async Task HandleStartupProgramUpdateAsync(CancellationToken cancellationToken)
         {
             var path = Path.Combine(Path.GetTempPath(), "latest-UmamusumeResponseAnalyzer.exe");
-            var exist = File.Exists(path);
-            if (!string.IsNullOrEmpty(savepath))
-            {
-                path = savepath;
-                File.Copy(Environment.ProcessPath!, path, true);
+            if (!File.Exists(path))
+                return;
 
-                using var Proc = new Process
-                {
-                    StartInfo = new ProcessStartInfo
-                    {
-                        FileName = path,
-                        UseShellExecute = true
-                    }
-                };
-                Proc.Start(); //把新程序复制到原来的目录后就启动
+            if (!FilesHaveSameHash(Environment.ProcessPath!, path))
+            {
+                LaunchDownloadedProgram(path);
                 return;
             }
-            else if (exist && !FilesHaveSameHash(Environment.ProcessPath!, path)) //临时目录与当前目录的不一致则认为未更新
-            {
-                CloseToUpdate();
-                exist = false; //能执行到这就代表更新文件受损，已经被删掉了
-            }
 
-            if (exist) //删除临时文件
+            File.Delete(path);
+            await UpdateAssets(cancellationToken);
+        }
+
+        public static void InstallProgramUpdate(string savePath)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(savePath);
+            var processPath = Environment.ProcessPath
+                ?? throw new InvalidOperationException("无法确定当前程序路径，不能安装更新。");
+            var fullSavePath = Path.GetFullPath(savePath);
+            File.Copy(processPath, fullSavePath, true);
+            UmamusumeResponseAnalyzer.StartAfterTerminalCleanup(new ProcessStartInfo
             {
-                File.Delete(path);
-                await UpdateAssets(cancellationToken);
-            }
+                FileName = fullSavePath,
+                UseShellExecute = true
+            });
         }
         static bool FilesHaveSameHash(string leftPath, string rightPath)
         {
@@ -131,7 +123,7 @@ namespace UmamusumeResponseAnalyzer
             using var right = File.OpenRead(rightPath);
             return SHA256.HashData(left).SequenceEqual(SHA256.HashData(right));
         }
-        public static async Task UpdateAssets(CancellationToken cancellationToken = default)
+        internal static async Task UpdateAssets(CancellationToken cancellationToken = default)
         {
             await TerminalUi.RunProgressAsync((progress, token) => Task.WhenAll(
                 [

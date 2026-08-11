@@ -1,4 +1,3 @@
-using System.Reflection;
 using Gallop;
 using UmamusumeResponseAnalyzer;
 using UmamusumeResponseAnalyzer.Entities;
@@ -11,36 +10,6 @@ namespace UmamusumeResponseAnalyzer.Tests
     [Collection("Database")]
     public class CommandInfoTests
     {
-        public CommandInfoTests()
-        {
-            EnsureConfigInitialized();
-
-            Database.Names = new NameManager(
-            [
-                new SupportCardName(30001, "速卡", 101, 1001),
-                new SupportCardName(30002, "力卡", 102, 1002),
-                new SupportCardName(30003, "友卡", 0,   1003),
-                new SupportCardName(30137, "神团", 0,   1004),
-                new SupportCardName(30067, "皇团", 101, 1005),
-                new SupportCardName(30241, "传奇团", 0,   9047),
-                new BaseName(101, "理事长"),
-                new BaseName(1001, "训练员"),
-            ]);
-        }
-
-        static void EnsureConfigInitialized()
-        {
-            var cfgType = typeof(Config);
-            var currentProp = cfgType.GetProperty("Current", BindingFlags.NonPublic | BindingFlags.Static)!;
-            if (currentProp.GetValue(null) != null) return;
-
-            var yamlType = cfgType.Assembly.GetType("UmamusumeResponseAnalyzer.YamlConfig")!;
-            var yaml = Activator.CreateInstance(yamlType)!;
-            foreach (var prop in yamlType.GetProperties())
-                prop.SetValue(yaml, Activator.CreateInstance(prop.PropertyType));
-            currentProp.SetValue(null, yaml);
-        }
-
         static SingleModeCheckEventResponse.CommonResponse MakeResp(
             SingleModeSupportCard[] supportCards,
             EvaluationInfo[] evaluations,

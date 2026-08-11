@@ -60,12 +60,6 @@ namespace UmamusumeResponseAnalyzer.Plugin
             if (selectedPlugins.Count == 0)
                 return;
 
-            // 同一 InternalName 的多个 fork(不同作者)都能勾选,但本地磁盘/加载器只认 InternalName——
-            // 安装会按程序集名互相覆盖、实际只落一个。检出冲突,让用户每个 InternalName 只保留一个来源。
-            selectedPlugins = DedupeForks(selectedPlugins, cancellationToken);
-            if (selectedPlugins.Count == 0)
-                return;
-
             ResolveDependencies(selectedPlugins, plugins);
             var installed = await InstallPluginsAsync(selectedPlugins, cancellationToken);
 
@@ -83,25 +77,9 @@ namespace UmamusumeResponseAnalyzer.Plugin
                         $"插件安装完成，但加载失败：{string.Join("、", failed)}");
                 }
 
-                var needRestart = results
-                    .Where(result => result.Outcome == PluginManager.PluginLifecycleOutcome.RestartRequired)
-                    .Select(result => result.PluginName)
-                    .ToList();
-                if (needRestart.Count == 0)
-                {
-                    TerminalUi.Acknowledge(
-                        $"插件已安装并生效：{string.Join("、", installed)}",
-                        cancellationToken);
-                }
-                else
-                {
-                    // 无法热重载的情形（如 [LoadInHostContext] 插件）通过重启完成应用。
-                    var restart = TerminalUi.Acknowledge(
-                        $"需重启以应用插件：{string.Join("、", needRestart)}",
-                        cancellationToken);
-                    if (restart)
-                        global::UmamusumeResponseAnalyzer.UmamusumeResponseAnalyzer.Restart();
-                }
+                TerminalUi.Acknowledge(
+                    $"插件已安装并生效：{string.Join("、", installed)}",
+                    cancellationToken);
             }
         }
 
@@ -115,23 +93,14 @@ namespace UmamusumeResponseAnalyzer.Plugin
             if (remote.Count == 0) return [];
 
             var remoteByInternalName = remote
-                .GroupBy(r => r.InternalName, StringComparer.OrdinalIgnoreCase)
-                .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
+                .ToDictionary(plugin => plugin.InternalName, StringComparer.OrdinalIgnoreCase);
             var updates = new List<PluginUpdateInfo>();
             foreach (var plugin in loaded)
             {
                 var assemblyName = plugin.InternalName;
                 var currentVersion = plugin.Version
                     ?? throw new InvalidOperationException($"已加载插件缺少版本: {assemblyName}");
-                // 同名 fork 用作者消歧：只有一个匹配时直接使用；多个 fork 时
-                // 按已加载插件的 Author 选对应那个，选不出就跳过（宁可不提示，也不对错误的 fork 误报更新）。
-                if (!remoteByInternalName.TryGetValue(assemblyName, out var matches)) continue;
-                var remoteInfo = matches.Count switch
-                {
-                    1 => matches[0],
-                    _ => matches.FirstOrDefault(r => string.Equals(r.Author, plugin.Author, StringComparison.OrdinalIgnoreCase)),
-                };
-                if (remoteInfo is null) continue;
+                if (!remoteByInternalName.TryGetValue(assemblyName, out var remoteInfo)) continue;
                 if (remoteInfo.Version > currentVersion)
                 {
                     updates.Add(new PluginUpdateInfo(
@@ -151,15 +120,12 @@ namespace UmamusumeResponseAnalyzer.Plugin
             return BuildCatalog(list, Config.Repository.Targets);
         }
 
-        // 把原始 manifest 列表过滤成目录。**不按 InternalName 去重**：仓库允许同名不同作者的
-        // fork（如 离披/StatisticsCollector 与 URACloud-Tester/StatisticsCollector），插件身份
-        // 是 (Author, InternalName) 复合键。早先这里用 Dictionary 拿 InternalName 当 key，后到
-        // 的 fork 会覆盖先到的、连分类一起被吞掉（症状：目录里只剩一个、其余“消失”）。提成纯函数便于回归测试。
         internal static List<PluginInformation> BuildCatalog(
             IEnumerable<PluginInformation> raw, IReadOnlyCollection<string> targetFilter)
         {
             var noTargetFilter = targetFilter.Count == 0;
             var plugins = new List<PluginInformation>();
+            var internalNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var plugin in raw)
             {
                 if (plugin is null)
@@ -168,6 +134,8 @@ namespace UmamusumeResponseAnalyzer.Plugin
                     throw new InvalidDataException("插件 manifest 缺少 Author");
                 if (string.IsNullOrWhiteSpace(plugin.InternalName))
                     throw new InvalidDataException($"插件 {plugin.Author} 的 manifest 缺少 InternalName");
+                if (!internalNames.Add(plugin.InternalName))
+                    throw new InvalidDataException($"插件 InternalName 重复: {plugin.InternalName}");
                 if (!System.Version.TryParse(plugin.RawVersion, out _))
                     throw new InvalidDataException($"插件 {plugin.Author}/{plugin.InternalName} 的版本无效: {plugin.RawVersion}");
                 if (!noTargetFilter && plugin.Targets is { Length: > 0 } && !plugin.Targets.Intersect(targetFilter).Any())
@@ -198,7 +166,6 @@ namespace UmamusumeResponseAnalyzer.Plugin
         static string FormatChoice(PluginInformation info)
         {
             var version = info.Version == ZeroVersion ? "" : $" v{info.Version}";
-            // @作者:区分同名不同作者的 fork；真实选择值直接绑定 PluginInformation,显示文本不参与身份判断。
             var author = string.IsNullOrWhiteSpace(info.Author) ? "" : $" @{info.Author}";
             var desc = string.IsNullOrEmpty(info.Description) ? "" : $" — {info.Description}";
             return $"{DisplayLabel(info)}{version}{author}{desc}".ReplaceLineEndings(" ");
@@ -206,7 +173,15 @@ namespace UmamusumeResponseAnalyzer.Plugin
 
         internal static void ResolveDependencies(List<PluginInformation> selectedPlugins, List<PluginInformation> catalog)
         {
-            var selectedByName = selectedPlugins.ToDictionary(p => p.InternalName, StringComparer.OrdinalIgnoreCase);
+            var catalogByName = new Dictionary<string, PluginInformation>(StringComparer.OrdinalIgnoreCase);
+            foreach (var plugin in catalog)
+                if (!catalogByName.TryAdd(plugin.InternalName, plugin))
+                    throw new InvalidOperationException($"插件目录 InternalName 重复: {plugin.InternalName}");
+
+            var selectedByName = new Dictionary<string, PluginInformation>(StringComparer.OrdinalIgnoreCase);
+            foreach (var plugin in selectedPlugins)
+                if (!selectedByName.TryAdd(plugin.InternalName, plugin))
+                    throw new InvalidOperationException($"已选插件 InternalName 重复: {plugin.InternalName}");
 
             for (var i = 0; i < selectedPlugins.Count; i++)
             {
@@ -214,47 +189,13 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 {
                     if (selectedByName.ContainsKey(dependency)) continue;
 
-                    var matches = catalog
-                        .Where(p => string.Equals(p.InternalName, dependency, StringComparison.OrdinalIgnoreCase))
-                        .ToList();
-                    var dependencyPluginInfo = matches.Count switch
-                    {
-                        1 => matches[0],
-                        0 => throw new InvalidOperationException($"插件 {selectedPlugins[i].InternalName} 的依赖 {dependency} 不存在"),
-                        _ => throw new InvalidOperationException($"插件 {selectedPlugins[i].InternalName} 的依赖 {dependency} 有多个 fork，请先手动选择其中一个"),
-                    };
+                    if (!catalogByName.TryGetValue(dependency, out var dependencyPluginInfo))
+                        throw new InvalidOperationException(
+                            $"插件 {selectedPlugins[i].InternalName} 的依赖 {dependency} 不存在");
                     selectedPlugins.Add(dependencyPluginInfo);
                     selectedByName[dependencyPluginInfo.InternalName] = dependencyPluginInfo;
                 }
             }
-        }
-
-        /// <summary>
-        /// 同一 InternalName 被勾选了多个 fork(不同作者)时,逐个让用户二选一——本地磁盘/加载器只按
-        /// 程序集名(==InternalName)落地,装多个会互相覆盖,UI 的多选无法兑现。每个 InternalName 只留一个。
-        /// </summary>
-        static List<PluginInformation> DedupeForks(
-            List<PluginInformation> selected,
-            CancellationToken cancellationToken)
-        {
-            var result = new List<PluginInformation>();
-            foreach (var group in selected.GroupBy(p => p.InternalName, StringComparer.OrdinalIgnoreCase))
-            {
-                var forks = group.ToList();
-                if (forks.Count == 1)
-                {
-                    result.Add(forks[0]);
-                    continue;
-                }
-                TerminalUi.Log("URA", $"插件 {group.Key} 选中了多个来源，本地只能安装一个，请选择保留哪个：");
-                var pick = TerminalUi.Select(
-                    $"为 {group.Key} 选择来源",
-                    forks,
-                    f => $"{DisplayLabel(f)} @{f.Author}",
-                    cancellationToken);
-                result.Add(pick);
-            }
-            return result;
         }
 
         static async Task<PluginInformation?> PromptVersionAsync(PluginInformation plugin, CancellationToken cancellationToken)
@@ -305,33 +246,13 @@ namespace UmamusumeResponseAnalyzer.Plugin
         internal static async Task<List<string>> InstallPluginsAsync(List<PluginInformation> selectedPlugins, CancellationToken cancellationToken = default)
         {
             var installed = new List<string>();
-            var conflictingNames = selectedPlugins
-                .GroupBy(p => p.InternalName, StringComparer.OrdinalIgnoreCase)
-                .Where(g => g.Select(p => p.Author).Distinct(StringComparer.OrdinalIgnoreCase).Skip(1).Any())
-                .Select(g => g.Key)
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var internalNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var plugin in selectedPlugins)
+                if (!internalNames.Add(plugin.InternalName))
+                    throw new InvalidOperationException($"已选插件 InternalName 重复: {plugin.InternalName}");
+
             foreach (var plugin in selectedPlugins)
             {
-                if (conflictingNames.Contains(plugin.InternalName))
-                {
-                    var message = $"{Bracketed(plugin.InternalName)} 被多个作者同时选中，跳过；请一次只安装其中一个 fork";
-                    TerminalUi.Log("URA", message, UiSeverity.Warning);
-                    TerminalUi.Notify("URA", message, UiSeverity.Warning);
-                    continue;
-                }
-
-                var installedFork = PluginManager.SnapshotPluginStatuses()
-                    .FirstOrDefault(status => status.IsLoaded
-                        && string.Equals(status.InternalName, plugin.InternalName, StringComparison.OrdinalIgnoreCase)
-                        && !string.Equals(status.Author, plugin.Author, StringComparison.OrdinalIgnoreCase));
-                if (installedFork != null)
-                {
-                    var message = $"{Bracketed(DisplayLabel(plugin))} 与已安装的 {installedFork.Author}/{plugin.InternalName} 冲突，跳过";
-                    TerminalUi.Log("URA", message, UiSeverity.Warning);
-                    TerminalUi.Notify("URA", message, UiSeverity.Warning);
-                    continue;
-                }
-
                 try
                 {
                     var versionToInstall = await PromptVersionAsync(plugin, cancellationToken);
@@ -403,6 +324,29 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 throw new ArgumentException("非法的插件标识");
             var url = $"{PluginApiBase}/{Uri.EscapeDataString(author)}/{Uri.EscapeDataString(internalName)}/versions/{Uri.EscapeDataString(version)}/download";
             await DownloadPluginZipAsync(url, internalName, cancellationToken);
+        }
+
+        internal static PluginInformation ValidatePackage(
+            string packagePath,
+            string expectedAuthor,
+            string expectedInternalName,
+            string expectedVersion)
+        {
+            var manifest = PluginPackageValidator.Validate(
+                packagePath,
+                requireMatchingPackageFileName: false).Manifest;
+
+            if (!string.Equals(manifest.Author, expectedAuthor, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException(
+                    $"下载包 Author 与请求不匹配: expected={expectedAuthor}, actual={manifest.Author}");
+            if (!string.Equals(manifest.InternalName, expectedInternalName, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException(
+                    $"下载包 InternalName 与请求不匹配: expected={expectedInternalName}, actual={manifest.InternalName}");
+            if (!Version.TryParse(expectedVersion, out var version) || manifest.Version != version)
+                throw new InvalidDataException(
+                    $"下载包 Version 与请求不匹配: expected={expectedVersion}, actual={manifest.RawVersion}");
+
+            return manifest;
         }
 
         static bool IsSafeSegment(string s) =>

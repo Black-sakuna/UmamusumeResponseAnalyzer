@@ -95,119 +95,128 @@ public sealed class WorkspaceLifecycleTests(PluginRuntimeFixture fixture) : IDis
         Assert.Contains("[Admission]", screen, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public async Task RemoveClearsOwnedOutputAndHotkeyWithoutTouchingSurvivor()
-    {
-        await terminal.ResizeAsync(120, 30);
-        var doomed = Own(Workspace.Create($"Doomed-{Guid.NewGuid():N}"));
-        var survivor = Own(Workspace.Create($"Survivor-{Guid.NewGuid():N}"));
-        var doomedAlias = Workspace.Create(doomed.Title.ToUpperInvariant());
-        var survivorAlias = Workspace.Create(survivor.Title.ToUpperInvariant());
-        var doomedPanel = $"doomed-panel-{Guid.NewGuid():N}";
-        var panelDisposed = new DisposeSignal();
-        var survivorPanel = $"survivor-panel-{Guid.NewGuid():N}";
-        var notificationToken = Guid.NewGuid().ToString("N")[..8];
-        var doomedNotification1 = $"D{notificationToken}-1";
-        var doomedNotification2 = $"D{notificationToken}-2";
-        var survivorNotification = $"S{notificationToken}";
-        var modifiers = ConsoleModifiers.Control | ConsoleModifiers.Alt | ConsoleModifiers.Shift;
-        var workspaceKey = new Key(
-            KeyCode.F12 | KeyCode.CtrlMask | KeyCode.AltMask | KeyCode.ShiftMask);
-        var notificationKey = new Key(
-            KeyCode.F11 | KeyCode.CtrlMask | KeyCode.AltMask | KeyCode.ShiftMask);
-        var notificationHits = 0;
-
-        Assert.Same(doomed, doomedAlias);
-        Assert.Same(survivor, survivorAlias);
-        doomed.SetPanel(
-            "main",
-            "main",
-            new WorkspaceContent(() => new TrackingView(panelDisposed) { Text = doomedPanel }),
-            fullBleed: true);
-        survivorAlias.SetPanel(
-            "main",
-            "main",
-            WorkspaceContent.Text(survivorPanel),
-            fullBleed: true,
-            switchToWorkspace: false);
-        doomedAlias.BindHotkey(ConsoleKey.F12, modifiers);
-        doomed.Notify(
-            doomedNotification1,
-            UiSeverity.Warning,
-            TimeSpan.FromMinutes(1),
-            new UiShortcut(ConsoleKey.F11, () =>
-            {
-                notificationHits++;
-                return Task.CompletedTask;
-            }, modifiers));
-        doomedAlias.Notify(doomedNotification2, UiSeverity.Info, TimeSpan.FromMinutes(1));
-        survivorAlias.Notify(survivorNotification, UiSeverity.Success, TimeSpan.FromMinutes(1));
-        await host.FlushAsync();
-        await terminal.RedrawAsync();
-
-        await terminal.WaitForScreenAsync(doomedPanel);
-        Assert.Equal(
-            [doomedNotification1, doomedNotification2],
-            (await terminal.InvokeAsync(() => host.GetNotificationsForTests(doomed)))
-                .Select(notification => notification.Text));
-        var doomedScreen = await terminal.CaptureScreenAsync();
-        Assert.DoesNotContain(survivorNotification, doomedScreen, StringComparison.Ordinal);
-        Assert.True(await HotkeyManager.HandleKeyAsync(notificationKey));
-        Assert.Equal(1, notificationHits);
-
-        survivor.SwitchTo();
-        await host.FlushAsync();
-        await terminal.InjectAsync(workspaceKey);
-        await terminal.WaitForAsync(() => ReferenceEquals(Workspace.Current, doomed));
-        await host.FlushAsync();
-        Assert.Same(doomed, Workspace.Current);
-
-        survivor.SwitchTo();
-        doomed.Remove();
-        await host.FlushAsync();
-        await terminal.RedrawAsync();
-        await terminal.WaitForAsync(() => panelDisposed.Disposed);
-        Assert.False(await HotkeyManager.HandleKeyAsync(workspaceKey));
-        Assert.False(await HotkeyManager.HandleKeyAsync(notificationKey));
-        Assert.Equal(1, notificationHits);
-        Assert.Same(survivor, Workspace.Current);
-        Assert.Empty(await terminal.InvokeAsync(() => host.GetNotificationsForTests(doomed)));
-        Assert.Equal(
-            [survivorNotification],
-            (await terminal.InvokeAsync(() => host.GetNotificationsForTests(survivor)))
-                .Select(notification => notification.Text));
-        await terminal.WaitForScreenAsync(survivorPanel);
-
-        var survivorScreen = await terminal.CaptureScreenAsync();
-        Assert.DoesNotContain(doomedNotification1, survivorScreen, StringComparison.Ordinal);
-        Assert.DoesNotContain(doomedNotification2, survivorScreen, StringComparison.Ordinal);
-        Assert.Contains(survivorPanel, survivorScreen, StringComparison.Ordinal);
-    }
-
     Workspace Own(Workspace workspace)
     {
         ownedWorkspaces.Add(workspace);
         return workspace;
     }
-
-    sealed class DisposeSignal
-    {
-        public volatile bool Disposed;
-    }
-
-    sealed class TrackingView(DisposeSignal signal) : Label
-    {
-        protected override void Dispose(bool disposing)
-        {
-            if (disposing)
-                signal.Disposed = true;
-            base.Dispose(disposing);
-        }
-    }
 }
 
 public sealed class WorkspaceLifecycleProcessTests
 {
+    [Fact]
+    public async Task RemoveClearsOwnedOutputAndHotkeyWithoutTouchingSurvivor()
+    {
+        const string scenario = "workspace-owned-output-removal";
+        const string result = "workspace-owned-output-removal-ok";
+        if (TerminalUiLifecycleChildProcess.IsChild(scenario))
+        {
+            using var terminal = new TerminalGuiTestApp();
+            var host = TerminalUiLifecycleChildProcess.InitializeHost(
+                terminal,
+                CancellationToken.None);
+            var run = await terminal.StartAsync(host);
+            try
+            {
+                await terminal.ResizeAsync(120, 30);
+                var doomed = Workspace.Create($"Doomed-{Guid.NewGuid():N}");
+                var survivor = Workspace.Create($"Survivor-{Guid.NewGuid():N}");
+                var doomedAlias = Workspace.Create(doomed.Title.ToUpperInvariant());
+                var survivorAlias = Workspace.Create(survivor.Title.ToUpperInvariant());
+                var doomedPanel = $"doomed-panel-{Guid.NewGuid():N}";
+                var panelDisposed = new DisposeSignal();
+                var survivorPanel = $"survivor-panel-{Guid.NewGuid():N}";
+                var notificationToken = Guid.NewGuid().ToString("N")[..8];
+                var doomedNotification1 = $"D{notificationToken}-1";
+                var doomedNotification2 = $"D{notificationToken}-2";
+                var survivorNotification = $"S{notificationToken}";
+                var modifiers = ConsoleModifiers.Control | ConsoleModifiers.Alt | ConsoleModifiers.Shift;
+                var workspaceKey = new Key(
+                    KeyCode.F12 | KeyCode.CtrlMask | KeyCode.AltMask | KeyCode.ShiftMask);
+                var notificationKey = new Key(
+                    KeyCode.F11 | KeyCode.CtrlMask | KeyCode.AltMask | KeyCode.ShiftMask);
+                var notificationHits = 0;
+
+                Assert.Same(doomed, doomedAlias);
+                Assert.Same(survivor, survivorAlias);
+                doomed.SetPanel(
+                    "main",
+                    "main",
+                    new WorkspaceContent(() => new TrackingView(panelDisposed) { Text = doomedPanel }),
+                    fullBleed: true);
+                survivorAlias.SetPanel(
+                    "main",
+                    "main",
+                    WorkspaceContent.Text(survivorPanel),
+                    fullBleed: true,
+                    switchToWorkspace: false);
+                doomedAlias.BindHotkey(ConsoleKey.F12, modifiers);
+                doomed.Notify(
+                    doomedNotification1,
+                    UiSeverity.Warning,
+                    TimeSpan.FromMinutes(1),
+                    new UiShortcut(ConsoleKey.F11, () =>
+                    {
+                        notificationHits++;
+                        return Task.CompletedTask;
+                    }, modifiers));
+                doomedAlias.Notify(doomedNotification2, UiSeverity.Info, TimeSpan.FromMinutes(1));
+                survivorAlias.Notify(survivorNotification, UiSeverity.Success, TimeSpan.FromMinutes(1));
+                await host.FlushAsync();
+                await terminal.RedrawAsync();
+
+                await terminal.WaitForScreenAsync(doomedPanel);
+                await terminal.WaitForScreenAsync(doomedNotification1);
+                await terminal.WaitForScreenAsync(doomedNotification2);
+                var doomedScreen = await terminal.CaptureScreenAsync();
+                Assert.Contains(doomedNotification1, doomedScreen, StringComparison.Ordinal);
+                Assert.Contains(doomedNotification2, doomedScreen, StringComparison.Ordinal);
+                Assert.DoesNotContain(survivorNotification, doomedScreen, StringComparison.Ordinal);
+                Assert.True(await HotkeyManager.HandleKeyAsync(notificationKey));
+                Assert.Equal(1, notificationHits);
+
+                survivor.SwitchTo();
+                await host.FlushAsync();
+                await terminal.InjectAsync(workspaceKey);
+                await terminal.WaitForAsync(() => ReferenceEquals(Workspace.Current, doomed));
+                await host.FlushAsync();
+                Assert.Same(doomed, Workspace.Current);
+
+                survivor.SwitchTo();
+                doomed.Remove();
+                await host.FlushAsync();
+                await terminal.RedrawAsync();
+                await terminal.WaitForAsync(() => panelDisposed.Disposed);
+                Assert.False(await HotkeyManager.HandleKeyAsync(workspaceKey));
+                Assert.False(await HotkeyManager.HandleKeyAsync(notificationKey));
+                Assert.Equal(1, notificationHits);
+                Assert.Same(survivor, Workspace.Current);
+                await terminal.WaitForScreenAsync(survivorPanel);
+                await terminal.WaitForScreenAsync(survivorNotification);
+
+                var survivorScreen = await terminal.CaptureScreenAsync();
+                Assert.DoesNotContain(doomedNotification1, survivorScreen, StringComparison.Ordinal);
+                Assert.DoesNotContain(doomedNotification2, survivorScreen, StringComparison.Ordinal);
+                Assert.Contains(survivorNotification, survivorScreen, StringComparison.Ordinal);
+                Assert.Contains(survivorPanel, survivorScreen, StringComparison.Ordinal);
+
+                TerminalUiLifecycleChildProcess.WriteResult(result);
+            }
+            finally
+            {
+                await terminal.StopAsync(host, run);
+            }
+            return;
+        }
+
+        Assert.Equal(
+            result,
+            await TerminalUiLifecycleProcessTests.RunChildAsync(
+                scenario,
+                typeof(WorkspaceLifecycleProcessTests),
+                nameof(RemoveClearsOwnedOutputAndHotkeyWithoutTouchingSurvivor)));
+    }
+
     [Fact]
     public async Task FirstCreateSetsCurrentAndRemovalUsesLiveRegistrationOrder()
     {
@@ -255,5 +264,20 @@ public sealed class WorkspaceLifecycleProcessTests
                 scenario,
                 typeof(WorkspaceLifecycleProcessTests),
                 nameof(FirstCreateSetsCurrentAndRemovalUsesLiveRegistrationOrder)));
+    }
+
+    sealed class DisposeSignal
+    {
+        public volatile bool Disposed;
+    }
+
+    sealed class TrackingView(DisposeSignal signal) : Label
+    {
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+                signal.Disposed = true;
+            base.Dispose(disposing);
+        }
     }
 }

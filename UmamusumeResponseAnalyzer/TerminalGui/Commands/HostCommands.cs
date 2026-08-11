@@ -222,10 +222,6 @@ internal static class HostCommands
             "reload" => "重载",
             _ => throw new UnreachableException()
         };
-        if (result.Outcome == PluginManager.PluginLifecycleOutcome.RestartRequired)
-        {
-            return Warning($"插件 {plugin.InternalName} 需要重启才能{localizedAction}。");
-        }
         if (result.Outcome == PluginManager.PluginLifecycleOutcome.Failed)
         {
             return new(
@@ -286,9 +282,8 @@ internal static class HostCommands
                 var author = string.IsNullOrWhiteSpace(plugin.Author)
                     ? string.Empty
                     : $" by {plugin.Author}";
-                var host = plugin.LoadInHost ? " host" : string.Empty;
                 return new DisplayItem(
-                    $"{state} {plugin.InternalName}{displayName}{version}{author}{host}");
+                    $"{state} {plugin.InternalName}{displayName}{version}{author}");
             }).ToArray()));
     }
 
