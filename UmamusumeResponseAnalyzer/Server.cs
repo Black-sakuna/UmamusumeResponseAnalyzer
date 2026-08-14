@@ -128,12 +128,25 @@ namespace UmamusumeResponseAnalyzer
 
     internal static class Server
     {
+        static readonly Lazy<WebserverLite> defaultInstance = new(static () => new(
+            new WebserverSettings(Config.Core.ListenAddress, Config.Core.ListenPort),
+            ctx => ctx.Response.Send(string.Empty)));
+        static WebserverLite? instance;
+
+        // 禁止 beforefieldinit；配置只在首次获取 Instance 时读取。
+        static Server() { }
+
         const string GameEndpointPathPrefix = "/umamusume";
         const string CanonicalUrlHeaderName = "X-Hachimi-Game-Url";
         static ServerRequestBarrier? requests;
         static Task? shutdownTask;
-        internal static WebserverLite Instance = new(new WebserverSettings(Config.Core.ListenAddress, Config.Core.ListenPort), ctx => ctx.Response.Send(string.Empty));
-        internal static bool IsRunning => Instance.IsListening;
+        internal static WebserverLite Instance
+        {
+            get => Volatile.Read(ref instance) ?? defaultInstance.Value;
+            set => Volatile.Write(ref instance, value);
+        }
+        internal static bool IsRunning => Volatile.Read(ref instance)?.IsListening
+            ?? (defaultInstance.IsValueCreated && defaultInstance.Value.IsListening);
         internal static void Start(CancellationToken hostCancellationToken)
         {
             if (Volatile.Read(ref shutdownTask) is not null)
@@ -173,13 +186,21 @@ namespace UmamusumeResponseAnalyzer
             if (existing is not null)
                 return existing;
 
+            var server = Volatile.Read(ref instance);
+            if (server is null)
+            {
+                if (!defaultInstance.IsValueCreated)
+                    return Task.CompletedTask;
+                server = defaultInstance.Value;
+            }
+
             var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var task = completion.Task;
             existing = Interlocked.CompareExchange(ref shutdownTask, task, null);
             if (existing is not null)
                 return existing;
 
-            _ = CompleteShutdownAsync(completion, Instance, Volatile.Read(ref requests));
+            _ = CompleteShutdownAsync(completion, server, Volatile.Read(ref requests));
             return task;
         }
 

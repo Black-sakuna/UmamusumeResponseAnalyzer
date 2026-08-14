@@ -78,6 +78,26 @@ public sealed class LifecycleTeardownTests
     }
 
     [Fact]
+    public async Task StopAsync_BeforeConfigInitializationDoesNotCreateServer()
+    {
+        const string scenario = "server-stop-before-config";
+        if (TerminalUiLifecycleChildProcess.IsChild(scenario))
+        {
+            await Server.StopAsync();
+            Assert.False(Server.IsRunning);
+            TerminalUiLifecycleChildProcess.WriteResult("ok");
+            return;
+        }
+
+        Assert.Equal(
+            "ok",
+            await TerminalUiLifecycleProcessTests.RunChildAsync(
+                scenario,
+                typeof(LifecycleTeardownTests),
+                nameof(StopAsync_BeforeConfigInitializationDoesNotCreateServer)));
+    }
+
+    [Fact]
     public async Task ShutdownCoreAsync_WaitsForTrackedHandlerAndReleasesPort()
     {
         var port = GetFreePort();
