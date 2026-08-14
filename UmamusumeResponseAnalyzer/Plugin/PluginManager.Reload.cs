@@ -142,6 +142,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
             if (requested.Count == 0) return [];
 
             var outcomes = new Dictionary<string, PluginLifecycleOutcome>(StringComparer.OrdinalIgnoreCase);
+            var startedPluginBatches = new List<IPlugin[]>();
             List<Exception> failures = [];
             foreach (var rawName in requested)
             {
@@ -153,7 +154,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
 
                 try
                 {
-                    outcomes[rawName] = await UnloadPluginAsync(name, outcomes);
+                    outcomes[rawName] = await UnloadPluginAsync(name, outcomes, startedPluginBatches);
                 }
                 catch (Exception ex)
                 {
@@ -164,6 +165,9 @@ namespace UmamusumeResponseAnalyzer.Plugin
 
             if (failures.Count != 0)
                 throw new AggregateException("插件批量卸载失败。", failures);
+
+            foreach (var plugins in startedPluginBatches)
+                await TriggerStartedForPluginsAsync(plugins);
 
             return requested
                 .Select(name => new PluginLifecycleResult(name, outcomes[name]))
@@ -255,8 +259,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 foreach (var dependency in metadata.Dependencies)
                 {
                     if (!source.ContainsKey(dependency))
-                        throw new InvalidDataException(
-                            $"插件 {metadata.PluginName} 缺少 manifest 依赖 {dependency}。");
+                        continue;
                     if (component.Add(dependency))
                         pending.Enqueue(dependency);
                 }
@@ -330,12 +333,14 @@ namespace UmamusumeResponseAnalyzer.Plugin
 
         static async Task<PluginLifecycleOutcome> UnloadPluginAsync(
             string pluginName,
-            Dictionary<string, PluginLifecycleOutcome> outcomes)
+            Dictionary<string, PluginLifecycleOutcome> outcomes,
+            List<IPlugin[]> startedPluginBatches)
         {
             if (outcomes.TryGetValue(pluginName, out var prior)) return prior;
 
             PendingPluginUnload? unload = null;
             HashSet<string>? group = null;
+            Dictionary<string, PluginMetadata>? survivorMetadatas = null;
             var notLoaded = false;
             var loadedPlugin = LifecycleLoadedPlugins.FirstOrDefault(plugin =>
                 string.Equals(InternalName(plugin), pluginName, StringComparison.OrdinalIgnoreCase));
@@ -353,6 +358,13 @@ namespace UmamusumeResponseAnalyzer.Plugin
             else
             {
                 var unloadGroup = group;
+                survivorMetadatas = unloadGroup
+                    .Where(name => !string.Equals(name, pluginName, StringComparison.OrdinalIgnoreCase))
+                    .Where(LifecycleMetadatas.ContainsKey)
+                    .ToDictionary(
+                        name => name,
+                        name => LifecycleMetadatas[name],
+                        StringComparer.OrdinalIgnoreCase);
                 if (LifecycleContexts.ContainsKey(GroupKey(unloadGroup)))
                 {
                     unload = PrepareUnloadGroup(unloadGroup);
@@ -373,14 +385,23 @@ namespace UmamusumeResponseAnalyzer.Plugin
 
             if (unload is not null)
             {
-                foreach (var name in group!)
-                    outcomes[name] = PluginLifecycleOutcome.Failed;
                 await CompletePendingUnloadsAsync([unload], clearAll: false);
                 unload = null;
             }
 
-            foreach (var name in group!)
-                outcomes[name] = PluginLifecycleOutcome.Succeeded;
+            foreach (var (name, metadata) in survivorMetadatas!)
+                LifecycleMetadatas[name] = metadata;
+            BuildGroups();
+
+            var survivorOutcomes = new Dictionary<string, PluginLifecycleOutcome>(StringComparer.OrdinalIgnoreCase);
+            await LoadAffectedGroupsAsync(survivorMetadatas.Keys, survivorOutcomes, startedPluginBatches);
+            var failedSurvivors = survivorOutcomes
+                .Where(result => result.Value == PluginLifecycleOutcome.Failed)
+                .Select(result => result.Key)
+                .ToArray();
+            if (failedSurvivors.Length != 0)
+                throw new InvalidOperationException(
+                    $"插件 {pluginName} 已卸载，但关联插件重新加载失败: {string.Join("、", failedSurvivors)}");
 
             TerminalUi.Log("Plugin", $"插件 {pluginName} 已卸载。", UiSeverity.Success);
             return outcomes[pluginName] = PluginLifecycleOutcome.Succeeded;
@@ -570,8 +591,15 @@ namespace UmamusumeResponseAnalyzer.Plugin
 
         static Exception? InitializeStagedPlugins(StagedGroupLoad staged)
         {
+            var availableGroupMembers = staged.Plugins
+                .Select(plugin => InternalName(plugin.Plugin))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
             foreach (var plugin in staged.Plugins)
-                if (!TryInitializePlugin(plugin.Plugin, committed: false, out var failure))
+                if (!TryInitializePlugin(
+                        plugin.Plugin,
+                        committed: false,
+                        out var failure,
+                        availableGroupMembers))
                     return failure;
 
             return null;

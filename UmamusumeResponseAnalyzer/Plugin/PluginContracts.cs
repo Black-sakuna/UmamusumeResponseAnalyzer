@@ -8,6 +8,7 @@ public interface IPluginContext
     IApplication Application { get; }
     IPluginHostEvents Events { get; }
     IPluginAnalyzerRegistry Analyzers { get; }
+    bool IsPluginAvailable(string internalName);
     void RunBackground(Func<CancellationToken, ValueTask> operation);
 }
 

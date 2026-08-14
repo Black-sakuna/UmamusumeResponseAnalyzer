@@ -330,9 +330,12 @@ namespace UmamusumeResponseAnalyzer.Plugin
         /// 初始批量加载（Program.cs）与热重载都经此入口，保证 owner 标记一致。
         /// </summary>
         internal static void InitializePlugin(IPlugin plugin)
-            => InitializePlugin(plugin, activateCallbacks: true);
+            => InitializePlugin(plugin, activateCallbacks: true, availableGroupMembers: null);
 
-        static void InitializePlugin(IPlugin plugin, bool activateCallbacks)
+        static void InitializePlugin(
+            IPlugin plugin,
+            bool activateCallbacks,
+            IReadOnlySet<string>? availableGroupMembers)
         {
             var generation = GenerationFor(plugin);
             using var initialization = generation.EnterInitialization();
@@ -340,7 +343,11 @@ namespace UmamusumeResponseAnalyzer.Plugin
             {
                 using var owner = HotkeyManager.RegisterScope(plugin);
                 using var registrations = BeginRegistrationStage(plugin, includeAttributeAnalyzers: true);
-                plugin.Initialize(new PluginContext(TerminalUi.RequireHost(), plugin, HostEvents));
+                plugin.Initialize(new PluginContext(
+                    TerminalUi.RequireHost(),
+                    plugin,
+                    HostEvents,
+                    DeclaredAvailablePlugins(plugin, availableGroupMembers)));
                 registrations.Commit();
                 generation.CompleteInitialization();
                 if (activateCallbacks)
@@ -375,10 +382,14 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 if (plugins.Count == 0)
                     continue;
                 grouped.UnionWith(plugins);
+                var availableGroupMembers = plugins
+                    .Select(InternalName)
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
                 var initialized = true;
                 foreach (var plugin in plugins)
-                    if (!GenerationFor(plugin).IsAccepting && !TryInitializePlugin(plugin, committed: false))
+                    if (!GenerationFor(plugin).IsAccepting &&
+                        !TryInitializePlugin(plugin, committed: false, availableGroupMembers))
                     {
                         initialized = false;
                         break;
@@ -403,17 +414,21 @@ namespace UmamusumeResponseAnalyzer.Plugin
             Lifecycle.Phase = PluginLifecyclePhase.Initialized;
         }
 
-        static bool TryInitializePlugin(IPlugin plugin, bool committed)
-            => TryInitializePlugin(plugin, committed, out _);
+        static bool TryInitializePlugin(
+            IPlugin plugin,
+            bool committed,
+            IReadOnlySet<string>? availableGroupMembers = null)
+            => TryInitializePlugin(plugin, committed, out _, availableGroupMembers);
 
         static bool TryInitializePlugin(
             IPlugin plugin,
             bool committed,
-            out Exception? failure)
+            out Exception? failure,
+            IReadOnlySet<string>? availableGroupMembers = null)
         {
             try
             {
-                InitializePlugin(plugin, activateCallbacks: committed);
+                InitializePlugin(plugin, activateCallbacks: committed, availableGroupMembers);
                 failure = null;
                 return true;
             }
@@ -440,6 +455,19 @@ namespace UmamusumeResponseAnalyzer.Plugin
                 ReportPluginDiagnostic(failure);
                 return false;
             }
+        }
+
+        static IReadOnlySet<string> DeclaredAvailablePlugins(
+            IPlugin plugin,
+            IReadOnlySet<string>? availableGroupMembers)
+        {
+            if (availableGroupMembers is null ||
+                !LifecycleMetadatas.TryGetValue(InternalName(plugin), out var metadata))
+                return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            return metadata.Dependencies
+                .Where(availableGroupMembers.Contains)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
         }
 
         internal static async Task TriggerStartedAsync(CancellationToken cancellationToken = default)

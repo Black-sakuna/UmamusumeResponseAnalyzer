@@ -35,16 +35,29 @@ public sealed class SharedContextTests : IDisposable
     }
 
     [Fact]
-    public void MissingManifestDependencyFailsBeforeCreatingLoadContext()
+    public void MissingManifestDependencyLoadsConsumerAndReportsUnavailable()
     {
-        CreatePackage("Member", ["Missing"]);
+        var resultPath = Path.Combine(testDirectory, "availability-result.txt");
+        CreatePackage(
+            "Member",
+            ["Missing"],
+            $$"""
+            using System.IO;
+            using UmamusumeResponseAnalyzer.Plugin;
 
-        var error = Assert.Throws<InvalidDataException>(RestartPluginManager);
+            public sealed class MemberPlugin : IPlugin
+            {
+                public void Initialize(IPluginContext context)
+                    => File.WriteAllText(@"{{resultPath.Replace("\"", "\"\"")}}", context.IsPluginAvailable("Missing").ToString());
+            }
+            """);
 
-        Assert.Contains("Member", error.Message, StringComparison.Ordinal);
-        Assert.Contains("Missing", error.Message, StringComparison.Ordinal);
-        Assert.Contains("缺少 manifest 依赖", error.Message, StringComparison.Ordinal);
-        Assert.Empty(PluginManager.Contexts);
+        RestartPluginManager();
+        PluginManager.InitializeLoadedPlugins();
+
+        Assert.Empty(PluginManager.FailedPlugins);
+        Assert.Contains(PluginManager.LoadedPlugins, plugin => PluginManager.InternalName(plugin) == "Member");
+        Assert.Equal("False", File.ReadAllText(resultPath));
     }
 
     [Fact]
@@ -82,7 +95,11 @@ public sealed class SharedContextTests : IDisposable
                     var ownContext = AssemblyLoadContext.GetLoadContext(GetType().Assembly)!;
                     var dependency = ownContext.LoadFromAssemblyName(new AssemblyName("Anchor"));
                     var dependencyContext = AssemblyLoadContext.GetLoadContext(dependency);
-                    File.WriteAllText(@"{{resultPath.Replace("\"", "\"\"")}}", object.ReferenceEquals(ownContext, dependencyContext) ? "same" : "different");
+                    File.WriteAllText(
+                        @"{{resultPath.Replace("\"", "\"\"")}}",
+                        context.IsPluginAvailable("Anchor") && object.ReferenceEquals(ownContext, dependencyContext)
+                            ? "available-same"
+                            : "unavailable-or-different");
                 }
             }
             """);
@@ -91,7 +108,7 @@ public sealed class SharedContextTests : IDisposable
         PluginManager.InitializeLoadedPlugins();
 
         Assert.Empty(PluginManager.FailedPlugins);
-        Assert.Equal("same", File.ReadAllText(resultPath));
+        Assert.Equal("available-same", File.ReadAllText(resultPath));
     }
 
     static void RestartPluginManager()

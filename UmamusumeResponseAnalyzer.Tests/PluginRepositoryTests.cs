@@ -147,63 +147,6 @@ namespace UmamusumeResponseAnalyzer.Tests
         }
 
         [Fact]
-        public void ResolveDependencies_AddsTransitiveDependencies()
-        {
-            // 回归:安装 A 时若 A -> B -> C,旧实现只追加 B,导致 C 不会下载到本地。
-            var root = Info("a", "Root");
-            root.Dependencies = ["Middle"];
-            var middle = Info("a", "Middle");
-            middle.Dependencies = ["Leaf"];
-            var leaf = Info("a", "Leaf");
-            var selected = new List<PluginInformation> { root };
-            var catalog = new List<PluginInformation> { root, middle, leaf };
-
-            PluginRepository.ResolveDependencies(selected, catalog);
-
-            Assert.Equal(["Root", "Middle", "Leaf"], selected.Select(p => p.InternalName).ToArray());
-        }
-
-        [Fact]
-        public void ResolveDependencies_ThrowsWhenDependencyIsMissing()
-        {
-            var root = Info("a", "Root");
-            root.Dependencies = ["Missing"];
-
-            var exception = Assert.Throws<InvalidOperationException>(() =>
-                PluginRepository.ResolveDependencies([root], [root]));
-
-            Assert.Contains("Missing", exception.Message);
-        }
-
-        [Fact]
-        public void ResolveDependencies_RejectsDuplicateCatalogNamesIgnoringCase()
-        {
-            var root = Info("a", "Root");
-            root.Dependencies = ["Dependency"];
-            var first = Info("a", "Dependency");
-            var duplicate = Info("b", "dependency");
-
-            var exception = Assert.Throws<InvalidOperationException>(() =>
-                PluginRepository.ResolveDependencies([root], [root, first, duplicate]));
-
-            Assert.Contains("InternalName 重复", exception.Message);
-            Assert.Contains("dependency", exception.Message);
-        }
-
-        [Fact]
-        public void ResolveDependencies_MatchesInternalNameIgnoringCase()
-        {
-            var root = Info("a", "Root");
-            root.Dependencies = ["dependency"];
-            var dependency = Info("a", "Dependency");
-            var selected = new List<PluginInformation> { root };
-
-            PluginRepository.ResolveDependencies(selected, [root, dependency]);
-
-            Assert.Equal([root, dependency], selected);
-        }
-
-        [Fact]
         public void ValidatePackage_ReturnsStrictManifestMetadata()
         {
             var manifest = Info("author", PackageInternalName, targets: ["Cygames"]);

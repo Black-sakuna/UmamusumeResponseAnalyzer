@@ -497,15 +497,26 @@ namespace UmamusumeResponseAnalyzer.Tests
             AssertReadOnlyProperty(contextProperties, "Events", typeof(IPluginHostEvents));
             AssertReadOnlyProperty(contextProperties, "Analyzers", typeof(IPluginAnalyzerRegistry));
 
-            var runBackground = Assert.Single(
-                contextType.GetMethods(PublicDeclared),
-                method => !method.IsSpecialName);
+            var contextMethods = contextType.GetMethods(PublicDeclared)
+                .Where(method => !method.IsSpecialName)
+                .ToDictionary(method => method.Name);
+            Assert.Equal(
+                new[] { "IsPluginAvailable", "RunBackground" },
+                contextMethods.Keys.Order(StringComparer.Ordinal).ToArray());
+            var runBackground = contextMethods["RunBackground"];
             Assert.Equal("RunBackground", runBackground.Name);
             Assert.Equal(typeof(void), runBackground.ReturnType);
             AssertParameter(
                 Assert.Single(runBackground.GetParameters()),
                 "operation",
                 typeof(Func<CancellationToken, ValueTask>));
+
+            var isPluginAvailable = contextMethods["IsPluginAvailable"];
+            Assert.Equal(typeof(bool), isPluginAvailable.ReturnType);
+            AssertParameter(
+                Assert.Single(isPluginAvailable.GetParameters()),
+                "internalName",
+                typeof(string));
 
             var eventsType = typeof(IPluginHostEvents);
             Assert.True(eventsType.IsPublic);

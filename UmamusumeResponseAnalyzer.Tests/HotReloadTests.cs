@@ -309,12 +309,91 @@ namespace UmamusumeResponseAnalyzer.Tests
 
             AssertLifecycleOutcome(await PluginManager.UnloadPluginsAsync("RuntimeMember"), "RuntimeMember", PluginManager.PluginLifecycleOutcome.Succeeded);
 
-            Assert.DoesNotContain(PluginManager.LoadedPlugins, x => PluginManager.InternalName(x) == "RuntimeAnchor");
+            Assert.Contains(PluginManager.LoadedPlugins, x => PluginManager.InternalName(x) == "RuntimeAnchor");
             Assert.DoesNotContain(PluginManager.LoadedPlugins, x => PluginManager.InternalName(x) == "RuntimeMember");
             AssertLifecycleOutcome(await PluginManager.LoadPluginsAsync("RuntimeMember"), "RuntimeMember", PluginManager.PluginLifecycleOutcome.Succeeded);
 
             Assert.Contains(PluginManager.LoadedPlugins, x => PluginManager.InternalName(x) == "RuntimeAnchor");
             Assert.Contains(PluginManager.LoadedPlugins, x => PluginManager.InternalName(x) == "RuntimeMember");
+        }
+
+        [Fact]
+        public async Task OptionalLinkage_UsesStagedGroupSnapshotAndReloadsSurvivor()
+        {
+            const string provider = "OptionalProvider";
+            const string consumer = "OptionalConsumer";
+            var log = Path.Combine(_tempDir, "optional-linkage.log");
+            var providerReference = Path.Combine(_tempDir, $"{provider}.dll");
+            var providerSource = $$"""
+                using System;
+                using System.IO;
+                using UmamusumeResponseAnalyzer.Plugin;
+
+                public static class ProviderApi
+                {
+                    public static string Value() => "provider-api";
+                }
+
+                public sealed class ProviderPlugin : IPlugin
+                {
+                    public void Initialize(IPluginContext context)
+                        => File.AppendAllText(@"{{log}}", "provider-initialize" + Environment.NewLine);
+                }
+                """;
+            PluginCompiler.Compile(providerSource, provider, providerReference);
+            PluginCompiler.CompilePackage(
+                $$"""
+                using System;
+                using System.IO;
+                using System.Runtime.CompilerServices;
+                using UmamusumeResponseAnalyzer.Plugin;
+
+                public sealed class ConsumerPlugin : IPlugin
+                {
+                    public void Initialize(IPluginContext context)
+                    {
+                        var available = context.IsPluginAvailable("{{provider}}");
+                        File.AppendAllText(
+                            @"{{log}}",
+                            $"consumer-available={available};value={(available ? ReadProvider() : "missing")}" + Environment.NewLine);
+                    }
+
+                    [MethodImpl(MethodImplOptions.NoInlining)]
+                    static string ReadProvider() => ProviderApi.Value();
+                }
+                """,
+                consumer,
+                Path.Combine(_tempDir, "Plugins", $"{consumer}.zip"),
+                dependencies: [provider],
+                referencePaths: [providerReference]);
+
+            PluginManager.Init();
+            PluginManager.InitializeLoadedPlugins();
+            Assert.Equal(["consumer-available=False;value=missing"], File.ReadAllLines(log));
+            Assert.Empty(PluginManager.FailedPlugins);
+
+            PluginCompiler.CompilePackage(
+                providerSource,
+                provider,
+                Path.Combine(_tempDir, "Plugins", $"{provider}.zip"));
+            AssertLifecycleOutcome(
+                await PluginManager.LoadPluginsAsync(provider),
+                provider,
+                PluginManager.PluginLifecycleOutcome.Succeeded);
+            var installed = File.ReadAllLines(log);
+            Assert.Equal("provider-initialize", installed[^2]);
+            Assert.Equal("consumer-available=True;value=provider-api", installed[^1]);
+            Assert.Single(
+                PluginManager.Contexts.Keys,
+                key => key.Split('&').Contains(provider) && key.Split('&').Contains(consumer));
+
+            AssertLifecycleOutcome(
+                await PluginManager.UnloadPluginsAsync(provider),
+                provider,
+                PluginManager.PluginLifecycleOutcome.Succeeded);
+            Assert.DoesNotContain(PluginManager.LoadedPlugins, plugin => PluginManager.InternalName(plugin) == provider);
+            Assert.Contains(PluginManager.LoadedPlugins, plugin => PluginManager.InternalName(plugin) == consumer);
+            Assert.Equal("consumer-available=False;value=missing", File.ReadAllLines(log)[^1]);
         }
 
         [Fact]

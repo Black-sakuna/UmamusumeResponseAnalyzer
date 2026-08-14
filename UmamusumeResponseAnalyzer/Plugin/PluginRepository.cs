@@ -60,7 +60,6 @@ namespace UmamusumeResponseAnalyzer.Plugin
             if (selectedPlugins.Count == 0)
                 return;
 
-            ResolveDependencies(selectedPlugins, plugins);
             var installed = await InstallPluginsAsync(selectedPlugins, cancellationToken);
 
             if (installed.Count > 0)
@@ -169,33 +168,6 @@ namespace UmamusumeResponseAnalyzer.Plugin
             var author = string.IsNullOrWhiteSpace(info.Author) ? "" : $" @{info.Author}";
             var desc = string.IsNullOrEmpty(info.Description) ? "" : $" — {info.Description}";
             return $"{DisplayLabel(info)}{version}{author}{desc}".ReplaceLineEndings(" ");
-        }
-
-        internal static void ResolveDependencies(List<PluginInformation> selectedPlugins, List<PluginInformation> catalog)
-        {
-            var catalogByName = new Dictionary<string, PluginInformation>(StringComparer.OrdinalIgnoreCase);
-            foreach (var plugin in catalog)
-                if (!catalogByName.TryAdd(plugin.InternalName, plugin))
-                    throw new InvalidOperationException($"插件目录 InternalName 重复: {plugin.InternalName}");
-
-            var selectedByName = new Dictionary<string, PluginInformation>(StringComparer.OrdinalIgnoreCase);
-            foreach (var plugin in selectedPlugins)
-                if (!selectedByName.TryAdd(plugin.InternalName, plugin))
-                    throw new InvalidOperationException($"已选插件 InternalName 重复: {plugin.InternalName}");
-
-            for (var i = 0; i < selectedPlugins.Count; i++)
-            {
-                foreach (var dependency in selectedPlugins[i].Dependencies)
-                {
-                    if (selectedByName.ContainsKey(dependency)) continue;
-
-                    if (!catalogByName.TryGetValue(dependency, out var dependencyPluginInfo))
-                        throw new InvalidOperationException(
-                            $"插件 {selectedPlugins[i].InternalName} 的依赖 {dependency} 不存在");
-                    selectedPlugins.Add(dependencyPluginInfo);
-                    selectedByName[dependencyPluginInfo.InternalName] = dependencyPluginInfo;
-                }
-            }
         }
 
         static async Task<PluginInformation?> PromptVersionAsync(PluginInformation plugin, CancellationToken cancellationToken)

@@ -6,11 +6,18 @@ namespace UmamusumeResponseAnalyzer.Plugin;
 internal sealed class PluginContext(
     UiHost host,
     IPlugin plugin,
-    PluginHostEvents events) : IPluginContext, IPluginHostEvents
+    PluginHostEvents events,
+    IReadOnlySet<string> availablePlugins) : IPluginContext, IPluginHostEvents
 {
     public IApplication Application { get; } = host.Application;
     public IPluginHostEvents Events => this;
     public IPluginAnalyzerRegistry Analyzers { get; } = PluginManager.AnalyzersFor(plugin);
+
+    public bool IsPluginAvailable(string internalName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(internalName);
+        return availablePlugins.Contains(internalName);
+    }
 
     public void OnStarted(Func<CancellationToken, ValueTask> handler)
     {

@@ -97,12 +97,6 @@ internal static partial class PluginManager
 
     internal static void BuildGroups()
     {
-        foreach (var metadata in LifecycleMetadatas.Values)
-            foreach (var dependency in metadata.Dependencies)
-                if (!LifecycleMetadatas.ContainsKey(dependency))
-                    throw new InvalidDataException(
-                        $"插件 {metadata.PluginName} 缺少 manifest 依赖 {dependency}。");
-
         _ = TopologicalOrder(LifecycleMetadatas.Keys);
 
         var adjacency = LifecycleMetadatas.Keys.ToDictionary(
@@ -112,6 +106,8 @@ internal static partial class PluginManager
         foreach (var metadata in LifecycleMetadatas.Values)
             foreach (var dependency in metadata.Dependencies)
             {
+                if (!LifecycleMetadatas.ContainsKey(dependency))
+                    continue;
                 adjacency[metadata.PluginName].Add(dependency);
                 adjacency[dependency].Add(metadata.PluginName);
             }
@@ -147,10 +143,6 @@ internal static partial class PluginManager
         {
             if (!source.TryGetValue(name, out var metadata))
                 throw new InvalidDataException($"插件依赖图包含未安装插件: {name}");
-            foreach (var dependency in metadata.Dependencies)
-                if (!source.ContainsKey(dependency))
-                    throw new InvalidDataException(
-                        $"插件 {metadata.PluginName} 缺少 manifest 依赖 {dependency}。");
         }
 
         var state = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
