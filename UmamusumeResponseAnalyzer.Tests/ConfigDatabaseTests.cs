@@ -130,7 +130,6 @@ namespace UmamusumeResponseAnalyzer.Tests
         [InlineData("  listen-port: 4693", "  listen-port: null", "core.listen-port")]
         [InlineData("  targets: []", "  targets: null", "repository.targets")]
         [InlineData("  database-language: ja-JP", "  database-language: null", "updater.database-language")]
-        [InlineData("  custom-database-repository: ''", "  custom-database-repository: null", "updater.custom-database-repository")]
         [InlineData("  selected: AutoDetect", "  selected: null", "language.selected")]
         [InlineData("workspace-taskbar-title-order: []", "workspace-taskbar-title-order: null", "workspace-taskbar-title-order")]
         public void Deserialize_ExplicitNullValue_ThrowsWithFieldPath(
@@ -153,6 +152,25 @@ namespace UmamusumeResponseAnalyzer.Tests
                 Config.Deserialize(yaml, "config.yaml"));
 
             Assert.Contains("repository.targets[1]", exception.Message);
+        }
+
+        // custom-database-repository 可选:空值(显式 null / YAML 空标量 / 引号空串)与缺失一样
+        // 表示"未设置",归一为 string.Empty,由消费方回退默认仓库。旧逻辑把空标量解析出的
+        // null 当成"不能为空"拒绝,导致留空该可选字段的 config.yaml 无法启动。
+        [Theory]
+        [InlineData("  custom-database-repository: null")]     // 显式 null
+        [InlineData("  custom-database-repository:")]          // YAML 空标量(冒号后无值)→ null
+        [InlineData("  custom-database-repository: ''")]       // 引号空串
+        public void Deserialize_OptionalCustomDatabaseRepository_NormalizesToEmpty(string line)
+        {
+            var yaml = CompleteYaml.Replace(
+                "  custom-database-repository: ''",
+                line,
+                StringComparison.Ordinal);
+
+            var config = Config.Deserialize(yaml, "config.yaml");
+
+            Assert.Equal(string.Empty, config.Updater.CustomDatabaseRepository);
         }
 
         [Fact]
@@ -189,7 +207,7 @@ namespace UmamusumeResponseAnalyzer.Tests
             var restored = Config.Deserialize(yaml, "config.yaml");
             Assert.NotNull(restored.Core.ListenAddress);
             Assert.NotNull(restored.Updater.DatabaseLanguage);
-            Assert.NotNull(restored.Updater.CustomDatabaseRepository);
+            Assert.Equal(string.Empty, restored.Updater.CustomDatabaseRepository);
             Assert.NotNull(restored.Repository.Targets);
             Assert.NotNull(restored.WorkspaceTaskbarTitleOrder);
         }

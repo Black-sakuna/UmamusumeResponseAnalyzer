@@ -220,10 +220,7 @@ namespace UmamusumeResponseAnalyzer
                 DatabaseLanguage,
                 sourcePath,
                 "updater.database-language"),
-            CustomDatabaseRepository = YamlConfigDto.Required(
-                CustomDatabaseRepository,
-                sourcePath,
-                "updater.custom-database-repository"),
+            CustomDatabaseRepository = CustomDatabaseRepository ?? string.Empty,
             ForceUseGithubToUpdate = YamlConfigDto.Required(
                 ForceUseGithubToUpdate,
                 sourcePath,
