@@ -15,7 +15,7 @@ public sealed class WorkspaceViewTests
     public async Task ReconcileRealizesOnlyFinalContentAndReusesItsView()
     {
         using var terminal = new TerminalGuiTestApp(width: 50, height: 12);
-        using var viewport = new WorkspaceViewport();
+        using var viewport = new WorkspaceViewport(new Workspace(Workspace.BootstrapTitle));
         var workspace = new Workspace("Model batch");
         var inactiveWorkspace = new Workspace("Inactive");
         Button? finalView = null;
@@ -91,7 +91,7 @@ public sealed class WorkspaceViewTests
     public async Task SelectionUsesReferenceGenerationKeyOrderAndLatestFullBleed()
     {
         using var terminal = new TerminalGuiTestApp(width: 48, height: 10);
-        using var viewport = new WorkspaceViewport();
+        using var viewport = new WorkspaceViewport(new Workspace(Workspace.BootstrapTitle));
         var oldGeneration = new Workspace("Shared title");
         var newGeneration = new Workspace("shared TITLE");
         viewport.SetPanel(Panel(
@@ -112,8 +112,8 @@ public sealed class WorkspaceViewTests
             "First title",
             WorkspaceContent.Text("FIRST-GLOBAL"),
             3));
-        viewport.RemoveWorkspace(oldGeneration);
-        viewport.SetActiveWorkspace(newGeneration);
+        viewport.SetActiveWorkspace(oldGeneration);
+        viewport.RemoveWorkspace(oldGeneration, newGeneration);
         viewport.Reconcile();
 
         using var window = WindowWith(viewport);
@@ -212,7 +212,7 @@ public sealed class WorkspaceViewTests
     public void FactoriesRejectAttachedSharedAndReleasedViews()
     {
         using (var owner = new View())
-        using (var viewport = new WorkspaceViewport())
+        using (var viewport = new WorkspaceViewport(new Workspace(Workspace.BootstrapTitle)))
         {
             var workspace = new Workspace("Attached");
             var attached = new View();
@@ -229,7 +229,7 @@ public sealed class WorkspaceViewTests
             Assert.Throws<InvalidOperationException>(viewport.Reconcile);
         }
 
-        using (var viewport = new WorkspaceViewport())
+        using (var viewport = new WorkspaceViewport(new Workspace(Workspace.BootstrapTitle)))
         {
             var workspace = new Workspace("Shared");
             var shared = new View();
@@ -240,7 +240,7 @@ public sealed class WorkspaceViewTests
             Assert.Throws<InvalidOperationException>(viewport.Reconcile);
         }
 
-        using (var viewport = new WorkspaceViewport())
+        using (var viewport = new WorkspaceViewport(new Workspace(Workspace.BootstrapTitle)))
         {
             var workspace = new Workspace("Released");
             var signal = new DisposeSignal();
@@ -280,7 +280,7 @@ public sealed class WorkspaceViewTests
     {
         var first = new DisposeSignal();
         var second = new DisposeSignal();
-        var viewport = new WorkspaceViewport();
+        var viewport = new WorkspaceViewport(new Workspace(Workspace.BootstrapTitle));
         var workspace = new Workspace("Dispose");
         viewport.SetActiveWorkspace(workspace);
         viewport.SetPanel(Panel(
@@ -306,7 +306,7 @@ public sealed class WorkspaceViewTests
     public async Task ViewportStartsAtBottomNavigatesAndClampsAfterContentShrinks()
     {
         using var terminal = new TerminalGuiTestApp(width: 32, height: 8);
-        using var viewport = new WorkspaceViewport();
+        using var viewport = new WorkspaceViewport(new Workspace(Workspace.BootstrapTitle));
         var workspace = new Workspace("Scroll");
         viewport.SetActiveWorkspace(workspace);
         viewport.SetPanel(Panel(
@@ -383,7 +383,7 @@ public sealed class WorkspaceViewTests
     public async Task TaskbarHoverClickDragResizeAndViewportStayIndependent()
     {
         using var terminal = new TerminalGuiTestApp(width: 48, height: 12);
-        using var viewport = new WorkspaceViewport();
+        using var viewport = new WorkspaceViewport(new Workspace(Workspace.BootstrapTitle));
         var alpha = new Workspace("Alpha");
         var beta = new Workspace("Beta");
         var gamma = new Workspace("Gamma");
@@ -393,6 +393,7 @@ public sealed class WorkspaceViewTests
         var snapshot = new[] { alpha, beta, gamma };
         WorkspaceTaskbarView? taskbar = null;
         taskbar = new(
+            alpha,
             () => false,
             workspace =>
             {
@@ -503,7 +504,11 @@ public sealed class WorkspaceViewTests
             [("版本", "M1-test"), ("工作目录", "K:\\repo")],
             [new("插件初始化", UiSeverity.Success, "初始化完成")],
             [new("ExamplePlugin", "1.2.3", "OK", "初始化完成")],
-            [new("WARN", logText)]);
+            [
+                .. Enumerable.Range(1, 40)
+                    .Select(index => new BootstrapLogRow("INFO", $"older-log-{index:00}")),
+                new("WARN", logText)
+            ]);
         using var window = WindowWith(dashboard);
         var run = await StartAsync(terminal, window);
         try
@@ -580,7 +585,7 @@ public sealed class WorkspaceViewTests
     [MethodImpl(MethodImplOptions.NoInlining)]
     static TrackedRelease CreateReleasedPanel(ReleaseAction action)
     {
-        var viewport = new WorkspaceViewport();
+        var viewport = new WorkspaceViewport(new Workspace(Workspace.BootstrapTitle));
         var workspace = new Workspace("Release");
         var factoryOwner = new object();
         var signal = new DisposeSignal();
@@ -613,7 +618,9 @@ public sealed class WorkspaceViewTests
                 viewport.Reconcile();
                 break;
             case ReleaseAction.RemoveWorkspace:
-                viewport.RemoveWorkspace(workspace);
+                viewport.RemoveWorkspace(
+                    workspace,
+                    new Workspace(Workspace.BootstrapTitle));
                 viewport.Reconcile();
                 break;
             case ReleaseAction.Dispose:

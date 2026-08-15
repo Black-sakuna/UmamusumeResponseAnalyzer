@@ -119,7 +119,6 @@ namespace UmamusumeResponseAnalyzer
         {
             var lifetimeCts = new CancellationTokenSource();
             UiHost? uiHost = null;
-            BootstrapWorkspace? bootstrap = null;
             ShutdownCommandTarget? shutdownTarget = null;
             var pluginInitialization = Task.CompletedTask;
             var pluginUpdateCheck = Task.CompletedTask;
@@ -135,7 +134,7 @@ namespace UmamusumeResponseAnalyzer
                     lifetimeCts.Token);
                 uiHost.ShutdownStarting += lifetimeCts.Cancel;
                 TerminalUi.Initialize(uiHost);
-                bootstrap = new(uiHost);
+                var bootstrap = uiHost.Bootstrap;
                 shutdownTarget = new(lifetimeCts.Cancel);
                 application.Keyboard.KeyBindings.AddApp(
                     Terminal.Gui.Input.Key.C.WithCtrl,
@@ -386,11 +385,6 @@ namespace UmamusumeResponseAnalyzer
                         () =>
                         {
                             serverShutdown = Server.StopAsync();
-                            return ValueTask.CompletedTask;
-                        },
-                        () =>
-                        {
-                            bootstrap?.Dispose();
                             return ValueTask.CompletedTask;
                         },
                         () =>

@@ -239,7 +239,10 @@ public sealed class PluginCommandLifecycleTests : IDisposable
     }
 
     HostCommands.Snapshot Snapshot()
-        => new([], null, PluginManager.InspectPluginStatuses());
+        => new(
+            [new(host.Bootstrap.Workspace)],
+            host.Bootstrap.Workspace,
+            PluginManager.InspectPluginStatuses());
 
     static void AssertLifecycleSuccess(
         HostCommands.Result result,

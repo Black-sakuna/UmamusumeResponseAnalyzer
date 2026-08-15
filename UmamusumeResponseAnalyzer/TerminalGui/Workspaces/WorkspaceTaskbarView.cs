@@ -39,7 +39,7 @@ internal sealed class WorkspaceTaskbarView : View
     int[] fullTitleWidths = [];
     int[] itemMargins = [];
     int[] titleBudgets = [];
-    Workspace? activeWorkspace;
+    Workspace activeWorkspace;
     Workspace? hoveredWorkspace;
     Workspace? laidOutActiveWorkspace;
     Workspace? laidOutHoveredWorkspace;
@@ -52,11 +52,13 @@ internal sealed class WorkspaceTaskbarView : View
     Rectangle[] dragFrames = [];
 
     public WorkspaceTaskbarView(
+        Workspace activeWorkspace,
         Func<bool> commandModeIsOpen,
         Action<Workspace> switchWorkspace,
         IReadOnlyList<string> savedTitleOrder,
         Action<IReadOnlyList<string>> saveTitleOrder)
     {
+        this.activeWorkspace = activeWorkspace;
         this.commandModeIsOpen = commandModeIsOpen;
         this.switchWorkspace = switchWorkspace;
         this.saveTitleOrder = saveTitleOrder;
@@ -101,7 +103,7 @@ internal sealed class WorkspaceTaskbarView : View
 
     internal View BottomEdgeTrigger => bottomEdgeTrigger;
 
-    internal void Refresh(IReadOnlyList<Workspace> workspaces, Workspace? activeWorkspace)
+    internal void Refresh(IReadOnlyList<Workspace> workspaces, Workspace activeWorkspace)
     {
         var current = OrderWorkspaces(workspaces);
         if (items.Count != current.Length ||

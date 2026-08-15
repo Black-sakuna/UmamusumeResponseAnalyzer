@@ -31,7 +31,8 @@ internal sealed class UiHost : IUiInputSink
         Application = application ?? throw new ArgumentNullException(nameof(application));
         OwnerContext = ownerContext ?? throw new ArgumentNullException(nameof(ownerContext));
         LifetimeToken = lifetimeToken;
-        surface = new(this, Application);
+        surface = new(this, Application, session.Bootstrap);
+        Bootstrap = new(this, session.Bootstrap);
         lifetimeRegistration = lifetimeToken.Register(
             static value => ((UiHost)value!).RequestShutdown(),
             this);
@@ -40,6 +41,7 @@ internal sealed class UiHost : IUiInputSink
     internal IApplication Application { get; }
     internal SynchronizationContext OwnerContext { get; }
     internal CancellationToken LifetimeToken { get; }
+    internal BootstrapWorkspace Bootstrap { get; }
     internal Task Ready => surface.Ready;
     internal event Action<UiLogLine>? LogAdded
     {
@@ -50,7 +52,7 @@ internal sealed class UiHost : IUiInputSink
 
     internal void EnsureAvailable() => session.EnsureAvailable();
 
-    internal Workspace? GetCurrentWorkspace() => session.GetCurrentWorkspace();
+    internal Workspace GetCurrentWorkspace() => session.GetCurrentWorkspace();
 
     internal Workspace CreateWorkspace(string title)
     {
@@ -148,7 +150,7 @@ internal sealed class UiHost : IUiInputSink
             description ?? $"切换到 {workspace.Title}",
             () =>
             {
-                workspace.SwitchTo();
+                SwitchWorkspace(workspace);
                 return Task.CompletedTask;
             });
         var schedule = session.BindWorkspaceHotkey(
@@ -340,7 +342,8 @@ internal sealed class UiHost : IUiInputSink
             }
 
             var schedule = session.RootCreated();
-            ScheduleDrain(schedule);
+            if (schedule)
+                DrainPostedEvents();
             if (!shutdownRequested)
             {
                 surface.StartOverlayTimer(RefreshExpiringOverlays);
@@ -568,7 +571,7 @@ internal sealed class UiHost : IUiInputSink
                 return UiChange.Workspace;
             case LogIngress log:
                 surface.AddLog(log.Line);
-                return UiChange.None;
+                return UiChange.Workspace;
             case NotifyIngress notify:
                 surface.AddNotification(notify);
                 return UiChange.Notifications;
@@ -863,6 +866,7 @@ internal sealed class UiHost : IUiInputSink
 
         if (!stopping.IsCancellationRequested)
             Capture(stopping.Cancel);
+        Capture(Bootstrap.Dispose);
         Capture(surface.Finish);
         foreach (var hotkey in finished.Hotkeys)
         {

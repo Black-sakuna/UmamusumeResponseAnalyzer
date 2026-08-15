@@ -35,13 +35,15 @@ internal sealed class UiHostSession
         }
     }
 
+    internal Workspace Bootstrap => registry.Bootstrap;
+
     internal void EnsureAvailable()
     {
         lock (gate)
             EnsureAvailableLocked();
     }
 
-    internal Workspace? GetCurrentWorkspace()
+    internal Workspace GetCurrentWorkspace()
     {
         lock (gate)
         {
@@ -503,11 +505,11 @@ internal abstract record UiHostIngress;
 internal sealed record RegisterWorkspaceIngress(
     Workspace Workspace,
     Workspace[] RegistrationOrder,
-    Workspace? CurrentWorkspace) : UiHostIngress;
+    Workspace CurrentWorkspace) : UiHostIngress;
 
 internal sealed record RemoveWorkspaceIngress(
     Workspace Workspace,
-    Workspace? Replacement,
+    Workspace Replacement,
     Workspace[] RegistrationOrder) : UiHostIngress;
 
 internal sealed record SetPanelIngress(

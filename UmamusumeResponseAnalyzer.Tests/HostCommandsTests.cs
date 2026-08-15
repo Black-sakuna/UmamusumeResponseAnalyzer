@@ -14,6 +14,12 @@ public sealed class HostCommandsTests
         "用法: /plugin [list] | /plugin load <InternalName> | " +
         "/plugin unload <InternalName> | /plugin reload <InternalName>";
 
+    static HostCommands.Snapshot BootstrapOnlySnapshot()
+    {
+        var registry = new WorkspaceRegistry();
+        return new([new(registry.Bootstrap)], registry.Bootstrap, []);
+    }
+
     [Fact]
     public void Tokenize_PreservesTheUnquotedRemainderAndUsesLiteralSpace()
     {
@@ -51,16 +57,16 @@ public sealed class HostCommandsTests
     [Fact]
     public async Task ExecuteAsync_PreservesEmptyUnknownAndUsageResults()
     {
-        Assert.Null(await HostCommands.ExecuteAsync("not a command", HostCommands.Snapshot.Empty));
+        Assert.Null(await HostCommands.ExecuteAsync("not a command", BootstrapOnlySnapshot()));
 
         var empty = Assert.IsType<HostCommands.Result>(
-            await HostCommands.ExecuteAsync("/   ", HostCommands.Snapshot.Empty));
+            await HostCommands.ExecuteAsync("/   ", BootstrapOnlySnapshot()));
         var unknown = Assert.IsType<HostCommands.Result>(
-            await HostCommands.ExecuteAsync("/missing", HostCommands.Snapshot.Empty));
+            await HostCommands.ExecuteAsync("/missing", BootstrapOnlySnapshot()));
         var workspaceUsage = Assert.IsType<HostCommands.Result>(
-            await HostCommands.ExecuteAsync("/workspace list extra", HostCommands.Snapshot.Empty));
+            await HostCommands.ExecuteAsync("/workspace list extra", BootstrapOnlySnapshot()));
         var pluginUsage = Assert.IsType<HostCommands.Result>(
-            await HostCommands.ExecuteAsync("/plugin reload", HostCommands.Snapshot.Empty));
+            await HostCommands.ExecuteAsync("/plugin reload", BootstrapOnlySnapshot()));
 
         Assert.Equal(("命令为空。", UiSeverity.Warning), (empty.Message, empty.Severity));
         Assert.Equal(("未知命令: /missing", UiSeverity.Warning), (unknown.Message, unknown.Severity));
@@ -76,7 +82,11 @@ public sealed class HostCommandsTests
         var (second, _) = registry.Create("Second \"Workspace\"");
         var (alias, created) = registry.Create("SECOND \"WORKSPACE\"");
         var snapshot = new HostCommands.Snapshot(
-            [new(first, "Ctrl+1"), new(second)],
+            registry.SnapshotRegistrationOrder()
+                .Select(workspace => new HostCommands.WorkspaceItem(
+                    workspace,
+                    ReferenceEquals(workspace, first) ? "Ctrl+1" : null))
+                .ToArray(),
             second,
             []);
 
@@ -91,7 +101,7 @@ public sealed class HostCommandsTests
         var missing = Assert.IsType<HostCommands.Result>(
             await HostCommands.ExecuteAsync("/workspace switch Missing", snapshot));
         var empty = Assert.IsType<HostCommands.Result>(
-            await HostCommands.ExecuteAsync("/workspace", HostCommands.Snapshot.Empty));
+            await HostCommands.ExecuteAsync("/workspace", BootstrapOnlySnapshot()));
 
         Assert.False(created);
         Assert.Same(second, alias);
@@ -99,14 +109,17 @@ public sealed class HostCommandsTests
         var selectorDisplay = Assert.IsType<HostCommands.Display>(selector.Display);
         Assert.Equal("Workspaces", listDisplay.Title);
         Assert.Null(listDisplay.SelectedIndex);
-        Assert.Equal(["  First [Ctrl+1]", "* Second \"Workspace\""],
+        Assert.Equal(["  启动", "  First [Ctrl+1]", "* Second \"Workspace\""],
             listDisplay.Items.Select(item => item.Text).ToArray());
-        Assert.Same(first, listDisplay.Items[0].Workspace);
-        Assert.Same(second, listDisplay.Items[1].Workspace);
-        Assert.Equal(1, selectorDisplay.SelectedIndex);
+        Assert.Same(registry.Bootstrap, listDisplay.Items[0].Workspace);
+        Assert.Same(first, listDisplay.Items[1].Workspace);
+        Assert.Same(second, listDisplay.Items[2].Workspace);
+        Assert.Equal(2, selectorDisplay.SelectedIndex);
         Assert.Same(second, switched.SwitchWorkspace);
         Assert.Null(switched.Message);
-        Assert.Null(Assert.IsType<HostCommands.Display>(empty.Display).SelectedIndex);
+        var bootstrapOnly = Assert.IsType<HostCommands.Display>(empty.Display);
+        Assert.Equal(["* 启动"], bootstrapOnly.Items.Select(item => item.Text).ToArray());
+        Assert.Equal(0, bootstrapOnly.SelectedIndex);
         Assert.Equal(("workspace 不存在: Missing", UiSeverity.Warning),
             (missing.Message, missing.Severity));
     }
@@ -123,6 +136,39 @@ public sealed class HostCommandsTests
 
         Assert.False(removed.IsAlive);
         GC.KeepAlive(registry);
+    }
+
+    [Fact]
+    public void RegistryOwnsCanonicalProtectedBootstrapAndPreservesNormalTombstones()
+    {
+        var registry = new WorkspaceRegistry();
+        var bootstrap = registry.Bootstrap;
+
+        Assert.Equal(Workspace.BootstrapTitle, bootstrap.Title);
+        Assert.Same(bootstrap, registry.Current);
+        Assert.Equal([bootstrap], registry.SnapshotRegistrationOrder());
+        var (bootstrapAlias, bootstrapCreated) = registry.Create("启动");
+        Assert.Same(bootstrap, bootstrapAlias);
+        Assert.False(bootstrapCreated);
+
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            registry.Remove(bootstrap, out _));
+        Assert.Equal("Bootstrap workspace '启动' 不能移除。", error.Message);
+        Assert.Same(bootstrap, registry.Current);
+        Assert.Equal([bootstrap], registry.SnapshotRegistrationOrder());
+
+        var (workspace, created) = registry.Create("Ordinary");
+        Assert.True(created);
+        registry.SwitchTo(workspace);
+        Assert.True(registry.Remove(workspace, out var replacement));
+        Assert.Same(bootstrap, replacement);
+        Assert.Same(bootstrap, registry.Current);
+        Assert.True(workspace.IsRemoved);
+        Assert.False(registry.Remove(workspace, out replacement));
+        Assert.Same(bootstrap, replacement);
+        var (nextGeneration, recreated) = registry.Create("Ordinary");
+        Assert.True(recreated);
+        Assert.NotSame(workspace, nextGeneration);
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
@@ -161,7 +207,10 @@ public sealed class HostCommandsTests
             new("Plain", "Plain", string.Empty, null, false, true),
             new("Broken", "Broken", string.Empty, null, false, false)
         };
-        var snapshot = new HostCommands.Snapshot([], null, plugins);
+        var snapshot = BootstrapOnlySnapshot() with
+        {
+            Plugins = plugins
+        };
 
         var list = Assert.IsType<HostCommands.Result>(
             await HostCommands.ExecuteAsync("/plugin", snapshot));
@@ -189,7 +238,9 @@ public sealed class HostCommandsTests
         var (quoted, _) = registry.Create("Second \"Workspace\"");
         var (slash, _) = registry.Create("Back\\Slash");
         var snapshot = new HostCommands.Snapshot(
-            [new(quoted), new(alpha), new(slash)],
+            registry.SnapshotRegistrationOrder()
+                .Select(workspace => new HostCommands.WorkspaceItem(workspace))
+                .ToArray(),
             alpha,
             [
                 new PluginManager.PluginRuntimeStatus("Zulu", "Zulu", string.Empty, null, false, true),

@@ -19,11 +19,8 @@ internal static class HostCommands
 
     internal sealed record Snapshot(
         IReadOnlyList<WorkspaceItem> Workspaces,
-        Workspace? CurrentWorkspace,
-        IReadOnlyList<PluginManager.PluginRuntimeStatus> Plugins)
-    {
-        internal static Snapshot Empty { get; } = new([], null, []);
-    }
+        Workspace CurrentWorkspace,
+        IReadOnlyList<PluginManager.PluginRuntimeStatus> Plugins);
 
     internal sealed record DisplayItem(
         string Text,
@@ -238,13 +235,6 @@ internal static class HostCommands
 
     static Result ShowWorkspaces(Snapshot snapshot, bool selectable)
     {
-        if (snapshot.Workspaces.Count == 0)
-        {
-            return new(Display: new(
-                "Workspaces",
-                [new("（没有已注册 workspace）")]));
-        }
-
         var items = snapshot.Workspaces.Select(item =>
         {
             var marker = ReferenceEquals(item.Handle, snapshot.CurrentWorkspace) ? "*" : " ";

@@ -5,7 +5,17 @@ internal sealed class WorkspaceRegistry
     readonly Dictionary<string, Workspace> registrations = new(StringComparer.OrdinalIgnoreCase);
     readonly List<Workspace> registrationOrder = [];
 
-    internal Workspace? Current { get; private set; }
+    internal WorkspaceRegistry()
+    {
+        Bootstrap = new(Workspace.BootstrapTitle);
+        registrations.Add(Bootstrap.Title, Bootstrap);
+        registrationOrder.Add(Bootstrap);
+        Current = Bootstrap;
+    }
+
+    internal Workspace Bootstrap { get; }
+
+    internal Workspace Current { get; private set; }
 
     internal Workspace[] SnapshotRegistrationOrder()
         => [.. registrationOrder];
@@ -18,7 +28,6 @@ internal sealed class WorkspaceRegistry
         var workspace = new Workspace(title);
         registrations.Add(workspace.Title, workspace);
         registrationOrder.Add(workspace);
-        Current ??= workspace;
         return (workspace, true);
     }
 
@@ -35,9 +44,14 @@ internal sealed class WorkspaceRegistry
         }
     }
 
-    internal bool Remove(Workspace workspace, out Workspace? replacement)
+    internal bool Remove(Workspace workspace, out Workspace replacement)
     {
         ArgumentNullException.ThrowIfNull(workspace);
+        if (ReferenceEquals(workspace, Bootstrap))
+        {
+            throw new InvalidOperationException(
+                $"Bootstrap workspace '{Bootstrap.Title}' 不能移除。");
+        }
         if (workspace.IsRemoved)
         {
             replacement = Current;
@@ -49,7 +63,7 @@ internal sealed class WorkspaceRegistry
         registrationOrder.Remove(workspace);
         workspace.IsRemoved = true;
         if (ReferenceEquals(Current, workspace))
-            Current = registrationOrder.FirstOrDefault();
+            Current = registrationOrder[0];
         replacement = Current;
         return true;
     }

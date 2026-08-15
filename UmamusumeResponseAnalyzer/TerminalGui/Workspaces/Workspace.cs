@@ -2,6 +2,8 @@ namespace UmamusumeResponseAnalyzer.TerminalGui;
 
 public sealed class Workspace
 {
+    internal const string BootstrapTitle = "启动";
+
     internal Workspace(string title)
     {
         if (string.IsNullOrWhiteSpace(title))
@@ -14,7 +16,7 @@ public sealed class Workspace
 
     internal bool IsRemoved { get; set; }
 
-    public static Workspace? Current => TerminalUi.RequireHost().GetCurrentWorkspace();
+    public static Workspace Current => TerminalUi.RequireHost().GetCurrentWorkspace();
 
     public static Workspace Create(string title)
         => TerminalUi.RequireHost().CreateWorkspace(title);

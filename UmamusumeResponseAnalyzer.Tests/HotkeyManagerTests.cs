@@ -748,7 +748,7 @@ public sealed class HotkeyManagerErrorChannelTests(PluginRuntimeFixture runtime)
         if (TerminalUiLifecycleChildProcess.IsChild(scenario))
         {
             var host = runtime.Host;
-            var bootstrap = new BootstrapWorkspace(host);
+            var bootstrap = host.Bootstrap;
             try
             {
                 bootstrap.Workspace.SwitchTo();
@@ -773,8 +773,6 @@ public sealed class HotkeyManagerErrorChannelTests(PluginRuntimeFixture runtime)
             finally
             {
                 HotkeyManager.UnregisterAll();
-                bootstrap.Dispose();
-                host.RemoveWorkspace(bootstrap.Workspace);
                 await host.FlushAsync();
             }
 

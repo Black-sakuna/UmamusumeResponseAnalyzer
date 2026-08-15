@@ -75,6 +75,8 @@ public sealed class UiHostRenderTests : IDisposable
 
         var replacement = Own(host.CreateWorkspace(title.ToLowerInvariant()));
         Assert.NotSame(first, replacement);
+        Assert.Same(host.Bootstrap.Workspace, host.GetCurrentWorkspace());
+        replacement.SwitchTo();
         Assert.Same(replacement, host.GetCurrentWorkspace());
         await host.FlushAsync();
     }
@@ -245,6 +247,18 @@ public sealed class UiHostRenderTests : IDisposable
     [Fact]
     public async Task Notifications_FilterByWorkspaceAndKeepShortcutLifetime()
     {
+        const string scenario = "workspace-notification-scope";
+        if (!TerminalUiLifecycleChildProcess.IsChild(scenario))
+        {
+            Assert.Equal(
+                "ok",
+                await TerminalUiLifecycleProcessTests.RunChildAsync(
+                    scenario,
+                    typeof(UiHostRenderTests),
+                    nameof(Notifications_FilterByWorkspaceAndKeepShortcutLifetime)));
+            return;
+        }
+
         var first = CreateWorkspace("Notification First");
         var second = CreateWorkspace("Notification Second");
         host.SetPanel(
@@ -295,11 +309,25 @@ public sealed class UiHostRenderTests : IDisposable
             "FirstWorkspaceNotification",
             await terminal.CaptureScreenAsync(),
             StringComparison.Ordinal);
+
+        TerminalUiLifecycleChildProcess.WriteResult("ok");
     }
 
     [Fact]
     public async Task Notification_TtlRemovesFramebufferAndShortcut()
     {
+        const string scenario = "workspace-notification-ttl";
+        if (!TerminalUiLifecycleChildProcess.IsChild(scenario))
+        {
+            Assert.Equal(
+                "ok",
+                await TerminalUiLifecycleProcessTests.RunChildAsync(
+                    scenario,
+                    typeof(UiHostRenderTests),
+                    nameof(Notification_TtlRemovesFramebufferAndShortcut)));
+            return;
+        }
+
         var workspace = CreateWorkspace("TTL workspace");
         host.SetPanel(
             workspace,
@@ -338,6 +366,8 @@ public sealed class UiHostRenderTests : IDisposable
             "TtlBody",
             await terminal.CaptureScreenAsync(),
             StringComparison.Ordinal);
+
+        TerminalUiLifecycleChildProcess.WriteResult("ok");
     }
 
     [Fact]
@@ -643,6 +673,14 @@ public sealed class UiHostRenderTests : IDisposable
 
         const string messageOnly = "message-only";
         const string messageWithDisplay = "message-with-display";
+        var workspace = Workspace.Create("Command result target");
+        workspace.SetPanel(
+            "main",
+            "main",
+            WorkspaceContent.Text("CommandResultTarget"),
+            fullBleed: true);
+        await host.FlushAsync();
+        await terminal.WaitForScreenAsync("CommandResultTarget");
         List<UiLogLine> logs = [];
         void ObserveLog(UiLogLine line) => logs.Add(line);
 
@@ -700,10 +738,11 @@ public sealed class UiHostRenderTests : IDisposable
     [Fact]
     public async Task BootstrapGlobalAndFailureLogsRemainHiddenUntilWorkspaceSwitch()
     {
-        var bootstrap = new BootstrapWorkspace(host);
-        Own(bootstrap.Workspace);
+        var bootstrap = host.Bootstrap;
         try
         {
+            bootstrap.Workspace.SwitchTo();
+            await host.FlushAsync();
             bootstrap.Log("URA", "BootstrapLog", UiSeverity.Info);
             await host.FlushAsync();
             await terminal.WaitForScreenAsync("BootstrapLog");
@@ -745,14 +784,16 @@ public sealed class UiHostRenderTests : IDisposable
         }
         finally
         {
-            bootstrap.Dispose();
+            bootstrap.Workspace.SwitchTo();
+            await host.FlushAsync();
         }
     }
 
     [Fact]
-    public async Task RemovedBootstrapStopsRenderingLaterGlobalDiagnostics()
+    public async Task RejectedBootstrapRemovalKeepsRenderingLaterGlobalDiagnostics()
     {
-        using var bootstrap = new BootstrapWorkspace(host);
+        var bootstrap = host.Bootstrap;
+        await terminal.ResizeAsync(120, 36);
         var survivor = CreateWorkspace("Bootstrap survivor");
         host.SetPanel(
             survivor,
@@ -768,14 +809,14 @@ public sealed class UiHostRenderTests : IDisposable
         host.LogAdded += ObserveLog;
         try
         {
-            bootstrap.Workspace.Remove();
-            TerminalUi.Log("Bootstrap", "global-after-bootstrap-removal");
+            var error = Assert.Throws<InvalidOperationException>(bootstrap.Workspace.Remove);
+            Assert.Equal("Bootstrap workspace '启动' 不能移除。", error.Message);
+            TerminalUi.Log("Bootstrap", "global-after-bootstrap-rejection");
             TerminalUi.LogException(
                 "Bootstrap",
-                new InvalidOperationException("error-after-bootstrap-removal"));
-            bootstrap.Log("Bootstrap", "bootstrap-facade-after-removal");
-            Assert.Throws<InvalidOperationException>(() =>
-                bootstrap.SetPhase("host", "宿主", UiSeverity.Error, "removed"));
+                new InvalidOperationException("error-after-bootstrap-rejection"));
+            bootstrap.Log("Bootstrap", "bootstrap-facade-after-rejection");
+            bootstrap.SetPhase("host", "宿主", UiSeverity.Success, "删除被拒绝后仍在运行");
             await host.HandleCommandAsync("/workspace switch \"unterminated");
             await host.FlushAsync();
             await terminal.RedrawAsync();
@@ -783,18 +824,25 @@ public sealed class UiHostRenderTests : IDisposable
             Assert.Same(survivor, Workspace.Current);
             var screen = await terminal.CaptureScreenAsync();
             Assert.Contains("BootstrapSurvivorBody", screen, StringComparison.Ordinal);
-            Assert.DoesNotContain("after-bootstrap-removal", screen, StringComparison.Ordinal);
+            Assert.DoesNotContain("after-bootstrap-rejection", screen, StringComparison.Ordinal);
             Assert.Contains(
                 logs,
-                line => line.Text.Contains("error-after-bootstrap-removal", StringComparison.Ordinal));
+                line => line.Text.Contains("error-after-bootstrap-rejection", StringComparison.Ordinal));
+
+            bootstrap.Workspace.SwitchTo();
+            await host.FlushAsync();
+            await terminal.WaitForScreenAsync("global-after-bootstrap-rejection");
+            await terminal.WaitForScreenAsync("bootstrap-facade-after-rejection");
+            await terminal.WaitForScreenAsync("error-after-bootstrap-rejection");
+            screen = await terminal.CaptureScreenAsync();
+            Assert.Contains("运行环境", screen, StringComparison.Ordinal);
         }
         finally
         {
             host.LogAdded -= ObserveLog;
+            bootstrap.Workspace.SwitchTo();
+            await host.FlushAsync();
         }
-
-        bootstrap.Dispose();
-        Assert.Throws<ObjectDisposedException>(() => bootstrap.SetSettings([]));
     }
 
     sealed class InactiveHotkeyOwner : IPlugin
@@ -1325,7 +1373,7 @@ public sealed class UiHostShutdownProcessTests
 
                 public void Dispose()
                 {
-                    var removed = Workspace.Current?.RemovePanel("probe") == true;
+                    var removed = Workspace.Current.RemovePanel("probe");
                     File.WriteAllText(@"{{marker.Replace("\"", "\"\"")}}", removed ? "removed" : "missing");
                 }
             }

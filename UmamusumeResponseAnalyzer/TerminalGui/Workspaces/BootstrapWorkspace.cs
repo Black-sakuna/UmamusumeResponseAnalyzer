@@ -12,6 +12,7 @@ namespace UmamusumeResponseAnalyzer.TerminalGui;
 internal sealed class BootstrapWorkspace : IDisposable
 {
     const int MaxLogRows = 128;
+    internal const string PanelKey = "status";
 
     readonly UiHost uiHost;
     readonly object gate = new();
@@ -29,11 +30,15 @@ internal sealed class BootstrapWorkspace : IDisposable
     readonly List<BootstrapLogRow> logs = [];
     bool disposed;
 
-    public BootstrapWorkspace(UiHost uiHost)
+    public BootstrapWorkspace(UiHost uiHost, Workspace workspace)
     {
         this.uiHost = uiHost;
-        Workspace = global::UmamusumeResponseAnalyzer.TerminalGui.Workspace.Create("启动");
-        Workspace.BindHotkey(ConsoleKey.B, ConsoleModifiers.Control, "启动信息");
+        Workspace = workspace;
+        uiHost.BindWorkspaceHotkey(
+            Workspace,
+            ConsoleKey.B,
+            ConsoleModifiers.Control,
+            "启动信息");
         uiHost.LogAdded += OnLogAdded;
         Refresh();
     }
@@ -76,7 +81,7 @@ internal sealed class BootstrapWorkspace : IDisposable
     {
         lock (gate)
             ThrowIfDisposed();
-        TerminalUi.Log(source, text, severity);
+        uiHost.Log($"[{source}] {text}", severity);
     }
 
     void OnLogAdded(UiLogLine line)
@@ -85,25 +90,12 @@ internal sealed class BootstrapWorkspace : IDisposable
         {
             if (disposed)
                 return;
-            if (Workspace.IsRemoved)
-            {
-                Dispose();
-                return;
-            }
             logs.Add(new(
                 SeverityLabel(line.Severity),
                 line.Text,
                 line.ExceptionDetails));
             if (logs.Count > MaxLogRows)
                 logs.RemoveRange(0, logs.Count - MaxLogRows);
-            try
-            {
-                Refresh();
-            }
-            catch (InvalidOperationException) when (Workspace.IsRemoved)
-            {
-                Dispose();
-            }
         }
     }
 
@@ -111,8 +103,9 @@ internal sealed class BootstrapWorkspace : IDisposable
     {
         lock (gate)
             ThrowIfDisposed();
-        Workspace.SetPanel(
-            "status",
+        uiHost.SetPanel(
+            Workspace,
+            PanelKey,
             "启动状态",
             new WorkspaceContent(() =>
             {
@@ -281,6 +274,8 @@ internal sealed class BootstrapDashboardView : View
         if (wideLayout != useWideLayout)
             ApplyLayout(useWideLayout);
         base.OnSubViewLayout(args);
+        if (logs.Count > 0)
+            logList.EnsureSelectedItemVisible();
     }
 
     protected override void Dispose(bool disposing)

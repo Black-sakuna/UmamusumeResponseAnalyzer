@@ -1051,7 +1051,7 @@ namespace UmamusumeResponseAnalyzer.Tests
             var baseline = Workspace.Create("M6 synthetic baseline");
             baseline.SwitchTo();
             host.FlushAsync().WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
-            var originalCurrent = Assert.IsType<Workspace>(Workspace.Current);
+            var originalCurrent = Workspace.Current;
             Assert.Same(baseline, originalCurrent);
 
             Assembly? assembly = null;

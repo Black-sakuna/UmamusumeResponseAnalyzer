@@ -20,18 +20,20 @@ internal sealed class WorkspaceViewport : View
         new(ReferenceEqualityComparer.Instance);
     readonly HashSet<View> ownedViews = new(ReferenceEqualityComparer.Instance);
     readonly ConditionalWeakTable<View, object> releasedViews = new();
+    readonly HashSet<(Workspace Workspace, string Key)> invalidatedPanels = [];
     readonly List<View> layoutViews = [];
     readonly List<PanelLayout> panelLayouts = [];
 
-    Workspace? activeWorkspace;
+    Workspace activeWorkspace;
     bool disposed;
     bool dirty = true;
     bool layingOut;
     bool fullBleed;
     int maxScroll;
 
-    internal WorkspaceViewport()
+    internal WorkspaceViewport(Workspace activeWorkspace)
     {
+        this.activeWorkspace = activeWorkspace;
         Width = Dim.Fill();
         Height = Dim.Fill();
         CanFocus = true;
@@ -74,27 +76,42 @@ internal sealed class WorkspaceViewport : View
 
         if (workspacePanels.Count == 0)
             panels.Remove(workspace);
+        invalidatedPanels.Remove((workspace, key));
         dirty = true;
         return true;
     }
 
-    internal void RemoveWorkspace(Workspace workspace)
+    internal void RemoveWorkspace(Workspace workspace, Workspace replacement)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
         panels.Remove(workspace);
         scrollOffsets.Remove(workspace);
+        invalidatedPanels.RemoveWhere(entry => ReferenceEquals(entry.Workspace, workspace));
         if (ReferenceEquals(activeWorkspace, workspace))
-            activeWorkspace = null;
+            activeWorkspace = replacement;
         dirty = true;
     }
 
-    internal void SetActiveWorkspace(Workspace? workspace)
+    internal void SetActiveWorkspace(Workspace workspace)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
         if (ReferenceEquals(activeWorkspace, workspace))
             return;
 
         activeWorkspace = workspace;
+        dirty = true;
+    }
+
+    internal void InvalidatePanel(Workspace workspace, string key)
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        if (!panels.TryGetValue(workspace, out var workspacePanels) ||
+            !workspacePanels.ContainsKey(key))
+        {
+            throw new InvalidOperationException(
+                $"Workspace panel '{key}' is not registered.");
+        }
+        invalidatedPanels.Add((workspace, key));
         dirty = true;
     }
 
@@ -126,9 +143,6 @@ internal sealed class WorkspaceViewport : View
     internal bool Navigate(Command command)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
-        if (activeWorkspace is null)
-            return false;
-
         UpdateLayout();
         var current = scrollOffsets.GetValueOrDefault(activeWorkspace);
         var next = command switch
@@ -172,10 +186,10 @@ internal sealed class WorkspaceViewport : View
             var views = ownedViews.ToArray();
             var wrappers = layoutViews.ToArray();
 
-            activeWorkspace = null;
             realizedPanels.Clear();
             panels.Clear();
             scrollOffsets.Clear();
+            invalidatedPanels.Clear();
             ownedViews.Clear();
             layoutViews.Clear();
             panelLayouts.Clear();
@@ -200,12 +214,6 @@ internal sealed class WorkspaceViewport : View
 
     void BuildActiveLayout()
     {
-        if (activeWorkspace is null)
-        {
-            AddMessage("当前没有 workspace。");
-            return;
-        }
-
         var selected = panels.TryGetValue(activeWorkspace, out var workspacePanels)
             ? workspacePanels.Values.OrderBy(panel => panel.Key, StringComparer.Ordinal).ToArray()
             : [];
@@ -307,7 +315,9 @@ internal sealed class WorkspaceViewport : View
             panels.TryGetValue(workspace, out var workspacePanels);
             foreach (var (key, realized) in workspaceViews.ToArray())
             {
-                if (workspacePanels is not null &&
+                var invalidated = invalidatedPanels.Remove((workspace, key));
+                if (!invalidated &&
+                    workspacePanels is not null &&
                     workspacePanels.TryGetValue(key, out var panel) &&
                     ReferenceEquals(panel.Content, realized.Content))
                 {
@@ -320,6 +330,7 @@ internal sealed class WorkspaceViewport : View
             if (workspaceViews.Count == 0)
                 realizedPanels.Remove(workspace);
         }
+        invalidatedPanels.Clear();
     }
 
     void Release(RealizedPanel realized)
@@ -409,11 +420,8 @@ internal sealed class WorkspaceViewport : View
 
         var width = size.Width;
         var height = size.Height;
-        var offset = activeWorkspace is null
-            ? 0
-            : Math.Clamp(scrollOffsets.GetValueOrDefault(activeWorkspace), 0, maxScroll);
-        if (activeWorkspace is not null)
-            scrollOffsets[activeWorkspace] = offset;
+        var offset = Math.Clamp(scrollOffsets.GetValueOrDefault(activeWorkspace), 0, maxScroll);
+        scrollOffsets[activeWorkspace] = offset;
         Viewport = new Rectangle(0, maxScroll - offset, width, height);
     }
 

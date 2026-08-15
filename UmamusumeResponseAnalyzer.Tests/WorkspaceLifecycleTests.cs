@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Terminal.Gui.Drivers;
 using Terminal.Gui.Input;
 using Terminal.Gui.Views;
@@ -73,8 +74,7 @@ public sealed class WorkspaceLifecycleTests(PluginRuntimeFixture fixture) : IDis
     public async Task GlobalLogsRenderInAdmissionOrderWithSource()
     {
         await terminal.ResizeAsync(120, 30);
-        using var bootstrap = new BootstrapWorkspace(host);
-        Own(bootstrap.Workspace);
+        var bootstrap = host.Bootstrap;
         var run = Guid.NewGuid().ToString("N")[..8];
         var expected = Enumerable.Range(0, 4)
             .Select(index => $"L{run}-{index}")
@@ -104,6 +104,73 @@ public sealed class WorkspaceLifecycleTests(PluginRuntimeFixture fixture) : IDis
 
 public sealed class WorkspaceLifecycleProcessTests
 {
+    [Fact]
+    public async Task FirstVisibleFrameContainsBootstrapDashboardBeforeOrdinaryEmptyState()
+    {
+        const string scenario = "workspace-bootstrap-first-frame";
+        const string result = "workspace-bootstrap-first-frame-ok";
+        if (TerminalUiLifecycleChildProcess.IsChild(scenario))
+        {
+            using var terminal = new TerminalGuiTestApp(width: 120, height: 36);
+            var host = TerminalUiLifecycleChildProcess.InitializeHost(
+                terminal,
+                CancellationToken.None);
+            var frames = new ConcurrentQueue<string>();
+
+            void CaptureFrame(object? sender, EventArgs e)
+            {
+                if (terminal.Application.TopRunnableView is null)
+                    return;
+                frames.Enqueue((terminal.Application.Driver
+                    ?? throw new InvalidOperationException(
+                        "Terminal.Gui driver was not initialized."))
+                    .ToString());
+            }
+
+            terminal.RunOnOwnerThread(() =>
+                terminal.Application.LayoutAndDrawComplete += CaptureFrame);
+            var run = await terminal.StartAsync(host);
+            try
+            {
+                await terminal.InvokeAsync(() =>
+                    terminal.Application.LayoutAndDrawComplete -= CaptureFrame);
+                var visibleFrames = frames.ToArray();
+                Assert.NotEmpty(visibleFrames);
+                var firstFrame = visibleFrames[0];
+                Assert.Contains("运行环境", firstFrame, StringComparison.Ordinal);
+                Assert.Contains("初始化结果", firstFrame, StringComparison.Ordinal);
+                Assert.Contains("插件摘要", firstFrame, StringComparison.Ordinal);
+                Assert.Contains("最近日志", firstFrame, StringComparison.Ordinal);
+                Assert.All(visibleFrames, frame => Assert.DoesNotContain(
+                    "启动 还没有输出。",
+                    frame,
+                    StringComparison.Ordinal));
+
+                var emptyWorkspace = Workspace.Create("Ordinary empty workspace");
+                emptyWorkspace.SwitchTo();
+                await host.FlushAsync();
+                await terminal.WaitForScreenAsync(
+                    "Ordinary empty workspace 还没有输出。");
+
+                TerminalUiLifecycleChildProcess.WriteResult(result);
+            }
+            finally
+            {
+                await terminal.InvokeAsync(() =>
+                    terminal.Application.LayoutAndDrawComplete -= CaptureFrame);
+                await terminal.StopAsync(host, run);
+            }
+            return;
+        }
+
+        Assert.Equal(
+            result,
+            await TerminalUiLifecycleProcessTests.RunChildAsync(
+                scenario,
+                typeof(WorkspaceLifecycleProcessTests),
+                nameof(FirstVisibleFrameContainsBootstrapDashboardBeforeOrdinaryEmptyState)));
+    }
+
     [Fact]
     public async Task RemoveClearsOwnedOutputAndHotkeyWithoutTouchingSurvivor()
     {
@@ -218,10 +285,10 @@ public sealed class WorkspaceLifecycleProcessTests
     }
 
     [Fact]
-    public async Task FirstCreateSetsCurrentAndRemovalUsesLiveRegistrationOrder()
+    public async Task ProtectedBootstrapIsCanonicalAndHostRemainsUsableAfterRejectedRemoval()
     {
-        const string scenario = "workspace-registration-order";
-        const string result = "workspace-registration-order-ok";
+        const string scenario = "workspace-protected-bootstrap";
+        const string result = "workspace-protected-bootstrap-ok";
         if (TerminalUiLifecycleChildProcess.IsChild(scenario))
         {
             using var terminal = new TerminalGuiTestApp();
@@ -231,23 +298,40 @@ public sealed class WorkspaceLifecycleProcessTests
             var run = await terminal.StartAsync(host);
             try
             {
-                var first = Workspace.Create("First Workspace");
-                Assert.Equal("First Workspace", first.Title);
-                Assert.Same(first, Workspace.Create("FIRST WORKSPACE"));
-                Assert.Same(first, Workspace.Current);
+                var bootstrap = host.Bootstrap.Workspace;
+                Assert.Equal(Workspace.BootstrapTitle, Workspace.Current.Title);
+                Assert.Same(bootstrap, Workspace.Current);
+                Assert.Same(bootstrap, Workspace.Create("启动"));
+                var error = Assert.Throws<InvalidOperationException>(bootstrap.Remove);
+                Assert.Equal("Bootstrap workspace '启动' 不能移除。", error.Message);
+                Assert.Same(bootstrap, Workspace.Current);
+                Assert.False(bootstrap.IsRemoved);
 
-                var second = Workspace.Create("Second Workspace");
-                var third = Workspace.Create("Third Workspace");
-                second.SwitchTo();
-                Assert.Same(second, Workspace.Current);
-
-                second.Remove();
-                Assert.Same(first, Workspace.Current);
-                first.Remove();
-                Assert.Same(third, Workspace.Current);
-                third.Remove();
-                Assert.Null(Workspace.Current);
+                var workspace = Workspace.Create("Navigable Workspace");
+                workspace.SetPanel(
+                    "main",
+                    "main",
+                    WorkspaceContent.Text(string.Join(
+                        Environment.NewLine,
+                        Enumerable.Range(1, 40).Select(index => $"line-{index:00}"))),
+                    fullBleed: true);
                 await host.FlushAsync();
+                await terminal.WaitForScreenAsync("line-40");
+
+                Assert.True(await ((IUiInputSink)host)
+                    .TryHandleWorkspaceCommandAsync(Command.Start));
+                await terminal.RedrawAsync();
+                await terminal.WaitForScreenAsync("line-01");
+
+                workspace.Remove();
+                Assert.Same(bootstrap, Workspace.Current);
+                await host.FlushAsync();
+                await terminal.WaitForScreenAsync("运行环境");
+                var screen = await terminal.CaptureScreenAsync();
+                Assert.Contains("初始化结果", screen, StringComparison.Ordinal);
+                Assert.Contains("插件摘要", screen, StringComparison.Ordinal);
+                Assert.Contains("最近日志", screen, StringComparison.Ordinal);
+                Assert.DoesNotContain("当前没有 workspace。", screen, StringComparison.Ordinal);
 
                 TerminalUiLifecycleChildProcess.WriteResult(result);
             }
@@ -263,7 +347,7 @@ public sealed class WorkspaceLifecycleProcessTests
             await TerminalUiLifecycleProcessTests.RunChildAsync(
                 scenario,
                 typeof(WorkspaceLifecycleProcessTests),
-                nameof(FirstCreateSetsCurrentAndRemovalUsesLiveRegistrationOrder)));
+                nameof(ProtectedBootstrapIsCanonicalAndHostRemainsUsableAfterRejectedRemoval)));
     }
 
     sealed class DisposeSignal

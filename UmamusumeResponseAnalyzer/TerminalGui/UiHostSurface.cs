@@ -12,11 +12,12 @@ internal sealed class UiHostSurface : IDisposable
 {
     readonly UiHost host;
     readonly IApplication application;
+    readonly Workspace bootstrap;
     readonly TaskCompletionSource ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
     readonly List<NotificationState> notifications = [];
 
-    Workspace[] renderedWorkspaces = [];
-    Workspace? renderedWorkspace;
+    Workspace[] renderedWorkspaces;
+    Workspace renderedWorkspace;
     HotkeyPopup? hotkeyPopup;
     int hotkeyPopupGeneration;
     int popupVisibleLineCount = 1;
@@ -28,10 +29,16 @@ internal sealed class UiHostSurface : IDisposable
     CommandModeView? commandMode;
     object? overlayTimer;
 
-    internal UiHostSurface(UiHost host, IApplication application)
+    internal UiHostSurface(
+        UiHost host,
+        IApplication application,
+        Workspace bootstrap)
     {
         this.host = host;
         this.application = application;
+        this.bootstrap = bootstrap;
+        renderedWorkspaces = [bootstrap];
+        renderedWorkspace = bootstrap;
     }
 
     internal Task Ready => ready.Task;
@@ -50,11 +57,12 @@ internal sealed class UiHostSurface : IDisposable
             Height = Dim.Fill(),
             BorderStyle = null
         };
-        workspaceViewport = new();
+        workspaceViewport = new(renderedWorkspace);
         commandMode = new(
             command => TrackInputTask(host.HandleCommandAsync(command)),
             host.CompleteCommand);
         workspaceTaskbar = new(
+            renderedWorkspace,
             () => commandMode.IsOpen,
             host.SwitchWorkspace,
             savedTaskbarTitleOrder,
@@ -114,10 +122,9 @@ internal sealed class UiHostSurface : IDisposable
 
     internal void RemoveWorkspace(RemoveWorkspaceIngress removal)
     {
-        Viewport.RemoveWorkspace(removal.Workspace);
+        Viewport.RemoveWorkspace(removal.Workspace, removal.Replacement);
         renderedWorkspaces = removal.RegistrationOrder;
         renderedWorkspace = removal.Replacement;
-        Viewport.SetActiveWorkspace(renderedWorkspace);
         RemoveWorkspaceNotifications(removal.Workspace);
     }
 
@@ -143,7 +150,10 @@ internal sealed class UiHostSurface : IDisposable
         => Viewport.Navigate(command);
 
     internal void AddLog(UiLogLine line)
-        => LogAdded?.Invoke(line);
+    {
+        LogAdded?.Invoke(line);
+        Viewport.InvalidatePanel(bootstrap, BootstrapWorkspace.PanelKey);
+    }
 
     internal void AddNotification(NotifyIngress notification)
     {
@@ -190,9 +200,7 @@ internal sealed class UiHostSurface : IDisposable
             workspaceTaskbar?.Refresh(renderedWorkspaces, renderedWorkspace);
             if (window is not null)
             {
-                window.Title = renderedWorkspace is null
-                    ? "UmamusumeResponseAnalyzer"
-                    : $"UmamusumeResponseAnalyzer - {renderedWorkspace.Title}";
+                window.Title = $"UmamusumeResponseAnalyzer - {renderedWorkspace.Title}";
                 Volatile.Write(
                     ref popupVisibleLineCount,
                     Math.Max(1, window.Viewport.Height - 2));

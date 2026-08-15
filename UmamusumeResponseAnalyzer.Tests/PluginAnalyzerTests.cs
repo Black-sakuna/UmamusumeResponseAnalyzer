@@ -235,7 +235,7 @@ namespace UmamusumeResponseAnalyzer.Tests
 
             var terminal = runtime.Terminal;
             var host = runtime.Host;
-            var bootstrap = new BootstrapWorkspace(host);
+            var bootstrap = host.Bootstrap;
             var requestPlugin = new RequestDispatchPlugin();
             var responsePlugin = new ResponseDispatchPlugin();
             try
@@ -275,8 +275,6 @@ namespace UmamusumeResponseAnalyzer.Tests
             }
             finally
             {
-                bootstrap.Dispose();
-                host.RemoveWorkspace(bootstrap.Workspace);
                 await host.FlushAsync();
             }
         }
@@ -395,7 +393,7 @@ namespace UmamusumeResponseAnalyzer.Tests
                 StartNotificationServer();
                 var terminal = runtime.Terminal;
                 var host = runtime.Host;
-                var bootstrap = new BootstrapWorkspace(host);
+                var bootstrap = host.Bootstrap;
                 try
                 {
                     bootstrap.Workspace.SwitchTo();
@@ -422,8 +420,6 @@ namespace UmamusumeResponseAnalyzer.Tests
                 }
                 finally
                 {
-                    bootstrap.Dispose();
-                    host.RemoveWorkspace(bootstrap.Workspace);
                     await host.FlushAsync();
                 }
 
@@ -854,7 +850,7 @@ namespace UmamusumeResponseAnalyzer.Tests
         public async Task PluginLoadContext_ResolvesSharedAbiAssemblyFromDefaultContext()
         {
             var host = runtime.Host;
-            var bootstrap = new BootstrapWorkspace(host);
+            var bootstrap = host.Bootstrap;
             var ctx = new PluginManager.PluginLoadContext("shared-abi-test");
             try
             {
@@ -888,8 +884,6 @@ namespace UmamusumeResponseAnalyzer.Tests
             finally
             {
                 ctx.Unload();
-                bootstrap.Dispose();
-                host.RemoveWorkspace(bootstrap.Workspace);
                 await host.FlushAsync();
             }
         }
