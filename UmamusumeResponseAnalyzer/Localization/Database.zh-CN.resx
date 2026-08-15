@@ -126,4 +126,7 @@
   <data name="I18N_NotExist" xml:space="preserve">
     <value>数据文件{0}不存在，请尝试重新更新数据</value>
   </data>
+  <data name="I18N_UnknownSkillUpgradeConditionType" xml:space="preserve">
+    <value>未知的技能进化条件类型，将视为无法进化: conditionId={0}, type={1}</value>
+  </data>
 </root>

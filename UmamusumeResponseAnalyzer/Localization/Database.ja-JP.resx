@@ -126,4 +126,7 @@
   <data name="I18N_NotExist" xml:space="preserve">
     <value>データファイル{0}が存在しません。データを再更新してみてください</value>
   </data>
+  <data name="I18N_UnknownSkillUpgradeConditionType" xml:space="preserve">
+    <value>不明なスキル進化条件タイプです。進化不可として扱います: conditionId={0}, type={1}</value>
+  </data>
 </root>

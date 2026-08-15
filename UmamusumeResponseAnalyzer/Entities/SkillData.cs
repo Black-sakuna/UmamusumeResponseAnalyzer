@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using SingleModeChara = Gallop.SingleModeChara;
 using static UmamusumeResponseAnalyzer.Entities.TalentSkillData;
@@ -235,8 +236,13 @@ namespace UmamusumeResponseAnalyzer.Entities
             /// </summary>
             public int AdditionalRequirement;
 
+            internal bool HasSupportedType =>
+                Type is not ConditionType.None && Enum.IsDefined(Type);
+
             public bool IsArchived(SingleModeChara chara_info, IEnumerable<SkillData> skills)
             {
+                if (!HasSupportedType) return false;
+
                 // 由服务器保存的条件详情。不变量:服务器对每个进化条件都会下发记录。
                 var serverCondition = chara_info.skill_upgrade_info_array.FirstOrDefault(x => x.condition_id == ConditionId)
                     ?? throw new InvalidOperationException($"缺少技能进化条件记录: conditionId={ConditionId}");
@@ -290,7 +296,7 @@ namespace UmamusumeResponseAnalyzer.Entities
                     case ConditionType.Stat:
                         return currentCount + skills.Count(x => x.Category == SkillCategory.Stat) >= Requirement;
                 }
-                throw new InvalidDataException($"未知的技能进化条件类型: conditionId={ConditionId}, type={Type}");
+                throw new UnreachableException();
             }
             public enum ConditionType
             {

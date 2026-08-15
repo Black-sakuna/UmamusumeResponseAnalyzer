@@ -4,6 +4,7 @@ using System.Text;
 using Newtonsoft.Json;
 using UmamusumeResponseAnalyzer;
 using UmamusumeResponseAnalyzer.Entities;
+using UmamusumeResponseAnalyzer.TerminalGui;
 using Xunit;
 
 namespace UmamusumeResponseAnalyzer.Tests
@@ -535,6 +536,89 @@ namespace UmamusumeResponseAnalyzer.Tests
             }
             finally
             {
+                Directory.SetCurrentDirectory(previousDirectory);
+                Directory.Delete(directory, true);
+            }
+        }
+
+        [Fact]
+        public async Task Initialize_WithUnknownSkillUpgradeConditions_WarnsOnceAndRemainsReady()
+        {
+            const string scenario = "database-unknown-skill-upgrade-condition";
+            if (!TerminalUiLifecycleChildProcess.IsChild(scenario))
+            {
+                Assert.Equal(
+                    "Ready|1|Warning|True",
+                    await TerminalUiLifecycleProcessTests.RunChildAsync(
+                        scenario,
+                        typeof(DatabaseInitializeMissingFilesTests),
+                        nameof(Initialize_WithUnknownSkillUpgradeConditions_WarnsOnceAndRemainsReady)));
+                return;
+            }
+
+            const int conditionId = 11320104;
+            var unknownCondition = new TalentSkillData.UpgradeCondition
+            {
+                ConditionId = conditionId,
+                Type = TalentSkillData.UpgradeCondition.ConditionType.None
+            };
+            var upgradeSkills = new Dictionary<int, TalentSkillData.UpgradeCondition[]>
+            {
+                [200] = [unknownCondition]
+            };
+
+            var directory = Path.Combine(Path.GetTempPath(), $"ura-database-unknown-condition-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(directory);
+            var previousDirectory = Directory.GetCurrentDirectory();
+            List<UiLogLine> logs = [];
+            void ObserveLog(UiLogLine line) => logs.Add(line);
+            runtime.Host.LogAdded += ObserveLog;
+            try
+            {
+                Directory.SetCurrentDirectory(directory);
+                await WriteAsync(directory, Database.EVENT_NAME_FILEPATH, new[] { new Story { Id = 7, Name = "event" } });
+                await WriteAsync(directory, Database.NAMES_FILEPATH, new List<BaseName> { new(1001, "name", "name") }, new() { TypeNameHandling = TypeNameHandling.All });
+                await WriteAsync(directory, Database.SKILLS_FILEPATH, Array.Empty<SkillData>());
+                await WriteAsync(directory, Database.SKILL_UPGRADE_SPECIALITY_FILEPATH, new[]
+                {
+                    new SkillUpgradeSpeciality
+                    {
+                        ScenarioId = 1,
+                        BaseSkillId = 100,
+                        UpgradeSkills = upgradeSkills
+                    }
+                });
+                await WriteAsync(directory, Database.TALENT_SKILLS_FILEPATH, new Dictionary<int, TalentSkillData[]>
+                {
+                    [1] =
+                    [
+                        new()
+                        {
+                            SkillId = 100,
+                            Rank = 3,
+                            UpgradeSkills = upgradeSkills
+                        }
+                    ]
+                });
+                await WriteAsync(directory, Database.FACTOR_IDS_FILEPATH, new Dictionary<int, string>());
+                await WriteAsync(directory, Database.SADDLE_IDS_FILEPATH, Array.Empty<int>());
+                await WriteAsync(directory, Database.SUCCESSION_RELATION_FILEPATH, new SuccessionRelationTable());
+
+                var ready = await Database.Initialize();
+                await runtime.Host.FlushAsync();
+                await runtime.Terminal.WaitForScreenAsync($"conditionId={conditionId}");
+                var warnings = logs
+                    .Where(x => x.Text.Contains($"conditionId={conditionId}", StringComparison.Ordinal))
+                    .ToArray();
+                var screen = await runtime.Terminal.CaptureScreenAsync();
+                var severity = warnings.Length == 1 ? warnings[0].Severity.ToString() : "n/a";
+                TerminalUiLifecycleChildProcess.WriteResult(
+                    $"{ready}|{warnings.Length}|{severity}|" +
+                    $"{screen.Contains($"conditionId={conditionId}", StringComparison.Ordinal)}");
+            }
+            finally
+            {
+                runtime.Host.LogAdded -= ObserveLog;
                 Directory.SetCurrentDirectory(previousDirectory);
                 Directory.Delete(directory, true);
             }

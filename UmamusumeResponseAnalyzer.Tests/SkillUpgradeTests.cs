@@ -223,17 +223,19 @@ namespace UmamusumeResponseAnalyzer.Tests
             Assert.Throws<InvalidDataException>(() => condition.IsArchived(chara, []));
         }
 
-        [Fact]
-        public void IsArchived_UnknownConditionType_Throws()
+        [Theory]
+        [InlineData((int)UpgradeCondition.ConditionType.None)]
+        [InlineData(999)]
+        public void IsArchived_UnknownConditionType_ReturnsFalseEvenWhenServerSaysComplete(int type)
         {
-            var chara = MakeChara(upgradeInfo: [Info(100, 0, 1)]);
+            var chara = MakeChara(upgradeInfo: [Info(11320104, 1, 1)]);
             var condition = new UpgradeCondition
             {
-                ConditionId = 100,
-                Type = UpgradeCondition.ConditionType.None
+                ConditionId = 11320104,
+                Type = (UpgradeCondition.ConditionType)type
             };
 
-            Assert.Throws<InvalidDataException>(() => condition.IsArchived(chara, []));
+            Assert.False(condition.IsArchived(chara, []));
         }
 
         // =========================================================================

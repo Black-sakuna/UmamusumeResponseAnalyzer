@@ -86,5 +86,14 @@ namespace UmamusumeResponseAnalyzer.Localization {
                 return ResourceManager.GetString("I18N_NotExist", resourceCulture);
             }
         }
+
+        /// <summary>
+        ///   查找类似 Unknown skill evolution condition type; the skill will be treated as unable to evolve: conditionId={0}, type={1} 的本地化字符串。
+        /// </summary>
+        internal static string I18N_UnknownSkillUpgradeConditionType {
+            get {
+                return ResourceManager.GetString("I18N_UnknownSkillUpgradeConditionType", resourceCulture);
+            }
+        }
     }
 }

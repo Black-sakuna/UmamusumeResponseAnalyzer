@@ -126,4 +126,7 @@
   <data name="I18N_NotExist" xml:space="preserve">
     <value>Data file {0} does not exist, please try updating the data again</value>
   </data>
+  <data name="I18N_UnknownSkillUpgradeConditionType" xml:space="preserve">
+    <value>Unknown skill evolution condition type; the skill will be treated as unable to evolve: conditionId={0}, type={1}</value>
+  </data>
 </root>

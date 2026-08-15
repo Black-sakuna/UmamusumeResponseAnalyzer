@@ -103,6 +103,21 @@ namespace UmamusumeResponseAnalyzer
 
             try
             {
+                var unknownSkillUpgradeConditions = talentSkill.Values
+                    .SelectMany(x => x)
+                    .SelectMany(x => x.UpgradeSkills.Values)
+                    .Concat(skillUpgrade.SelectMany(x => x.UpgradeSkills.Values))
+                    .SelectMany(x => x)
+                    .Where(x => !x.HasSupportedType)
+                    .DistinctBy(x => (x.ConditionId, x.Type));
+                foreach (var condition in unknownSkillUpgradeConditions)
+                {
+                    ReportWarning(string.Format(
+                        I18N_UnknownSkillUpgradeConditionType,
+                        condition.ConditionId,
+                        condition.Type));
+                }
+
                 var next = new DatabaseSnapshot(
                     new SkillManagerGenerator(skills),
                     skillUpgrade.ToFrozenDictionary(x => (x.BaseSkillId, x.ScenarioId)),
