@@ -237,9 +237,14 @@ namespace UmamusumeResponseAnalyzer.Plugin
                     TerminalUi.Log("URA", $"[{DisplayLabel(plugin)} v{versionToInstall.Version}] 正在下载");
                     // 直接把下载的 zip 落成 Plugins/{InternalName}.zip,不解压(SDK 打的 zip 内容在根、无 Plugins/ 前缀;
                     // 宿主 ScanAll 扫的就是 Plugins/*.zip,与本地开发 deploy 一致,热重载重扫即可发现)。
-                    await DownloadPluginZipAsync(versionToInstall.DownloadUrl, plugin.InternalName, cancellationToken);
-                    TerminalUi.Log("URA", $"[{DisplayLabel(plugin)}] 安装完成");
-                    installed.Add(plugin.InternalName);
+                    var manifest = await DownloadPluginZipAsync(
+                        versionToInstall.DownloadUrl,
+                        plugin.Author,
+                        plugin.InternalName,
+                        versionToInstall.RawVersion,
+                        cancellationToken);
+                    TerminalUi.Log("URA", $"[{DisplayLabel(manifest)}] 安装完成");
+                    installed.Add(manifest.InternalName);
                 }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
@@ -252,12 +257,15 @@ namespace UmamusumeResponseAnalyzer.Plugin
             return installed;
         }
 
-        internal static async Task DownloadPluginZipAsync(string url, string internalName, CancellationToken cancellationToken)
+        internal static async Task<PluginInformation> DownloadPluginZipAsync(
+            string url,
+            string expectedAuthor,
+            string expectedInternalName,
+            string expectedVersion,
+            CancellationToken cancellationToken)
         {
             Directory.CreateDirectory("Plugins");
-            var tempDir = Path.Combine(Path.GetTempPath(), "UmamusumeResponseAnalyzer");
-            Directory.CreateDirectory(tempDir);
-            foreach (var stale in Directory.GetFiles(tempDir, "plugin-*.tmp"))
+            foreach (var stale in Directory.GetFiles("Plugins", "plugin-*.tmp"))
             {
                 if (File.GetLastWriteTimeUtc(stale) < DateTime.UtcNow.AddDays(-1))
                     File.Delete(stale);
@@ -265,8 +273,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
 
             using var response = await ResourceUpdater.HttpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
             response.EnsureSuccessStatusCode();
-            var dest = InstallZipPath(internalName);
-            var tempPath = Path.Combine(tempDir, $"plugin-{internalName}-{Guid.NewGuid():N}.tmp");
+            var tempPath = Path.Combine("Plugins", $"plugin-{Guid.NewGuid():N}.tmp");
             try
             {
                 await using (var fs = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81920, true))
@@ -274,7 +281,13 @@ namespace UmamusumeResponseAnalyzer.Plugin
                     await response.Content.CopyToAsync(fs, cancellationToken);
                     await fs.FlushAsync(cancellationToken);
                 }
-                File.Move(tempPath, dest, overwrite: true);
+                var manifest = ValidatePackage(
+                    tempPath,
+                    expectedAuthor,
+                    expectedInternalName,
+                    expectedVersion);
+                File.Move(tempPath, InstallZipPath(manifest.InternalName), overwrite: true);
+                return manifest;
             }
             finally
             {
@@ -284,18 +297,18 @@ namespace UmamusumeResponseAnalyzer.Plugin
         }
 
         /// <summary>
-        /// 非交互安装:按 (author, internalName, version) 从【硬编码的】URACloud 仓库下载并落盘
-        /// Plugins/{internalName}.zip。供 :4693 的 Web 端点(<see cref="WebInstallApi"/>)调用——刻意
+        /// 非交互安装:按 (author, internalName, version) 从【硬编码的】URACloud 仓库下载，严格校验后落盘
+        /// Plugins/{internalName}.zip，并返回已校验的 manifest。供 :4693 的 Web 端点(<see cref="WebInstallApi"/>)调用——刻意
         /// 只收三段引用、<b>绝不接受任何 URL</b>,下载源恒为 <see cref="PluginApiBase"/>。因此伪造的网页
         /// 既改不了下载源也投不了毒,顶多触发安装一个仓库里真实存在的插件。调用方负责随后调
         /// <see cref="PluginManager.ReloadPluginsAsync"/> 完成热重载。
         /// </summary>
-        public static async Task InstallByReferenceAsync(string author, string internalName, string version, CancellationToken cancellationToken = default)
+        public static Task<PluginInformation> InstallByReferenceAsync(string author, string internalName, string version, CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(author) || !IsSafeSegment(internalName) || string.IsNullOrWhiteSpace(version))
                 throw new ArgumentException("非法的插件标识");
             var url = $"{PluginApiBase}/{Uri.EscapeDataString(author)}/{Uri.EscapeDataString(internalName)}/versions/{Uri.EscapeDataString(version)}/download";
-            await DownloadPluginZipAsync(url, internalName, cancellationToken);
+            return DownloadPluginZipAsync(url, author, internalName, version, cancellationToken);
         }
 
         internal static PluginInformation ValidatePackage(

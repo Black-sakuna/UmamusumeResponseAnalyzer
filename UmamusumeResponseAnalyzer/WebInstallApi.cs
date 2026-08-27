@@ -123,19 +123,19 @@ namespace UmamusumeResponseAnalyzer
 
             try
             {
-                await PluginRepository.InstallByReferenceAsync(req.Author, req.InternalName, req.Version, cancellationToken);
+                var manifest = await PluginRepository.InstallByReferenceAsync(req.Author, req.InternalName, req.Version, cancellationToken);
                 // 核心安装路由由 Server barrier 跟踪；热重载会等待插件 callback 排空。
-                var result = (await PluginManager.ReloadPluginsAsync(req.InternalName)).Single();
+                var result = (await PluginManager.ReloadPluginsAsync(manifest.InternalName)).Single();
                 _ = result.Outcome switch
                 {
                     PluginManager.PluginLifecycleOutcome.Succeeded => true,
                     PluginManager.PluginLifecycleOutcome.Failed => throw new InvalidOperationException(
-                        $"插件 {req.InternalName} 已安装，但加载失败。"),
+                        $"插件 {manifest.InternalName} 已安装，但加载失败。"),
                     _ => throw new InvalidOperationException($"未知插件 lifecycle 结果: {result.Outcome}")
                 };
                 cancellationToken.ThrowIfCancellationRequested();
-                TerminalUi.Log("URA", $"URACloud 网页请求已安装插件 {req.InternalName} v{req.Version}");
-                await SendJson(ctx, 200, new { ok = true, installed = req.InternalName });
+                TerminalUi.Log("URA", $"URACloud 网页请求已安装插件 {manifest.InternalName} v{manifest.RawVersion}");
+                await SendJson(ctx, 200, new { ok = true, installed = manifest.InternalName, version = manifest.RawVersion });
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {

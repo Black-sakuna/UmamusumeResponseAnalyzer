@@ -37,9 +37,9 @@ UmamusumeResponseAnalyzer 是基于 Terminal.Gui 的本地 TUI 宿主。它接�
 # 插件仓库与 URACloud
 
 * `插件仓库` 从 `https://ura.shuise.net/api/Plugins` 拉取插件目录，并按配置中的服务器目标过滤插件。插件自身未声明 `Targets` 时视为所有目标可用。安装只处理用户选中的插件，不根据 manifest `Dependencies` 自动增加其它插件。
-* 仓库安装会下载 ZIP 到 `Plugins/<InternalName>.zip`，随后尝试热重载。宿主只扫描 `Plugins/` 顶层的 ZIP 包；不扫描独立 DLL 文件或子目录。
-* `InternalName` 按 `OrdinalIgnoreCase` 全局唯一；仓库、本地包或加载集合出现重复名称时 fail fast，并写入全局最近日志和 error notification。
-* URACloud 网页集成挂在本地 `/uracloud/*`。`/uracloud/status` 返回当前 URA 版本和已加载插件；`/uracloud/install` 只接受 `{author, internalName, version}`，下载源固定为 URACloud 插件仓库，并且安装前必须在本机控制台确认。
+* 仓库安装先将 ZIP 下载到 `Plugins/plugin-*.tmp`，按下述包契约及请求的 `Author`、`InternalName`、`Version` 校验后，才替换 `Plugins/<InternalName>.zip` 并尝试热重载；下载或校验失败会删除临时文件并保留现有 ZIP 和运行实例。宿主只扫描 `Plugins/` 顶层的 ZIP 包；不扫描独立 DLL 文件或子目录。
+* `InternalName` 按 `OrdinalIgnoreCase` 全局唯一；仓库目录出现重复名称时本次仓库操作失败，`Plugins/` 中名称冲突的包不会加载，并写入全局最近日志和 error notification。
+* URACloud 网页集成挂在本地 `/uracloud/*`。`/uracloud/status` 返回当前 URA 版本和已加载插件；`/uracloud/install` 只接受白名单 Origin（`https://ura.shuise.net` 或 `http://localhost:5173`）提交的 `{author, internalName, version}`，下载源固定为 URACloud 插件仓库，并且安装前必须在本机控制台确认。成功响应为 `{ok: true, installed, version}`，其中 `installed` 和 `version` 取自已校验 manifest。
 
 # 插件开发 Plugin Development
 
