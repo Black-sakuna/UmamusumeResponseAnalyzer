@@ -1,0 +1,500 @@
+<Project>
+  <!-- URA plugin build hooks. Plugin repositories import this file from their pinned Host submodule. -->
+
+  <PropertyGroup>
+    <UraHostProjectPath Condition="'$(UraHostProjectPath)' == ''">$(MSBuildThisFileDirectory)..\UmamusumeResponseAnalyzer\UmamusumeResponseAnalyzer.csproj</UraHostProjectPath>
+    <_UraNuGetProjectModelAssemblyPath>$(MSBuildToolsPath)\NuGet.ProjectModel.dll</_UraNuGetProjectModelAssemblyPath>
+    <_UraNuGetProjectModelAssemblyPath Condition="!Exists('$(_UraNuGetProjectModelAssemblyPath)')">$([System.IO.Path]::GetFullPath('$(MSBuildExtensionsPath32)\..\Common7\IDE\CommonExtensions\Microsoft\NuGet\NuGet.ProjectModel.dll'))</_UraNuGetProjectModelAssemblyPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="bin\**;obj\**;bin-test\**;obj-test\**" />
+    <EmbeddedResource Remove="bin\**;obj\**;bin-test\**;obj-test\**" />
+    <None Remove="bin\**;obj\**;bin-test\**;obj-test\**" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(IsUraPlugin)' == 'true'">
+    <ProjectReference Include="$(UraHostProjectPath)" ReferenceOutputAssembly="true" Private="false" />
+  </ItemGroup>
+
+  <Target Name="ValidateUraPluginHostProject"
+          BeforeTargets="PrepareForBuild"
+          Condition="'$(IsUraPlugin)' == 'true'">
+    <Error Condition="!Exists('$(UraHostProjectPath)')"
+           Text="URA Host project was not found at '$(UraHostProjectPath)'. Initialize this repository's Git submodules before building." />
+  </Target>
+  <UsingTask TaskName="WriteUraPluginManifestTask"
+             TaskFactory="RoslynCodeTaskFactory"
+             AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup>
+      <OutputPath ParameterType="System.String" Required="true" />
+      <Author ParameterType="System.String" Required="true" />
+      <InternalName ParameterType="System.String" Required="true" />
+      <DisplayName ParameterType="System.String" Required="true" />
+      <Description ParameterType="System.String" Required="false" />
+      <Category ParameterType="System.String" Required="false" />
+      <Changelog ParameterType="System.String" Required="false" />
+      <RepositoryUrl ParameterType="System.String" Required="false" />
+      <Homepage ParameterType="System.String" Required="false" />
+      <Dependencies ParameterType="System.String" Required="false" />
+      <Targets ParameterType="System.String" Required="false" />
+      <Version ParameterType="System.String" Required="true" />
+    </ParameterGroup>
+    <Task>
+      <Using Namespace="System" />
+      <Using Namespace="System.IO" />
+      <Using Namespace="System.Text" />
+      <Code Type="Fragment" Language="cs"><![CDATA[
+        string EscapeJson(string s)
+        {
+            if (s == null) return string.Empty;
+            var sb = new StringBuilder(s.Length + 8);
+            foreach (var c in s)
+            {
+                switch (c)
+                {
+                    case '\\': sb.Append("\\\\"); break;
+                    case '"': sb.Append("\\\""); break;
+                    case '\b': sb.Append("\\b"); break;
+                    case '\f': sb.Append("\\f"); break;
+                    case '\n': sb.Append("\\n"); break;
+                    case '\r': sb.Append("\\r"); break;
+                    case '\t': sb.Append("\\t"); break;
+                    default:
+                        if (c < 0x20) sb.AppendFormat("\\u{0:x4}", (int)c);
+                        else sb.Append(c);
+                        break;
+                }
+            }
+            return sb.ToString();
+        }
+
+        string Quote(string s) => "\"" + EscapeJson(s ?? string.Empty) + "\"";
+
+        string JsonArray(string csv)
+        {
+            if (string.IsNullOrWhiteSpace(csv)) return "[]";
+            var parts = csv.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries);
+            var sb = new StringBuilder("[");
+            for (int i = 0; i < parts.Length; i++)
+            {
+                if (i > 0) sb.Append(", ");
+                sb.Append(Quote(parts[i].Trim()));
+            }
+            sb.Append("]");
+            return sb.ToString();
+        }
+
+        if (!System.Version.TryParse(Version, out _))
+        {
+            throw new InvalidOperationException($"Plugin Version must be a valid System.Version value: '{Version}'.");
+        }
+
+        long lastUpdate = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+        var json = new StringBuilder();
+        json.Append("{\n");
+        json.Append("  \"Author\": ").Append(Quote(Author)).Append(",\n");
+        json.Append("  \"InternalName\": ").Append(Quote(InternalName)).Append(",\n");
+        json.Append("  \"DisplayName\": ").Append(Quote(DisplayName)).Append(",\n");
+        json.Append("  \"Description\": ").Append(Quote(Description)).Append(",\n");
+        json.Append("  \"Changelog\": ").Append(Quote(Changelog)).Append(",\n");
+        json.Append("  \"Version\": ").Append(Quote(Version)).Append(",\n");
+        json.Append("  \"Dependencies\": ").Append(JsonArray(Dependencies)).Append(",\n");
+        json.Append("  \"Targets\": ").Append(JsonArray(Targets)).Append(",\n");
+        json.Append("  \"RepositoryUrl\": ").Append(Quote(RepositoryUrl)).Append(",\n");
+        json.Append("  \"LastUpdate\": ").Append(lastUpdate).Append(",\n");
+        json.Append("  \"Category\": ").Append(Quote(Category)).Append(",\n");
+        json.Append("  \"Homepage\": ").Append(Quote(Homepage)).Append("\n");
+        json.Append("}\n");
+
+        var dir = Path.GetDirectoryName(OutputPath);
+        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+        File.WriteAllText(OutputPath, json.ToString(), new UTF8Encoding(false));
+        Log.LogMessage(MessageImportance.High, $"[URA.Plugin] wrote manifest -> {OutputPath} (v{Version})");
+      ]]></Code>
+    </Task>
+  </UsingTask>
+
+  <UsingTask TaskName="ResolveUraPluginPackageAssetsTask"
+             TaskFactory="RoslynCodeTaskFactory"
+             AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup>
+      <ProjectAssetsFile ParameterType="System.String" Required="true" />
+      <TargetFramework ParameterType="System.String" Required="true" />
+      <RuntimeIdentifier ParameterType="System.String" Required="false" />
+      <MainAssemblyName ParameterType="System.String" Required="true" />
+      <NuGetProjectModelAssemblyPath ParameterType="System.String" Required="true" />
+      <Candidates ParameterType="Microsoft.Build.Framework.ITaskItem[]" Required="false" />
+      <ReservedPackagePaths ParameterType="Microsoft.Build.Framework.ITaskItem[]" Required="false" />
+      <PackageAssets ParameterType="Microsoft.Build.Framework.ITaskItem[]" Output="true" />
+    </ParameterGroup>
+    <Task>
+      <Using Namespace="System" />
+      <Using Namespace="System.Collections" />
+      <Using Namespace="System.Collections.Generic" />
+      <Using Namespace="System.IO" />
+      <Using Namespace="System.Linq" />
+      <Using Namespace="System.Reflection" />
+      <Using Namespace="Microsoft.Build.Framework" />
+      <Using Namespace="Microsoft.Build.Utilities" />
+      <Code Type="Fragment" Language="cs"><![CDATA[
+        if (!File.Exists(ProjectAssetsFile))
+        {
+            throw new FileNotFoundException("Plugin project.assets.json was not found. Restore the plugin project before packaging.", ProjectAssetsFile);
+        }
+
+        object Property(object value, string name)
+        {
+            var property = value.GetType().GetProperty(name);
+            return property?.GetValue(value)
+                ?? throw new InvalidOperationException($"NuGet project model property '{value.GetType().FullName}.{name}' is unavailable.");
+        }
+        IEnumerable<object> Values(object value, string name) => ((IEnumerable)Property(value, name)).Cast<object>();
+        string Text(object value, string name) => Property(value, name)?.ToString() ?? string.Empty;
+
+        if (!File.Exists(NuGetProjectModelAssemblyPath))
+        {
+            throw new FileNotFoundException($"NuGet.ProjectModel.dll was not found at the resolved path '{NuGetProjectModelAssemblyPath}'.", NuGetProjectModelAssemblyPath);
+        }
+        var projectModelAssembly = Assembly.LoadFrom(NuGetProjectModelAssemblyPath);
+        var lockFileFormatType = projectModelAssembly.GetType("NuGet.ProjectModel.LockFileFormat", throwOnError: true);
+        var lockFileFormat = Activator.CreateInstance(lockFileFormatType);
+        var readMethod = lockFileFormatType.GetMethod("Read", new[] { typeof(string) })
+            ?? throw new InvalidOperationException("NuGet LockFileFormat.Read(string) is unavailable.");
+        var lockFile = readMethod.Invoke(lockFileFormat, new object[] { ProjectAssetsFile })
+            ?? throw new InvalidOperationException($"NuGet could not read '{ProjectAssetsFile}'.");
+
+        var packageSpec = Property(lockFile, "PackageSpec");
+        var framework = Values(packageSpec, "TargetFrameworks").SingleOrDefault(candidate =>
+            string.Equals(Text(candidate, "TargetAlias"), TargetFramework, StringComparison.OrdinalIgnoreCase));
+        if (framework == null)
+        {
+            throw new InvalidOperationException($"project.assets.json does not contain target framework '{TargetFramework}'.");
+        }
+
+        var runtimeIdentifier = RuntimeIdentifier ?? string.Empty;
+        var targetName = TargetFramework + (runtimeIdentifier.Length == 0 ? string.Empty : "/" + runtimeIdentifier);
+        var target = Values(lockFile, "Targets").SingleOrDefault(candidate =>
+            string.Equals(Text(candidate, "Name"), targetName, StringComparison.OrdinalIgnoreCase));
+        if (target == null)
+        {
+            throw new InvalidOperationException($"project.assets.json does not contain the exact target '{TargetFramework}/{runtimeIdentifier}'.");
+        }
+
+        var libraries = Values(target, "Libraries").ToDictionary(
+            library => Text(library, "Name"), StringComparer.OrdinalIgnoreCase);
+        var sharedAssemblies = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "UmamusumeResponseAnalyzer",
+            "Terminal.Gui",
+            "Watson.Lite",
+            "WatsonWebserver.Core",
+            "WatsonWebserver.Lite"
+        };
+        bool IsSharedAssembly(string path)
+        {
+            var fileName = Path.GetFileName(path);
+            if (!fileName.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)) return false;
+            var assemblyName = fileName.Substring(0, fileName.Length - 4);
+            if (assemblyName.EndsWith(".resources", StringComparison.OrdinalIgnoreCase))
+            {
+                assemblyName = assemblyName.Substring(0, assemblyName.Length - ".resources".Length);
+            }
+            return sharedAssemblies.Contains(assemblyName);
+        }
+        bool IsSharedAbiPackage(object library)
+        {
+            var runtimeAssemblyPaths = Values(library, "RuntimeAssemblies")
+                .Select(asset => Text(asset, "Path"))
+                .Concat(Values(library, "RuntimeTargets")
+                    .Where(asset => string.Equals(Text(asset, "AssetType"), "runtime", StringComparison.OrdinalIgnoreCase))
+                    .Select(asset => Text(asset, "Path")))
+                .Where(path => path.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)
+                    && !path.EndsWith("/_._", StringComparison.Ordinal))
+                .ToArray();
+            return runtimeAssemblyPaths.Length > 0 && runtimeAssemblyPaths.All(IsSharedAssembly);
+        }
+        var closure = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var sharedAbiPackages = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var pending = new Queue<string>(Values(framework, "Dependencies")
+            .Where(dependency => !Convert.ToBoolean(Property(dependency, "AutoReferenced")))
+            .Where(dependency => string.Equals(
+                Text(Property(dependency, "LibraryRange"), "TypeConstraint"),
+                "Package", StringComparison.Ordinal))
+            .Select(dependency => Text(dependency, "Name")));
+
+        while (pending.Count > 0)
+        {
+            var packageName = pending.Dequeue();
+            if (!closure.Add(packageName))
+            {
+                continue;
+            }
+
+            if (!libraries.TryGetValue(packageName, out var library)
+                || !string.Equals(Text(library, "Type"), "package", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException($"Direct or transitive package '{packageName}' is missing from target '{targetName}'.");
+            }
+            if (IsSharedAbiPackage(library))
+            {
+                sharedAbiPackages.Add(packageName);
+                continue;
+            }
+
+            foreach (var dependency in Values(library, "Dependencies"))
+            {
+                var dependencyName = Text(dependency, "Id");
+                if (!libraries.TryGetValue(dependencyName, out var dependencyLibrary))
+                {
+                    throw new InvalidOperationException($"Package '{packageName}' depends on missing package '{dependencyName}' in target '{targetName}'.");
+                }
+
+                if (string.Equals(Text(dependencyLibrary, "Type"), "package", StringComparison.OrdinalIgnoreCase))
+                {
+                    pending.Enqueue(dependencyName);
+                }
+            }
+        }
+
+        string NormalizePackagePath(string path) => (path ?? string.Empty).Replace('\\', '/');
+
+        var runtimeAssets = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var packageName in closure)
+        {
+            if (sharedAbiPackages.Contains(packageName))
+            {
+                continue;
+            }
+            var library = libraries[packageName];
+            var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var asset in Values(library, "RuntimeAssemblies")) paths.Add(NormalizePackagePath(Text(asset, "Path")));
+            foreach (var asset in Values(library, "NativeLibraries")) paths.Add(NormalizePackagePath(Text(asset, "Path")));
+            foreach (var asset in Values(library, "ResourceAssemblies")) paths.Add(NormalizePackagePath(Text(asset, "Path")));
+            foreach (var asset in Values(library, "RuntimeTargets"))
+            {
+                var assetType = Text(asset, "AssetType");
+                if (string.Equals(assetType, "runtime", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(assetType, "native", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(assetType, "resources", StringComparison.OrdinalIgnoreCase))
+                {
+                    paths.Add(NormalizePackagePath(Text(asset, "Path")));
+                }
+            }
+            runtimeAssets.Add(packageName, paths);
+        }
+
+        var reservedPaths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var reserved in ReservedPackagePaths ?? Array.Empty<ITaskItem>())
+        {
+            var destination = (reserved.GetMetadata("RecursiveDir")
+                + reserved.GetMetadata("Filename")
+                + reserved.GetMetadata("Extension")).Replace('/', Path.DirectorySeparatorChar);
+            if (string.IsNullOrWhiteSpace(destination)
+                || Path.IsPathRooted(destination)
+                || destination.Split(Path.DirectorySeparatorChar).Any(part => part == ".."))
+            {
+                throw new InvalidOperationException($"Reserved plugin asset '{reserved.ItemSpec}' has unsafe or missing PackagePath '{destination}'.");
+            }
+            if (reservedPaths.ContainsKey(destination))
+            {
+                throw new InvalidOperationException($"Multiple plugin-owned assets map to ZIP path '{destination}'.");
+            }
+            reservedPaths.Add(destination, reserved.ItemSpec);
+        }
+
+        var selected = new SortedDictionary<string, ITaskItem>(StringComparer.OrdinalIgnoreCase);
+        foreach (var candidate in Candidates ?? Array.Empty<ITaskItem>())
+        {
+            var packageName = candidate.GetMetadata("NuGetPackageId");
+            var pathInPackage = NormalizePackagePath(candidate.GetMetadata("PathInPackage"));
+            if (!runtimeAssets.TryGetValue(packageName, out var paths)
+                || !paths.Contains(pathInPackage))
+            {
+                continue;
+            }
+
+            var originalDestination = candidate.GetMetadata("DestinationSubPath").Replace('/', Path.DirectorySeparatorChar);
+            if (string.IsNullOrWhiteSpace(originalDestination)
+                || Path.IsPathRooted(originalDestination)
+                || originalDestination.Split(Path.DirectorySeparatorChar).Any(part => part == ".."))
+            {
+                throw new InvalidOperationException($"Package asset '{candidate.ItemSpec}' has unsafe or missing DestinationSubPath '{originalDestination}'.");
+            }
+            bool IsForbiddenFile(string path) =>
+                path.EndsWith(".pdb", StringComparison.OrdinalIgnoreCase)
+                || path.EndsWith(".deps.json", StringComparison.OrdinalIgnoreCase)
+                || path.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase)
+                || path.EndsWith(".temp", StringComparison.OrdinalIgnoreCase);
+            if (IsForbiddenFile(pathInPackage) || IsForbiddenFile(originalDestination))
+            {
+                throw new InvalidOperationException($"Package asset '{candidate.ItemSpec}' is forbidden in plugin ZIPs: PathInPackage='{pathInPackage}', DestinationSubPath='{originalDestination}'.");
+            }
+
+            var assetType = candidate.GetMetadata("AssetType");
+            if (string.Equals(assetType, "native", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException($"Native package asset '{candidate.ItemSpec}' is unsupported by the current plugin Host and cannot be packaged.");
+            }
+            if (IsSharedAssembly(originalDestination))
+            {
+                continue;
+            }
+            var fileName = Path.GetFileName(originalDestination);
+            var isCultureResource = fileName.EndsWith(".resources.dll", StringComparison.OrdinalIgnoreCase);
+            if (!isCultureResource && !fileName.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException($"Runtime package asset '{candidate.ItemSpec}' is not a managed DLL and cannot be packaged.");
+            }
+            var destination = isCultureResource ? originalDestination : fileName;
+            if (string.Equals(destination, "manifest.json", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(destination, MainAssemblyName + ".dll", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException($"Package asset '{candidate.ItemSpec}' collides with required ZIP root entry '{destination}'.");
+            }
+            if (reservedPaths.TryGetValue(destination, out var reservedSource))
+            {
+                throw new InvalidOperationException($"Package asset '{candidate.ItemSpec}' and plugin-owned satellite '{reservedSource}' both map to ZIP path '{destination}'.");
+            }
+
+            if (selected.TryGetValue(destination, out var existing))
+            {
+                if (!string.Equals(Path.GetFullPath(existing.ItemSpec), Path.GetFullPath(candidate.ItemSpec), StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException(
+                        $"Package runtime assets '{existing.ItemSpec}' and '{candidate.ItemSpec}' both map to ZIP root '{destination}'. "
+                        + "Build with an explicit SDK RuntimeIdentifier (for example '-r win-x64') so NuGet selects one runtime asset.");
+                }
+                continue;
+            }
+
+            var output = new TaskItem(candidate);
+            output.SetMetadata("PackagePath", destination);
+            selected.Add(destination, output);
+        }
+
+        PackageAssets = selected.Values.ToArray();
+        Log.LogMessage(MessageImportance.High,
+            $"[URA.Plugin] selected {PackageAssets.Length} runtime package asset(s) from {closure.Count} direct/transitive package(s).");
+      ]]></Code>
+    </Task>
+  </UsingTask>
+
+  <PropertyGroup>
+    <IsUraPlugin Condition="'$(IsUraPlugin)' == ''">false</IsUraPlugin>
+    <GenerateUraPluginManifestOnBuild Condition="'$(GenerateUraPluginManifestOnBuild)' == ''">$(IsUraPlugin)</GenerateUraPluginManifestOnBuild>
+    <PackageUraPluginOnBuild Condition="'$(PackageUraPluginOnBuild)' == ''">$(IsUraPlugin)</PackageUraPluginOnBuild>
+    <DeployUraPluginToLocalAppDataOnBuild Condition="'$(DeployUraPluginToLocalAppDataOnBuild)' == ''">$(IsUraPlugin)</DeployUraPluginToLocalAppDataOnBuild>
+    <CopyLocalLockFileAssemblies Condition="'$(IsUraPlugin)' == 'true' and '$(PackageUraPluginOnBuild)' == 'true'">true</CopyLocalLockFileAssemblies>
+    <UraPluginManifestPath Condition="'$(UraPluginManifestPath)' == ''">$(TargetDir)manifest.json</UraPluginManifestPath>
+    <UraPluginPackagePath Condition="'$(UraPluginPackagePath)' == ''">$(BaseOutputPath)$(Configuration)\$(AssemblyName).zip</UraPluginPackagePath>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(IsUraPlugin)' == 'true' and '$(PackageUraPluginOnBuild)' == 'true' and '$(RuntimeIdentifier)' == '' and '$(MSBuildRuntimeType)' == 'Full'">
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <SelfContained>false</SelfContained>
+  </PropertyGroup>
+
+  <Target Name="_ResolveUraPluginBuildAssets"
+          Condition="'$(IsUraPlugin)' == 'true' and '$(IsCrossTargetingBuild)' != 'true'">
+    <PropertyGroup>
+      <_UraPluginManifestPath>$(UraPluginManifestPath)</_UraPluginManifestPath>
+      <_UraPluginManifestPath Condition="'$(UraPluginManifestPath)' == '' or '$(UraPluginManifestPath)' == 'manifest.json'">$(TargetDir)manifest.json</_UraPluginManifestPath>
+      <_UraPluginPackagePath>$(UraPluginPackagePath)</_UraPluginPackagePath>
+      <_UraPluginPackagePath Condition="'$(UraPluginPackagePath)' == ''">$(BaseOutputPath)$(Configuration)\$(AssemblyName).zip</_UraPluginPackagePath>
+    </PropertyGroup>
+  </Target>
+
+  <Target Name="GenerateUraPluginManifest"
+          AfterTargets="Build"
+          DependsOnTargets="_ResolveUraPluginBuildAssets"
+          Condition="'$(IsUraPlugin)' == 'true' and '$(GenerateUraPluginManifestOnBuild)' == 'true' and '$(IsCrossTargetingBuild)' != 'true'">
+    <Error Condition="'$(PluginInternalName)' == ''"
+           Text="PluginInternalName is required for URA plugin manifests." />
+    <Error Condition="'$(PluginDisplayName)' == ''"
+           Text="PluginDisplayName is required for URA plugin manifests." />
+    <Error Condition="'$(PluginAuthor)' == ''"
+           Text="PluginAuthor is required for URA plugin manifests." />
+    <Error Condition="'$(Version)' == ''"
+           Text="Version is required for URA plugin manifests." />
+    <Error Condition="'$(PluginInternalName)' != '$(AssemblyName)'"
+           Text="PluginInternalName must equal AssemblyName so the ZIP and root DLL names match: PluginInternalName=$(PluginInternalName), AssemblyName=$(AssemblyName)." />
+    <WriteUraPluginManifestTask
+        OutputPath="$(_UraPluginManifestPath)"
+        Author="$(PluginAuthor)"
+        InternalName="$(PluginInternalName)"
+        DisplayName="$(PluginDisplayName)"
+        Description="$(PluginDescription)"
+        Category="$(PluginCategory)"
+        Changelog="$(PluginChangelog)"
+        RepositoryUrl="$(PluginRepositoryUrl)"
+        Homepage="$(PluginHomepage)"
+        Dependencies="$(PluginDependencies)"
+        Targets="$(PluginTargets)"
+        Version="$(Version)" />
+  </Target>
+
+  <Target Name="PackageUraPlugin"
+          AfterTargets="GenerateUraPluginManifest"
+          DependsOnTargets="_ResolveUraPluginBuildAssets;GenerateUraPluginManifest"
+          Condition="'$(IsUraPlugin)' == 'true' and '$(PackageUraPluginOnBuild)' == 'true' and '$(IsCrossTargetingBuild)' != 'true'">
+    <PropertyGroup>
+      <_UraPluginPackageStagingDir>$(IntermediateOutputPath)ura-plugin-package\</_UraPluginPackageStagingDir>
+    </PropertyGroup>
+    <Error Condition="'$(GenerateUraPluginManifestOnBuild)' != 'true'"
+           Text="PackageUraPluginOnBuild requires GenerateUraPluginManifestOnBuild=true so a fresh manifest is generated for this build." />
+    <Error Condition="!Exists('$(_UraPluginManifestPath)')"
+           Text="URA plugin manifest was not generated: $(_UraPluginManifestPath)" />
+    <Error Condition="!Exists('$(TargetPath)')"
+           Text="URA plugin main assembly was not built: $(TargetPath)" />
+    <ItemGroup>
+      <_UraPluginOwnSatellite Include="$(TargetDir)**\$(AssemblyName).resources.dll" />
+    </ItemGroup>
+    <ResolveUraPluginPackageAssetsTask
+        ProjectAssetsFile="$(ProjectAssetsFile)"
+        TargetFramework="$(TargetFramework)"
+        RuntimeIdentifier="$(RuntimeIdentifier)"
+        MainAssemblyName="$(AssemblyName)"
+        NuGetProjectModelAssemblyPath="$(_UraNuGetProjectModelAssemblyPath)"
+        Candidates="@(ReferenceCopyLocalPaths)"
+        ReservedPackagePaths="@(_UraPluginOwnSatellite)">
+      <Output TaskParameter="PackageAssets" ItemName="_UraPluginPackageAsset" />
+    </ResolveUraPluginPackageAssetsTask>
+    <MakeDir Directories="$([System.IO.Path]::GetDirectoryName('$(_UraPluginPackagePath)'))" />
+    <RemoveDir Directories="$(_UraPluginPackageStagingDir)"
+               Condition="Exists('$(_UraPluginPackageStagingDir)')" />
+    <MakeDir Directories="$(_UraPluginPackageStagingDir)" />
+    <Copy SourceFiles="$(_UraPluginManifestPath)"
+          DestinationFolder="$(_UraPluginPackageStagingDir)" />
+    <Copy SourceFiles="$(TargetPath)"
+          DestinationFiles="$(_UraPluginPackageStagingDir)$(AssemblyName).dll" />
+    <Copy SourceFiles="@(_UraPluginPackageAsset)"
+          DestinationFiles="@(_UraPluginPackageAsset->'$(_UraPluginPackageStagingDir)%(PackagePath)')" />
+    <Copy SourceFiles="@(_UraPluginOwnSatellite)"
+          DestinationFiles="@(_UraPluginOwnSatellite->'$(_UraPluginPackageStagingDir)%(RecursiveDir)%(Filename)%(Extension)')" />
+    <Delete Files="$(_UraPluginPackagePath)" Condition="Exists('$(_UraPluginPackagePath)')" />
+    <ZipDirectory SourceDirectory="$(_UraPluginPackageStagingDir)"
+                  DestinationFile="$(_UraPluginPackagePath)"
+                  Overwrite="true" />
+    <RemoveDir Directories="$(_UraPluginPackageStagingDir)" />
+    <Message Importance="high" Text="[URA.Plugin] packaged -> $(_UraPluginPackagePath)" />
+  </Target>
+
+  <Target Name="DeployUraPluginToLocalAppData"
+          AfterTargets="PackageUraPlugin"
+          DependsOnTargets="_ResolveUraPluginBuildAssets"
+          Condition="'$(IsUraPlugin)' == 'true' and '$(DeployUraPluginToLocalAppDataOnBuild)' == 'true' and '$(PackageUraPluginOnBuild)' == 'true' and '$(IsCrossTargetingBuild)' != 'true' and '$(LOCALAPPDATA)' != ''">
+    <PropertyGroup>
+      <_UraLocalPluginsDir>$(LOCALAPPDATA)\UmamusumeResponseAnalyzer\Plugins\</_UraLocalPluginsDir>
+    </PropertyGroup>
+    <Copy SourceFiles="$(_UraPluginPackagePath)"
+          DestinationFolder="$(_UraLocalPluginsDir)"
+          OverwriteReadOnlyFiles="true"
+          Condition="Exists('$(_UraLocalPluginsDir)') and Exists('$(_UraPluginPackagePath)')" />
+    <Message Importance="high"
+             Text="[URA.Plugin] deployed -> $(_UraLocalPluginsDir)"
+             Condition="Exists('$(_UraLocalPluginsDir)') and Exists('$(_UraPluginPackagePath)')" />
+  </Target>
+</Project>
