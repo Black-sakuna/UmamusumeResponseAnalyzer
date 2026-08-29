@@ -1,0 +1,12 @@
+<Project>
+  <PropertyGroup>
+    <DeployUraPluginToLocalAppDataOnBuild Condition="'$(DeployUraPluginToLocalAppDataOnBuild)' == ''">true</DeployUraPluginToLocalAppDataOnBuild>
+    <DefaultItemExcludes>$(DefaultItemExcludes);$(MSBuildProjectDirectory)\deps\**;$(MSBuildProjectDirectory)\tests\**</DefaultItemExcludes>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="bin\**;obj\**;bin-test\**;obj-test\**" />
+    <EmbeddedResource Remove="bin\**;obj\**;bin-test\**;obj-test\**" />
+    <None Remove="bin\**;obj\**;bin-test\**;obj-test\**" />
+  </ItemGroup>
+</Project>
