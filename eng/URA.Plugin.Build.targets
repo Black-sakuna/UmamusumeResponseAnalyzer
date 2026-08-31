@@ -14,7 +14,10 @@
   </ItemGroup>
 
   <ItemGroup Condition="'$(IsUraPlugin)' == 'true'">
-    <ProjectReference Include="$(UraHostProjectPath)" ReferenceOutputAssembly="true" Private="false" />
+    <ProjectReference Include="$(UraHostProjectPath)"
+                      GlobalPropertiesToRemove="UraHostProjectPath"
+                      ReferenceOutputAssembly="true"
+                      Private="false" />
   </ItemGroup>
 
   <Target Name="ValidateUraPluginHostProject"

@@ -1,5 +1,7 @@
 <Project>
   <PropertyGroup>
+    <DisableTransitiveProjectReferences>true</DisableTransitiveProjectReferences>
+    <ShouldUnsetParentConfigurationAndPlatform>false</ShouldUnsetParentConfigurationAndPlatform>
     <DeployUraPluginToLocalAppDataOnBuild Condition="'$(DeployUraPluginToLocalAppDataOnBuild)' == ''">true</DeployUraPluginToLocalAppDataOnBuild>
     <DefaultItemExcludes>$(DefaultItemExcludes);$(MSBuildProjectDirectory)\deps\**;$(MSBuildProjectDirectory)\tests\**</DefaultItemExcludes>
   </PropertyGroup>
