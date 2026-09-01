@@ -1,7 +1,19 @@
 # URA plugin build contract
 
-Plugin repositories pin this Host repository as `deps/UmamusumeResponseAnalyzer` and import `URA.Plugin.Build.props` and `URA.Plugin.Build.targets` from that submodule. The targets reference the pinned Host source project, generate `manifest.json`, build the plugin ZIP, select managed NuGet runtime assets, and optionally deploy the ZIP locally.
+The `UmamusumeResponseAnalyzer` NuGet package contains the Host reference assembly and imports `URA.Plugin.Build.props` and `URA.Plugin.Build.targets` through `buildTransitive`. The targets generate `manifest.json`, build the plugin ZIP, select managed NuGet runtime assets, and optionally deploy the ZIP locally.
 
-Plugin project references use direct edges and inherit the parent configuration and platform. The Host path selector is excluded from the Host project's MSBuild identity, so one Host project instance is built per configuration even when plugins reference other plugins.
+Plugin projects reference package version `2026.9.1`. The package is compile-time only: its reference assembly and dependency branch are excluded from plugin ZIP files. Direct plugin package references continue to contribute runtime assets.
 
-Clone plugin repositories with `--recurse-submodules`. A missing Host submodule is a build error; there is no package or sibling-directory fallback.
+Plugin-to-plugin source dependencies remain pinned submodules. A Host source checkout is not required to build an individual plugin.
+
+Build the compile-time package without publishing it:
+
+```powershell
+dotnet pack ..\UmamusumeResponseAnalyzer\UmamusumeResponseAnalyzer.csproj -c Release -o ..\artifacts\nuget
+```
+
+`Publish-NuGetPackage.ps1` requires a Sleet config outside this repository and a source name from that config. It refuses to push when `UmamusumeResponseAnalyzer` `2026.9.1` already exists:
+
+```powershell
+.\Publish-NuGetPackage.ps1 -SleetConfig C:\path\outside\repo\sleet.json -SleetSource ura
+```

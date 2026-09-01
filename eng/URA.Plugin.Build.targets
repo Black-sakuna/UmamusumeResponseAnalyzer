@@ -1,8 +1,7 @@
 <Project>
-  <!-- URA plugin build hooks. Plugin repositories import this file from their pinned Host submodule. -->
+  <!-- URA plugin build hooks distributed by the UmamusumeResponseAnalyzer package. -->
 
   <PropertyGroup>
-    <UraHostProjectPath Condition="'$(UraHostProjectPath)' == ''">$(MSBuildThisFileDirectory)..\UmamusumeResponseAnalyzer\UmamusumeResponseAnalyzer.csproj</UraHostProjectPath>
     <_UraNuGetProjectModelAssemblyPath>$(MSBuildToolsPath)\NuGet.ProjectModel.dll</_UraNuGetProjectModelAssemblyPath>
     <_UraNuGetProjectModelAssemblyPath Condition="!Exists('$(_UraNuGetProjectModelAssemblyPath)')">$([System.IO.Path]::GetFullPath('$(MSBuildExtensionsPath32)\..\Common7\IDE\CommonExtensions\Microsoft\NuGet\NuGet.ProjectModel.dll'))</_UraNuGetProjectModelAssemblyPath>
   </PropertyGroup>
@@ -13,19 +12,6 @@
     <None Remove="bin\**;obj\**;bin-test\**;obj-test\**" />
   </ItemGroup>
 
-  <ItemGroup Condition="'$(IsUraPlugin)' == 'true'">
-    <ProjectReference Include="$(UraHostProjectPath)"
-                      GlobalPropertiesToRemove="UraHostProjectPath"
-                      ReferenceOutputAssembly="true"
-                      Private="false" />
-  </ItemGroup>
-
-  <Target Name="ValidateUraPluginHostProject"
-          BeforeTargets="PrepareForBuild"
-          Condition="'$(IsUraPlugin)' == 'true'">
-    <Error Condition="!Exists('$(UraHostProjectPath)')"
-           Text="URA Host project was not found at '$(UraHostProjectPath)'. Initialize this repository's Git submodules before building." />
-  </Target>
   <UsingTask TaskName="WriteUraPluginManifestTask"
              TaskFactory="RoslynCodeTaskFactory"
              AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
@@ -225,6 +211,9 @@
             .Where(dependency => string.Equals(
                 Text(Property(dependency, "LibraryRange"), "TypeConstraint"),
                 "Package", StringComparison.Ordinal))
+            .Where(dependency => !string.Equals(
+                Text(dependency, "Name"),
+                "UmamusumeResponseAnalyzer", StringComparison.OrdinalIgnoreCase))
             .Select(dependency => Text(dependency, "Name")));
 
         while (pending.Count > 0)

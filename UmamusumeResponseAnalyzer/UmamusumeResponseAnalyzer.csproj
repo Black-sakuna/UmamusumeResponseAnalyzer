@@ -6,14 +6,31 @@
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
 		<Version>1.14.4.0</Version>
+		<PackageId>UmamusumeResponseAnalyzer</PackageId>
+		<PackageVersion>2026.9.1</PackageVersion>
+		<Description>UmamusumeResponseAnalyzer plugin compile-time API.</Description>
+		<Authors>EtherealAO</Authors>
+		<IncludeBuildOutput>false</IncludeBuildOutput>
 		<ApplicationIcon>icon.ico</ApplicationIcon>
 		<AllowUnsafeBlocks>True</AllowUnsafeBlocks>
 		<Platforms>AnyCPU;x64</Platforms>
 		<TrimMode>partial</TrimMode>
 		<CETCompat>false</CETCompat>
-		<NoWarn>1701;1702;CS8509;CS8618;CA2211</NoWarn>
+		<NoWarn>1701;1702;CS8509;CS8618;CA2211;NU5131</NoWarn>
 		<DefineConstants>$(DefineConstants);TRACE</DefineConstants>
 	</PropertyGroup>
+
+	<ItemGroup>
+		<None Include="$(IntermediateOutputPath)ref\$(AssemblyName).dll"
+		      Pack="true"
+		      PackagePath="ref\$(TargetFramework)\" />
+		<None Include="..\eng\URA.Plugin.Build.props"
+		      Pack="true"
+		      PackagePath="buildTransitive\UmamusumeResponseAnalyzer.props" />
+		<None Include="..\eng\URA.Plugin.Build.targets"
+		      Pack="true"
+		      PackagePath="buildTransitive\UmamusumeResponseAnalyzer.targets" />
+	</ItemGroup>
 
 	<ItemGroup>
 		<InternalsVisibleTo Include="UmamusumeResponseAnalyzer.Tests" />
