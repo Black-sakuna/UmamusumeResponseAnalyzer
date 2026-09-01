@@ -11,9 +11,3 @@ Build the compile-time package without publishing it:
 ```powershell
 dotnet pack ..\UmamusumeResponseAnalyzer\UmamusumeResponseAnalyzer.csproj -c Release -o ..\artifacts\nuget
 ```
-
-`Publish-NuGetPackage.ps1` requires a Sleet config outside this repository and a source name from that config. It refuses to push when `UmamusumeResponseAnalyzer` `2026.9.1` already exists:
-
-```powershell
-.\Publish-NuGetPackage.ps1 -SleetConfig C:\path\outside\repo\sleet.json -SleetSource ura
-```
