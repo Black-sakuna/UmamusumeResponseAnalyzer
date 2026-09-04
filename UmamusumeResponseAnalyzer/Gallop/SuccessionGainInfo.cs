@@ -20,7 +20,7 @@ public class SuccessionGainInfo
     [Key("max_power")] public int max_power; // 0x34
     [Key("max_wiz")] public int max_wiz; // 0x38
     [Key("max_guts")] public int max_guts; // 0x3C
-    [Key("skill_tips_array")] public SkillTips[] skill_tips_array; // 0x40
+    [Key("skill_tips_array")] public ExtraSkillTips[] skill_tips_array; // 0x40
     [Key("proper_distance_short")] public int proper_distance_short; // 0x48
     [Key("proper_distance_mile")] public int proper_distance_mile; // 0x4C
     [Key("proper_distance_middle")] public int proper_distance_middle; // 0x50

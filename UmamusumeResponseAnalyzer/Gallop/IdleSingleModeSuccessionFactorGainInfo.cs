@@ -9,5 +9,5 @@ namespace Gallop;
 public class IdleSingleModeSuccessionFactorGainInfo
 {
     [Key("year")] public int year; // 0x10
-    [Key("gain_factor_info_array")] public FactorInfo[] gain_factor_info_array; // 0x18
+    [Key("gain_factor_info_array")] public ExtraFactorInfo[] gain_factor_info_array; // 0x18
 }

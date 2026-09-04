@@ -16,4 +16,8 @@ public class HomeCharacterDressInfo
     [Key("position2_cloth_id")] public int position2_cloth_id; // 0x24
     [Key("position3_cloth_id")] public int position3_cloth_id; // 0x28
     [Key("position4_cloth_id")] public int position4_cloth_id; // 0x2C
+    [Key("position1_cloth_color_id")] public int position1_cloth_color_id; // 0x30
+    [Key("position2_cloth_color_id")] public int position2_cloth_color_id; // 0x34
+    [Key("position3_cloth_color_id")] public int position3_cloth_color_id; // 0x38
+    [Key("position4_cloth_color_id")] public int position4_cloth_color_id; // 0x3C
 }

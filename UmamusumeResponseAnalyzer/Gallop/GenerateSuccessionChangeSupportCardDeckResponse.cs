@@ -15,5 +15,6 @@ public class GenerateSuccessionChangeSupportCardDeckResponse : ResponseCommon
     public class CommonResponse
     {
         [Key("support_card_deck_array")] public UserSupportCardDeck[] support_card_deck_array; // 0x10
+        [Key("training_roadmap_support_card_deck")] public UserSupportCardDeck training_roadmap_support_card_deck; // 0x18
     }
 }

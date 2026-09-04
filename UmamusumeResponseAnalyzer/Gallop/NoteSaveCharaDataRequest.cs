@@ -11,4 +11,6 @@ public class NoteSaveCharaDataRequest : RequestBase<NoteSaveCharaDataResponse>
     [Key("chara_id")] public int chara_id; // 0x88
     [Key("dress_id")] public int dress_id; // 0x8C
     [Key("mini_dress_id")] public int mini_dress_id; // 0x90
+    [Key("dress_color_id")] public int dress_color_id; // 0x94
+    [Key("mini_dress_color_id")] public int mini_dress_color_id; // 0x98
 }

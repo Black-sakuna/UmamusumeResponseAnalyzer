@@ -17,9 +17,11 @@ public class NoteGetNewCharaDataResponse : ResponseCommon
         [Key("voice_data_array")] public NoteDataForDisplay[] voice_data_array; // 0x10
         [Key("dress_id")] public int dress_id; // 0x18
         [Key("mini_dress_id")] public int mini_dress_id; // 0x1C
-        [Key("chara_walking_act_array")] public NoteDataForDisplay[] chara_walking_act_array; // 0x20
-        [Key("valentine_special_data_array")] public NoteDataForDisplay[] valentine_special_data_array; // 0x28
-        [Key("update_user_chara_array")] public UserChara[] update_user_chara_array; // 0x30
-        [Key("new_chara_profile_array")] public CharaProfileData[] new_chara_profile_array; // 0x38
+        [Key("dress_color_id")] public int dress_color_id; // 0x20
+        [Key("mini_dress_color_id")] public int mini_dress_color_id; // 0x24
+        [Key("chara_walking_act_array")] public NoteDataForDisplay[] chara_walking_act_array; // 0x28
+        [Key("valentine_special_data_array")] public NoteDataForDisplay[] valentine_special_data_array; // 0x30
+        [Key("update_user_chara_array")] public UserChara[] update_user_chara_array; // 0x38
+        [Key("new_chara_profile_array")] public CharaProfileData[] new_chara_profile_array; // 0x40
     }
 }

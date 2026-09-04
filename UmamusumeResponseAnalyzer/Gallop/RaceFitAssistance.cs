@@ -11,7 +11,8 @@ public class RaceFitAssistance
     [Key("assistance_id")] public int assistance_id; // 0x10
     [Key("event_type")] public int event_type; // 0x14
     [Key("event_id")] public int event_id; // 0x18
-    [Key("end_time")] public string end_time; // 0x20
-    [Key("schedule")] public string schedule; // 0x28
-    [Key("target_race_array")] public TargetRace[] target_race_array; // 0x30
+    [Key("event_start_time")] public string event_start_time; // 0x20
+    [Key("end_time")] public string end_time; // 0x28
+    [Key("schedule")] public string schedule; // 0x30
+    [Key("target_race_array")] public TargetRace[] target_race_array; // 0x38
 }

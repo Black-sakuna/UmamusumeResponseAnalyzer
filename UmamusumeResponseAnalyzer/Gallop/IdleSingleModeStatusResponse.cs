@@ -15,5 +15,6 @@ public class IdleSingleModeStatusResponse : ResponseCommon
     public class CommonResponse
     {
         [Key("progress_info")] public IdleSingleModeProgressInfo progress_info; // 0x10
+        [Key("training_roadmap_selected_info")] public TrainingRoadmapSelectedInfo training_roadmap_selected_info; // 0x18
     }
 }

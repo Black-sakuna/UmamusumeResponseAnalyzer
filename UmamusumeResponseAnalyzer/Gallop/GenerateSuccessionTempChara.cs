@@ -10,4 +10,5 @@ public class GenerateSuccessionTempChara
 {
     [Key("position")] public int position; // 0x10
     [Key("generate_succession_chara")] public TrainedChara generate_succession_chara; // 0x18
+    [Key("factor_info_array")] public ExtraFactorInfo[] factor_info_array; // 0x20
 }

@@ -11,4 +11,5 @@ public class SingleModeGainSkillsRequestCommon
     [Key("gain_skill_info_array")] public GainSkillInfo[] gain_skill_info_array; // 0x10
     [Key("current_turn")] public int current_turn; // 0x18
     [Key("exec_auto_play_plan_id")] public int exec_auto_play_plan_id; // 0x1C
+    [Key("skill_set_deck_id")] public int skill_set_deck_id; // 0x20
 }

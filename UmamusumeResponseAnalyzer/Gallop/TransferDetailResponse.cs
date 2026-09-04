@@ -16,5 +16,6 @@ public class TransferDetailResponse : ResponseCommon
     {
         [Key("transfer_event_reward_info")] public TransferEventRewardInfo[] transfer_event_reward_info; // 0x10
         [Key("room_match_entry_chara_id_array")] public int[] room_match_entry_chara_id_array; // 0x18
+        [Key("compare_source_array")] public TrainingRoadmapCompareSource[] compare_source_array; // 0x20
     }
 }

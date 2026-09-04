@@ -16,5 +16,6 @@ public class GenerateSuccessionLoadResponse : ResponseCommon
     {
         [Key("trained_chara_array")] public TrainedChara[] trained_chara_array; // 0x10
         [Key("trained_chara_favorite_array")] public TrainedCharaFavorite[] trained_chara_favorite_array; // 0x18
+        [Key("compare_source_array")] public TrainingRoadmapCompareSource[] compare_source_array; // 0x20
     }
 }

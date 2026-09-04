@@ -25,5 +25,6 @@ public class CollectRaidIndexResponse : ResponseCommon
         [Key("mission_flag")] public int mission_flag; // 0x40
         [Key("unique_add_collect_item_flag")] public int unique_add_collect_item_flag; // 0x44
         [Key("all_reward_warning_flag")] public int all_reward_warning_flag; // 0x48
+        [Key("user_chara_dress_info")] public CollectRaidUserCharaDressInfo user_chara_dress_info; // 0x50
     }
 }

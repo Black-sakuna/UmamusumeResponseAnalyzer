@@ -8,4 +8,5 @@ namespace Gallop;
 [MessagePackFormatter(typeof(GallopMessagePackFormatter<FetchRaceFitAssistanceRequest>))]
 public class FetchRaceFitAssistanceRequest : RequestBase<FetchRaceFitAssistanceResponse>
 {
+    [Key("disable_time_recording_flag")] public bool disable_time_recording_flag; // 0x88
 }

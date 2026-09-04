@@ -21,5 +21,6 @@ public class IdleSingleModeStartResponse : ResponseCommon
         [Key("story_event_mission_list")] public UserMission[] story_event_mission_list; // 0x30
         [Key("story_event_chara_bonus_list")] public StoryEventCharaBonus[] story_event_chara_bonus_list; // 0x38
         [Key("add_trained_chara_array")] public TrainedChara[] add_trained_chara_array; // 0x40
+        [Key("training_roadmap_selected_info")] public TrainingRoadmapSelectedInfo training_roadmap_selected_info; // 0x48
     }
 }

@@ -15,5 +15,7 @@ public class IdleSingleModeProgressLogInfo
     [Key("succession_factor_gain_array")] public IdleSingleModeSuccessionFactorGainInfo[] succession_factor_gain_array; // 0x30
     [Key("race_history_array")] public IdleSingleModeRaceHistory[] race_history_array; // 0x38
     [Key("gain_skill_id_array")] public int[] gain_skill_id_array; // 0x40
-    [Key("total_skill_point")] public int total_skill_point; // 0x48
+    [Key("gain_skill_array")] public IdleSingleModeGainSkillLog[] gain_skill_array; // 0x48
+    [Key("total_skill_point")] public int total_skill_point; // 0x50
+    [Key("continue_info")] public IdleSingleModeContinueInfo continue_info; // 0x58
 }

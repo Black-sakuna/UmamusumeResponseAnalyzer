@@ -11,4 +11,5 @@ public class TrainingReportInfo
     [Key("season_id")] public int season_id; // 0x10
     [Key("point")] public int point; // 0x14
     [Key("is_payment")] public int is_payment; // 0x18
+    [Key("is_need_premium_pass_purchase_start_dialog")] public bool is_need_premium_pass_purchase_start_dialog; // 0x1C
 }

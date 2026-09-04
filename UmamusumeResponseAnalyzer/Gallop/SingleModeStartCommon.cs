@@ -25,4 +25,6 @@ public class SingleModeStartCommon
     [Key("auto_play_custom_plan_array")] public SingleModeAutoPlayCustomPlan[] auto_play_custom_plan_array; // 0x80
     [Key("skill_filter_setting_array")] public SingleModeSkillFilterSet[] skill_filter_setting_array; // 0x88
     [Key("is_umaplan")] public bool is_umaplan; // 0x90
+    [Key("effected_trainer_skill_id_array")] public int[] effected_trainer_skill_id_array; // 0x98
+    [Key("training_roadmap_selected_info")] public TrainingRoadmapSelectedInfo training_roadmap_selected_info; // 0xA0
 }

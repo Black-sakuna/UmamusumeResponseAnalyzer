@@ -12,4 +12,5 @@ public class FactorResearchLoadInfo
     [Key("factor_research_event_first_flag")] public bool factor_research_event_first_flag; // 0x14
     [Key("factor_research_report_usable_flag")] public bool factor_research_report_usable_flag; // 0x15
     [Key("factor_research_gauge_info")] public FactorResearchGaugeInfo factor_research_gauge_info; // 0x18
+    [Key("factor_research_task_info")] public FactorResearchTaskInfo factor_research_task_info; // 0x20
 }

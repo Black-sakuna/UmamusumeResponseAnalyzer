@@ -9,5 +9,5 @@ namespace Gallop;
 public class FactorSelectInfo
 {
     [Key("lottery_id")] public int lottery_id; // 0x10
-    [Key("factor_info_array")] public FactorInfo[] factor_info_array; // 0x18
+    [Key("factor_info_array")] public ExtraFactorInfo[] factor_info_array; // 0x18
 }

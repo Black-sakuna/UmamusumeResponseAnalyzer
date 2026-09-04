@@ -156,5 +156,10 @@ public class LoginResponse : ResponseCommon
         [Key("generate_succession_exec_using_trained_chara_id_array")] public int[] generate_succession_exec_using_trained_chara_id_array; // 0x450
         [Key("is_campaign_draw_enable_continuous_daily")] public int is_campaign_draw_enable_continuous_daily; // 0x458
         [Key("idle_single_mode_load_info")] public IdleSingleModeLoadInfo idle_single_mode_load_info; // 0x460
+        [Key("trainer_skill_info")] public TrainerSkillInfo trainer_skill_info; // 0x468
+        [Key("trainer_skill_notify_last_check_time")] public long trainer_skill_notify_last_check_time; // 0x470
+        [Key("new_trainer_skill_last_check_time")] public long new_trainer_skill_last_check_time; // 0x478
+        [Key("has_refund_trainer_pt")] public bool has_refund_trainer_pt; // 0x480
+        [Key("umaplan_cumulative_purchase_bonus_info")] public UmaplanCumulativePurchaseBonusInfo umaplan_cumulative_purchase_bonus_info; // 0x488
     }
 }

@@ -24,4 +24,5 @@ public class SingleModeStartChara
     [Key("rental_deck_id")] public int rental_deck_id; // 0x60
     [Key("request_campaign_id_array")] public int[] request_campaign_id_array; // 0x68
     [Key("running_style")] public int running_style; // 0x70
+    [Key("request_trainer_skill_id_array")] public int[] request_trainer_skill_id_array; // 0x78
 }

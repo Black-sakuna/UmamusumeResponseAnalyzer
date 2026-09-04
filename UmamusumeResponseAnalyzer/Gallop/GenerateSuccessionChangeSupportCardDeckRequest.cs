@@ -9,4 +9,5 @@ namespace Gallop;
 public class GenerateSuccessionChangeSupportCardDeckRequest : RequestBase<GenerateSuccessionChangeSupportCardDeckResponse>
 {
     [Key("support_card_deck_array")] public UserSupportCardDeckForUpdateParty[] support_card_deck_array; // 0x88
+    [Key("training_roadmap_support_card_deck")] public UserSupportCardDeck training_roadmap_support_card_deck; // 0x90
 }

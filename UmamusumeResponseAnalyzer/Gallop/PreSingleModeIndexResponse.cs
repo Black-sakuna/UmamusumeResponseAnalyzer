@@ -20,14 +20,16 @@ public class PreSingleModeIndexResponse : ResponseCommon
         [Key("event_succession_trained_chara_data")] public SingleModeSuccessionTrainedChara event_succession_trained_chara_data; // 0x28
         [Key("training_challenge_pre_single_mode_info")] public TrainingChallengePreSingleModeInfo training_challenge_pre_single_mode_info; // 0x30
         [Key("scenario_record_highest_score_array")] public ScenarioRecordHighestScore[] scenario_record_highest_score_array; // 0x38
-        [Key("rental_support_card_info")] public RentalSupportCardInfo rental_support_card_info; // 0x40
-        [Key("subscription_is_valid")] public bool subscription_is_valid; // 0x48
-        [Key("upgradable_succession_skill_id_array")] public int[] upgradable_succession_skill_id_array; // 0x50
-        [Key("succession_deck")] public SuccessionDeck[] succession_deck; // 0x58
-        [Key("succession_deck_last_used")] public SuccessionDeckLastUsed[] succession_deck_last_used; // 0x60
-        [Key("succession_deck_last_used_exist_card_id_array")] public int[] succession_deck_last_used_exist_card_id_array; // 0x68
-        [Key("friend_trained_chara_favorite_array")] public FriendTrainedCharaFavorite[] friend_trained_chara_favorite_array; // 0x70
-        [Key("is_part_successions")] public bool is_part_successions; // 0x78
-        [Key("default_running_style_array")] public DefaultRunningStyle[] default_running_style_array; // 0x80
+        [Key("training_roadmap_support_card_deck")] public UserSupportCardDeck training_roadmap_support_card_deck; // 0x40
+        [Key("rental_support_card_info")] public RentalSupportCardInfo rental_support_card_info; // 0x48
+        [Key("subscription_is_valid")] public bool subscription_is_valid; // 0x50
+        [Key("upgradable_succession_skill_id_array")] public int[] upgradable_succession_skill_id_array; // 0x58
+        [Key("succession_deck")] public SuccessionDeck[] succession_deck; // 0x60
+        [Key("succession_deck_last_used")] public SuccessionDeckLastUsed[] succession_deck_last_used; // 0x68
+        [Key("succession_deck_last_used_exist_card_id_array")] public int[] succession_deck_last_used_exist_card_id_array; // 0x70
+        [Key("friend_trained_chara_favorite_array")] public FriendTrainedCharaFavorite[] friend_trained_chara_favorite_array; // 0x78
+        [Key("training_roadmap_selected_info")] public TrainingRoadmapSelectedInfo training_roadmap_selected_info; // 0x80
+        [Key("is_part_successions")] public bool is_part_successions; // 0x88
+        [Key("default_running_style_array")] public DefaultRunningStyle[] default_running_style_array; // 0x90
     }
 }

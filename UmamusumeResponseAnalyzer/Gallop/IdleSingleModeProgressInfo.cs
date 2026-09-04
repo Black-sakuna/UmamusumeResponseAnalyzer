@@ -12,4 +12,7 @@ public class IdleSingleModeProgressInfo
     [Key("start_time")] public string start_time; // 0x18
     [Key("end_time")] public string end_time; // 0x20
     [Key("dress_id")] public int dress_id; // 0x28
+    [Key("story_event_mission_list")] public UserMission[] story_event_mission_list; // 0x30
+    [Key("story_event_chara_bonus_list")] public StoryEventCharaBonus[] story_event_chara_bonus_list; // 0x38
+    [Key("effected_trainer_skill_id_array")] public int[] effected_trainer_skill_id_array; // 0x40
 }

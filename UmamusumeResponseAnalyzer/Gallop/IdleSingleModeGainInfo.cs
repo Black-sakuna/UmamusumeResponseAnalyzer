@@ -30,4 +30,5 @@ public class IdleSingleModeGainInfo
     [Key("proper_ground_dirt")] public int proper_ground_dirt; // 0x70
     [Key("skill_point")] public int skill_point; // 0x74
     [Key("skill_tips_array")] public SkillTips[] skill_tips_array; // 0x78
+    [Key("skill_tips_log_array")] public IdleSingleModeSkillTipsLog[] skill_tips_log_array; // 0x80
 }

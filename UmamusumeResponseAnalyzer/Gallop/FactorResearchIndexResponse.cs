@@ -16,11 +16,16 @@ public class FactorResearchIndexResponse : ResponseCommon
     {
         [Key("factor_research_event_id")] public int factor_research_event_id; // 0x10
         [Key("factor_update_item_array")] public ResponseItem factor_update_item_array; // 0x18
-        [Key("box_id")] public int box_id; // 0x20
-        [Key("box_item_num")] public int box_item_num; // 0x24
-        [Key("box_info_array")] public FactorResearchBoxRewardInfo[] box_info_array; // 0x28
-        [Key("factor_research_gauge_info")] public FactorResearchGaugeInfo factor_research_gauge_info; // 0x30
-        [Key("factor_research_reward_info")] public RewardSummaryInfo factor_research_reward_info; // 0x38
-        [Key("factor_research_display_reward")] public FactorResearchDisplayReward factor_research_display_reward; // 0x40
+        [Key("all_factor_update_item")] public ResponseItem all_factor_update_item; // 0x20
+        [Key("white_factor_add_item")] public ResponseItem white_factor_add_item; // 0x28
+        [Key("box_id")] public int box_id; // 0x30
+        [Key("box_item_num")] public int box_item_num; // 0x34
+        [Key("box_info_array")] public FactorResearchBoxRewardInfo[] box_info_array; // 0x38
+        [Key("factor_research_gauge_info")] public FactorResearchGaugeInfo factor_research_gauge_info; // 0x40
+        [Key("factor_research_reward_info")] public RewardSummaryInfo factor_research_reward_info; // 0x48
+        [Key("factor_research_display_reward")] public FactorResearchDisplayReward factor_research_display_reward; // 0x50
+        [Key("special_event_type")] public int special_event_type; // 0x58
+        [Key("factor_research_task_info")] public FactorResearchTaskInfo factor_research_task_info; // 0x60
+        [Key("factor_research_all_completed_reward_flag")] public int factor_research_all_completed_reward_flag; // 0x68
     }
 }

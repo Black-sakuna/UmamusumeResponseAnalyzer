@@ -22,4 +22,6 @@ public class GenerateSuccessionStartChara
     [Key("priority_factor_group_id_array")] public int[] priority_factor_group_id_array; // 0x48
     [Key("race_array")] public SingleModeReservedRace[] race_array; // 0x50
     [Key("select_route_race_program_id")] public int select_route_race_program_id; // 0x58
+    [Key("request_trainer_skill_id_array")] public int[] request_trainer_skill_id_array; // 0x60
+    [Key("continue_setting")] public GenerateSuccessionContinueSetting continue_setting; // 0x68
 }

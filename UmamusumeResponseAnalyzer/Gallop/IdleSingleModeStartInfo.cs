@@ -12,4 +12,5 @@ public class IdleSingleModeStartInfo
     [Key("training_policy_param_rate_set_id")] public int training_policy_param_rate_set_id; // 0x14
     [Key("priority_skill_array")] public IdleSingleModePrioritySkill[] priority_skill_array; // 0x18
     [Key("race_array")] public SingleModeReservedRace[] race_array; // 0x20
+    [Key("continue_setting")] public IdleSingleModeContinueSetting continue_setting; // 0x28
 }

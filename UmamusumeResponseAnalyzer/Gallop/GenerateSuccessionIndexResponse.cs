@@ -24,8 +24,11 @@ public class GenerateSuccessionIndexResponse : ResponseCommon
         [Key("preset_array")] public GenerateSuccessionPreset[] preset_array; // 0x48
         [Key("reserved_race_array")] public SingleModeReservedRaceDeck[] reserved_race_array; // 0x50
         [Key("support_card_deck_array")] public UserSupportCardDeck[] support_card_deck_array; // 0x58
-        [Key("last_start_chara")] public GenerateSuccessionStartChara last_start_chara; // 0x60
-        [Key("exec_status")] public int exec_status; // 0x68
-        [Key("exec_info")] public GenerateSuccessionExecInfo exec_info; // 0x70
+        [Key("training_roadmap_support_card_deck")] public UserSupportCardDeck training_roadmap_support_card_deck; // 0x60
+        [Key("last_start_chara")] public GenerateSuccessionStartChara last_start_chara; // 0x68
+        [Key("exec_status")] public int exec_status; // 0x70
+        [Key("exec_info")] public GenerateSuccessionExecInfo exec_info; // 0x78
+        [Key("continue_setting")] public GenerateSuccessionContinueSetting continue_setting; // 0x80
+        [Key("training_roadmap_selected_info")] public TrainingRoadmapSelectedInfo training_roadmap_selected_info; // 0x88
     }
 }

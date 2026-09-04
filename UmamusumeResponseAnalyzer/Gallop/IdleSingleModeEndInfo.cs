@@ -31,4 +31,6 @@ public class IdleSingleModeEndInfo
     [Key("skill_filter_setting_array")] public SingleModeSkillFilterSet[] skill_filter_setting_array; // 0xB0
     [Key("is_umaplan")] public bool is_umaplan; // 0xB8
     [Key("reward_summary_info")] public RewardSummaryInfo reward_summary_info; // 0xC0
+    [Key("user_item_array")] public UserItem[] user_item_array; // 0xC8
+    [Key("effected_trainer_skill_id_array")] public int[] effected_trainer_skill_id_array; // 0xD0
 }

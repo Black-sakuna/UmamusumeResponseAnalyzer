@@ -29,4 +29,5 @@ public class UserTrainedCharaAtFriend
     [Key("factor_info_array")] public FactorInfo[] factor_info_array; // 0x60
     [Key("factor_extend_array")] public FactorExtend[] factor_extend_array; // 0x68
     [Key("skill_count")] public int skill_count; // 0x70
+    [Key("race_result_list")] public TrainedCharaRaceResult[] race_result_list; // 0x78
 }

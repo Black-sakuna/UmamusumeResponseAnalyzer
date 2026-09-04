@@ -10,4 +10,5 @@ public class CharaEffectLog
 {
     [Key("chara_effect_id")] public int chara_effect_id; // 0x10
     [Key("is_active")] public bool is_active; // 0x14
+    [Key("gain_index")] public int gain_index; // 0x18
 }

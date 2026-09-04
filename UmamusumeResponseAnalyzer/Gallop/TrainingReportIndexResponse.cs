@@ -18,5 +18,6 @@ public class TrainingReportIndexResponse : ResponseCommon
         [Key("reward_info_array")] public DisplayRewardInfo[] reward_info_array; // 0x18
         [Key("reward_summary_info")] public RewardSummaryInfo reward_summary_info; // 0x20
         [Key("season_change_flag")] public bool season_change_flag; // 0x28
+        [Key("premium_pass_reward_confirm_dialog_flag")] public bool premium_pass_reward_confirm_dialog_flag; // 0x29
     }
 }

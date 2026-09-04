@@ -16,5 +16,6 @@ public class SupportCardDeckChangePartyResponse : ResponseCommon
     {
         [Key("support_card_deck_array")] public UserSupportCardDeck[] support_card_deck_array; // 0x10
         [Key("rental_deck_info")] public RentalDeckInfo rental_deck_info; // 0x18
+        [Key("training_roadmap_support_card_deck")] public UserSupportCardDeck training_roadmap_support_card_deck; // 0x20
     }
 }

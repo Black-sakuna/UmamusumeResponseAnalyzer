@@ -11,4 +11,5 @@ public class FactorResearchFactorUpdatePaidItemRequest : RequestBase<FactorResea
     [Key("trained_chara_id")] public int trained_chara_id; // 0x88
     [Key("before_factor_id")] public int before_factor_id; // 0x8C
     [Key("after_factor_id")] public int after_factor_id; // 0x90
+    [Key("item_category")] public int item_category; // 0x94
 }

@@ -147,5 +147,12 @@ public class CommonDefine
     [Key("practice_race_recommend_condition_open_date")] public string practice_race_recommend_condition_open_date; // 0x308
     [Key("idle_single_mode_open_date")] public string idle_single_mode_open_date; // 0x310
     [Key("gacha_pickup_ssr_direction_open_date")] public string gacha_pickup_ssr_direction_open_date; // 0x318
-    [Key("save_announce_open_date")] public string save_announce_open_date; // 0x320
+    [Key("friend_search_open_date")] public string friend_search_open_date; // 0x320
+    [Key("save_announce_open_date")] public string save_announce_open_date; // 0x328
+    [Key("story_event_roulette_update_open_date")] public string story_event_roulette_update_open_date; // 0x330
+    [Key("trainer_skill_open_date")] public string trainer_skill_open_date; // 0x338
+    [Key("umaplan_update_open_date")] public string umaplan_update_open_date; // 0x340
+    [Key("half_anniv_dress_5_5_open_date")] public string half_anniv_dress_5_5_open_date; // 0x348
+    [Key("skill_filter_update_open_date")] public string skill_filter_update_open_date; // 0x350
+    [Key("training_roadmap_open_date")] public string training_roadmap_open_date; // 0x358
 }

@@ -19,5 +19,6 @@ public class GenerateSuccessionExecResponse : ResponseCommon
         [Key("generate_succession_chara_manage_data")] public GenerateSuccessionCharaManageData generate_succession_chara_manage_data; // 0x20
         [Key("use_item_info_array")] public UserItem[] use_item_info_array; // 0x28
         [Key("candidate_priority_factor_info_array")] public GenerateSuccessionPriorityFactorInfo[] candidate_priority_factor_info_array; // 0x30
+        [Key("use_continue_item_num_disp")] public int use_continue_item_num_disp; // 0x38
     }
 }

@@ -9,4 +9,5 @@ namespace Gallop;
 public class SerialCodeRegisterRequest : RequestBase<SerialCodeRegisterResponse>
 {
     [Key("serial_code")] public string serial_code; // 0x88
+    [Key("confirmations")] public string[] confirmations; // 0x90
 }
