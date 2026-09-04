@@ -430,6 +430,7 @@ public sealed class WorkspaceViewTests
             taskbar.Refresh(snapshot, alpha);
 
             using var window = WindowWith(viewport, taskbar.BottomEdgeTrigger, taskbar);
+            window.MouseEvent += (_, mouse) => taskbar.HandleMousePosition(mouse);
             var run = await StartAsync(terminal, window);
             try
             {
@@ -453,6 +454,31 @@ public sealed class WorkspaceViewTests
                 await terminal.RedrawAsync();
                 var afterHover = await terminal.CaptureAttributeAsync(betaPoint);
                 Assert.NotEqual(beforeHover, afterHover);
+
+                var alphaHoverPoint = FindText(
+                    await terminal.CaptureScreenAsync(),
+                    "Alpha");
+                await terminal.MoveMouseAsync(alphaHoverPoint);
+                await terminal.RedrawAsync();
+                Assert.Contains("Gamma", await terminal.CaptureScreenAsync());
+
+                await terminal.MoveMouseAsync(betaPoint);
+                var bottomBlank = betaPoint with { Y = 11 };
+                await terminal.MoveMouseAsync(bottomBlank);
+                await terminal.WaitForAsync(async () =>
+                    !(await terminal.CaptureScreenAsync()).Contains(
+                        "Gamma",
+                        StringComparison.Ordinal));
+
+                await terminal.MoveMouseAsync(bottomBlank);
+                await terminal.RedrawAsync();
+                Assert.DoesNotContain("Gamma", await terminal.CaptureScreenAsync());
+
+                await terminal.MoveMouseAsync(Point.Empty);
+                await terminal.MoveMouseAsync(bottomBlank);
+                await terminal.WaitForScreenAsync("Gamma");
+                screen = await terminal.CaptureScreenAsync();
+                betaPoint = FindText(screen, "Beta");
 
                 await terminal.ClickAsync(betaPoint);
                 await terminal.WaitForAsync(() => ReferenceEquals(switched, beta));
@@ -482,6 +508,7 @@ public sealed class WorkspaceViewTests
                 Assert.Same(beta, switched);
 
                 await terminal.ResizeAsync(16, 8);
+                await terminal.MoveMouseAsync(Point.Empty);
                 await terminal.MoveMouseAsync(new Point(0, 7));
                 await terminal.RedrawAsync();
                 screen = await terminal.CaptureScreenAsync();

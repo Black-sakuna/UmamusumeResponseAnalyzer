@@ -45,6 +45,7 @@ internal sealed class WorkspaceTaskbarView : View
     Workspace? laidOutHoveredWorkspace;
     int laidOutViewportWidth;
     bool titleLayoutValid;
+    bool bottomEdgeActivationSuppressed;
     Shortcut? pressedItem;
     int pressScreenX;
     int insertionIndex;
@@ -133,11 +134,17 @@ internal sealed class WorkspaceTaskbarView : View
 
     internal void HandleMousePosition(Mouse mouse)
     {
-        if (mouse.Flags.HasFlag(MouseFlags.PositionReport) &&
-            bottomEdgeTrigger.FrameToScreen().Contains(mouse.ScreenPosition))
+        if (!mouse.Flags.HasFlag(MouseFlags.PositionReport))
+            return;
+
+        if (!bottomEdgeTrigger.FrameToScreen().Contains(mouse.ScreenPosition))
         {
-            Show();
+            bottomEdgeActivationSuppressed = false;
+            return;
         }
+
+        if (!bottomEdgeActivationSuppressed)
+            Show();
     }
 
     protected override void Dispose(bool disposing)
@@ -165,10 +172,19 @@ internal sealed class WorkspaceTaskbarView : View
     }
 
     void BottomEdgeTriggerMouseEnter(object? sender, CancelEventArgs e)
-        => Show();
+    {
+        if (!bottomEdgeActivationSuppressed)
+            Show();
+    }
 
     void BottomEdgeTriggerMouseLeave(object? sender, EventArgs e)
     {
+        if (App?.Mouse.LastMousePosition is { } currentPosition &&
+            FrameToScreen().Contains(currentPosition))
+        {
+            bottomEdgeActivationSuppressed = false;
+        }
+
         if (pressedItem is not null ||
             popup.Visible &&
             App?.Mouse.LastMousePosition is { } position &&
@@ -416,20 +432,22 @@ internal sealed class WorkspaceTaskbarView : View
         if (index < 0 || !ReferenceEquals(hoveredWorkspace, items[index].Workspace))
             return;
 
-        if (App?.Mouse.LastMousePosition is { } position)
+        var position = App?.Mouse.LastMousePosition;
+        if (position is { } point)
         {
             for (var candidate = 0; candidate < items.Count; candidate++)
             {
                 if (candidate != index &&
-                    items[candidate].Item.FrameToScreen().Contains(position))
+                    items[candidate].Item.FrameToScreen().Contains(point))
                 {
                     return;
                 }
             }
         }
 
-        hoveredWorkspace = null;
-        ApplyTitleLayout();
+        bottomEdgeActivationSuppressed = position is { } leavePosition &&
+            bottomEdgeTrigger.FrameToScreen().Contains(leavePosition);
+        Hide();
     }
 
     void ItemMouseEvent(object? sender, Mouse mouse)
