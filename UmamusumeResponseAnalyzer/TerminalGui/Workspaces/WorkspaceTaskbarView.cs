@@ -601,13 +601,5 @@ internal sealed class WorkspaceTaskbarView : View
     }
 
     int IndexOf(Shortcut item)
-    {
-        for (var index = 0; index < items.Count; index++)
-        {
-            if (ReferenceEquals(items[index].Item, item))
-                return index;
-        }
-
-        return -1;
-    }
+        => items.FindIndex(entry => ReferenceEquals(entry.Item, item));
 }

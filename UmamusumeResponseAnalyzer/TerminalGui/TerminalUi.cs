@@ -60,10 +60,10 @@ public static class TerminalUi
         CancellationToken cancellationToken = default)
         => ModalDialogs.Acknowledge(title, cancellationToken);
 
-    internal static async Task RunProgressAsync(
+    internal static Task RunProgressAsync(
         Func<IProgress<DownloadProgress>, CancellationToken, Task> action,
         CancellationToken cancellationToken = default)
-        => await ModalDialogs.RunProgressAsync(action, cancellationToken);
+        => ModalDialogs.RunProgressAsync(action, cancellationToken);
 
     internal static void LogException(
         string source,

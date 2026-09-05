@@ -67,7 +67,7 @@ internal sealed record UiNotification(
     DateTimeOffset ExpiresAt)
 {
     internal static TimeSpan DefaultTtl(UiSeverity severity)
-        => severity >= UiSeverity.Warning ? TimeSpan.FromSeconds(10) : TimeSpan.FromSeconds(5);
+        => TimeSpan.FromSeconds(severity >= UiSeverity.Warning ? 10 : 5);
 
     internal static DateTimeOffset ExpiresAtFromNow(UiSeverity severity, TimeSpan? ttl = null)
         => DateTimeOffset.Now.Add(ttl ?? DefaultTtl(severity));
