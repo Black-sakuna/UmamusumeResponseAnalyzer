@@ -1,4 +1,6 @@
 using System.Net;
+using Newtonsoft.Json;
+using UmamusumeResponseAnalyzer.Plugin;
 using System.Net.Sockets;
 using System.Runtime.ExceptionServices;
 using System.Text;
@@ -185,7 +187,9 @@ public sealed class LifecycleTeardownTests
         Config.Initialize();
         var callbackEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         using var releaseHandler = new ManualResetEventSlim();
-        var originalConfirmInstall = WebInstallApi.ConfirmInstall;
+        var originalConfirmInstall = PluginRepository.ConfirmInstall;
+        var originalHttpClient = ResourceUpdater.HttpClient;
+        ResourceUpdater.HttpClient = new HttpClient(new DescriptorHandler());
         Task? request = null;
         Task? shutdown = null;
         Task? inlineShutdown = null;
@@ -195,7 +199,7 @@ public sealed class LifecycleTeardownTests
 
         try
         {
-            WebInstallApi.ConfirmInstall = (_, _, _, cancellationToken) =>
+            PluginRepository.ConfirmInstall = (_, cancellationToken) =>
             {
                 using var registration = cancellationToken.Register(() =>
                 {
@@ -227,7 +231,7 @@ public sealed class LifecycleTeardownTests
                 $"http://127.0.0.1:{port}/uracloud/install");
             message.Headers.Add("Origin", "https://ura.shuise.net");
             message.Content = new StringContent(
-                "{\"author\":\"test\",\"internalName\":\"test\",\"version\":\"1.0.0\"}",
+                "{\"repositoryId\":1,\"releaseId\":10}",
                 Encoding.UTF8,
                 "application/json");
             request = client.SendAsync(message, TestContext.Current.CancellationToken);
@@ -249,7 +253,9 @@ public sealed class LifecycleTeardownTests
         finally
         {
             releaseHandler.Set();
-            WebInstallApi.ConfirmInstall = originalConfirmInstall;
+            PluginRepository.ConfirmInstall = originalConfirmInstall;
+            ResourceUpdater.HttpClient.Dispose();
+            ResourceUpdater.HttpClient = originalHttpClient;
             shutdown ??= Server.StopAsync();
             try
             {
@@ -272,6 +278,17 @@ public sealed class LifecycleTeardownTests
         }
     }
 
+    sealed class DescriptorHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var descriptor = new PluginRelease(new(1, "owner/repo", 1, "owner", "User", "https://github.com/owner/repo", false, null, null),
+                10, "tag", "https://github.com/owner/repo/releases", false, 1, 100, new string('a', 64),
+                new() { Author = "test", InternalName = "test", DisplayName = "test", RawVersion = "1.0.0" });
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                { Content = new StringContent(JsonConvert.SerializeObject(descriptor)) });
+        }
+    }
     static int GetFreePort()
     {
         using var listener = new TcpListener(IPAddress.Loopback, 0);

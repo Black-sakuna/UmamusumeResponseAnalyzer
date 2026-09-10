@@ -5,9 +5,9 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>1.14.4.0</Version>
+		<Version>1.14.5.0</Version>
 		<PackageId>UmamusumeResponseAnalyzer</PackageId>
-		<PackageVersion>2026.9.1</PackageVersion>
+		<PackageVersion>2026.9.2</PackageVersion>
 		<Description>UmamusumeResponseAnalyzer plugin compile-time API.</Description>
 		<Authors>EtherealAO</Authors>
 		<IncludeBuildOutput>false</IncludeBuildOutput>

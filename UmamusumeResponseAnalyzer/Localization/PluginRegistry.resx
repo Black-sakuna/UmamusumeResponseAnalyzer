@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <resheader name="resmimetype"><value>text/microsoft-resx</value></resheader>
+  <resheader name="version"><value>2.0</value></resheader>
+  <data name="Channel" xml:space="preserve"><value>选择 Release 通道</value></data>
+  <data name="Stable" xml:space="preserve"><value>正式版</value></data>
+  <data name="IncludePrerelease" xml:space="preserve"><value>包含预发行版</value></data>
+  <data name="Prerelease" xml:space="preserve"><value>预发行版</value></data>
+  <data name="Empty" xml:space="preserve"><value>插件仓库没有可用 Release。</value></data>
+  <data name="SelectPlugins" xml:space="preserve"><value>选择要安装的插件来源</value></data>
+  <data name="SelectRelease" xml:space="preserve"><value>选择 Release</value></data>
+  <data name="Cancel" xml:space="preserve"><value>取消</value></data>
+  <data name="Cancelled" xml:space="preserve"><value>已取消安装。</value></data>
+  <data name="Failed" xml:space="preserve"><value>插件仓库操作失败</value></data>
+  <data name="Verified" xml:space="preserve"><value>仓库所有者已验证</value></data>
+  <data name="Unverified" xml:space="preserve"><value>仓库所有者未验证</value></data>
+  <data name="InstalledLoaded" xml:space="preserve"><value>已安装并加载</value></data>
+  <data name="InstalledNotLoaded" xml:space="preserve"><value>ZIP 与来源记录已保存，但加载未成功。</value></data>
+  <data name="UnknownSource" xml:space="preserve"><value>来源未知；需要手动选择来源。</value></data>
+  <data name="Confirm" xml:space="preserve"><value>确认安装插件</value></data>
+  <data name="Source" xml:space="preserve"><value>来源</value></data>
+  <data name="UnverifiedWarning" xml:space="preserve"><value>URACloud 尚未确认此仓库的所有者身份。该插件将在本机执行代码。</value></data>
+  <data name="SwitchSource" xml:space="preserve"><value>切换来源：{0} → {1}。依赖 {2} 的其他插件也将使用新来源。</value></data>
+  <data name="Dependents" xml:space="preserve"><value>依赖此插件</value></data>
+  <data name="Busy" xml:space="preserve"><value>另一个插件安装正在进行，请稍后重试。</value></data>
+  <data name="DescriptorChanged" xml:space="preserve"><value>安装描述或附件已变化，请重新选择并确认。</value></data>
+  <data name="NewVersion" xml:space="preserve"><value>新版本</value></data>
+  <data name="Promoted" xml:space="preserve"><value>预发行转正式版</value></data>
+  <data name="PackageChanged" xml:space="preserve"><value>同版本附件或 Release 变化</value></data>
+</root>

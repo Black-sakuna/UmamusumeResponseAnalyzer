@@ -186,7 +186,7 @@ internal static class PluginPackageValidator
                 $"manifest={internalName}");
     }
 
-    static void ValidateManifest(PluginInformation manifest)
+    internal static void ValidateManifest(PluginInformation manifest)
     {
         if (string.IsNullOrWhiteSpace(manifest.Author))
             throw new InvalidDataException("manifest Author 不能为空。");

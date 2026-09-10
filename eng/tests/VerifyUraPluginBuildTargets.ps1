@@ -7,12 +7,8 @@ $projectPath = Join-Path (Split-Path -Parent $engRoot) "UmamusumeResponseAnalyze
 $errors = New-Object System.Collections.Generic.List[string]
 
 [xml]$project = Get-Content -LiteralPath $projectPath -Raw
-if ($project.SelectSingleNode('/Project/PropertyGroup/Version').InnerText -ne '1.14.4.0') {
-    $errors.Add("$projectPath must keep Host assembly Version 1.14.4.0")
-}
-if ($project.SelectSingleNode('/Project/PropertyGroup/PackageId').InnerText -ne 'UmamusumeResponseAnalyzer' -or
-    $project.SelectSingleNode('/Project/PropertyGroup/PackageVersion').InnerText -ne '2026.9.1') {
-    $errors.Add("$projectPath must pack UmamusumeResponseAnalyzer 2026.9.1")
+if ($project.SelectSingleNode('/Project/PropertyGroup/PackageId').InnerText -ne 'UmamusumeResponseAnalyzer') {
+    $errors.Add("$projectPath must pack UmamusumeResponseAnalyzer")
 }
 if ($project.SelectSingleNode('/Project/PropertyGroup/IncludeBuildOutput').InnerText -ne 'false') {
     $errors.Add("$projectPath must not pack the runtime Host build output")

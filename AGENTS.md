@@ -15,6 +15,8 @@ Use the .NET 10 SDK from the repository root:
 
 When building sibling `URA-Plugins` projects, pass `-p:GenerateUraPluginManifestOnBuild=false -p:PackageUraPluginOnBuild=false -p:DeployUraPluginToLocalAppDataOnBuild=false` unless packaging or deployment is explicitly under test; the default targets can overwrite installed plugin archives.
 
+Cross-plugin smoke projects live in `eng/PluginTesting/Tests/`; `eng/PluginTesting/plugins.json` pins the public plugin commits. Run `act workflow_dispatch` on Windows to execute `.github/workflows/plugins.yml`. Plugin-owned tests live in the corresponding plugin repository. Details: [plugin test workflows](eng/PluginTesting/README.md).
+
 ## Coding Style & Naming Conventions
 
 Production source follows `UmamusumeResponseAnalyzer/.editorconfig`; mirror it in tests: four-space indentation, CRLF line endings, Allman braces, `using` directives outside namespaces, and `var` for locals. Use PascalCase for types, methods, and properties; prefix interfaces with `I`; use camelCase for locals and parameters. Prefer direct, readable C# and existing modern language patterns over new wrappers or speculative abstractions. Update `.resx` sources rather than generated `*.Designer.cs` files.

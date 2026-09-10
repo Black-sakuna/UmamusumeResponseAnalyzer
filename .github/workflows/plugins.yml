@@ -1,0 +1,10 @@
+name: Plugin ecosystem
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  plugins:
+    uses: URA-Plugins/.github/.github/workflows/ecosystem.yml@v1

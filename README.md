@@ -25,7 +25,7 @@ UmamusumeResponseAnalyzer 是基于 Terminal.Gui 的本地 TUI 宿主。它接�
 * `config.yaml`、数据文件、`Plugins/` 和 debug `packets/` 都写在工作目录下。
 * 默认监听 `http://127.0.0.1:4693`。`/notify/ping` 返回 `pong`，可作为 smoke test。
 * 启动、设置和插件设置使用占满 terminal 且无外边框的 Terminal.Gui 原生 `Menu` 页面；mouse hover 或 `Up` / `Down` 移动当前菜单项，click 或 `Enter` 直接激活。插件仓库、更新、安装 Mod 和字段编辑使用各自的 dialog，完成后返回对应的上级菜单。启动后按 `/`，或在 focused control 未使用 `Enter` 时，打开 Command Mode；内置命令需以 `/` 开头。Command Mode 使用 Terminal.Gui 原生 `TextField` 输入，支持 `Tab` 补全、`Up` / `Down` 浏览当前进程内提交过的命令、`Esc` 取消和 `Enter` 执行。底部全宽带框 overlay 显示 ` Command Mode ` 标题、补全候选及 `+N more`、`❯` 输入区和操作 footer；窄窗口或高度不足时使用紧凑布局。鼠标移到 terminal 最底部会显示覆盖在 workspace 上的居中 taskbar popup，不占用 workspace 布局空间；过长标题会随 terminal 宽度以 `…` 缩略，当前项和 hovered 项优先显示完整标题。click workspace title 直接切换，按住左键左右拖拽可调整并持久化 taskbar 顺序；该顺序只影响 taskbar。当前项和 hover 由背景属性区分。Command Mode 显示时 taskbar 被抑制，并拥有更高的图层优先级。`/workspace` 或 `/workspace switch` 打开 workspace 选择器，`/workspace switch <title>` 直接切换；标题也可用双引号包围，其中 `\"` 和 `\\` 分别表示双引号和反斜杠。`/workspace list` 列出 workspace。workspace 内容超出终端时默认显示底部；`Up` / `Down` 按行滚动，`PageUp` / `PageDown` 按页滚动，`Home` / `End` 跳到顶部或底部。`Left` / `Right` 不参与 workspace viewport 滚动；focused view 未处理时继续匹配已注册 hotkey。Terminal.Gui 主界面中，滚轮产生与无 modifier 的 `Up` / `Down` 相同的 workspace viewport 滚动效果；滚轮不触发快捷键，popup 或 Command Mode 存活时会被忽略。Host dialog 的 `TextField` 与 `ListView` 使用 Terminal.Gui 原生 whole-view hover；focus 视觉优先于 hover，hover 不改变 focus、selection 或 marked 状态。`Button`、菜单及插件提供的 `View` 使用各控件自身的 Terminal.Gui 默认行为。workspace/plugin popup 保持 mouse click-through。popup 或 Command Mode 存活时由其优先处理按键；workspace 已到边界时按键继续交给已注册 hotkey。`/plugin` 或 `/plugin list` 列出插件运行期状态，`/plugin load|unload|reload <InternalName>` 只改变当前进程内加载状态，不安装、不删除插件文件、不写禁用配置。Command 结果始终写入全局最近日志；只有 message 而没有 display 的结果同时显示 global notification，有 display 的结果改用 popup 呈现且不重复通知。插件更新 workspace panel 时默认会切到该 workspace；bootstrap 刷新和异常写入不会切换当前 workspace。按 `Ctrl+B` 返回启动 workspace，按 `P` 查看已加载插件列表，按 `Ctrl+C` 退出程序。
-* 程序启动后会检查已加载插件是否有新版本；发现更新时只通知，不自动安装。更新插件需要进入 `插件仓库` 手动选择。
+* 程序启动后会检查已安装且来源记录有效的插件是否有正式版更新；发现更新时只通知，不自动安装。更新插件需要进入 `插件仓库` 手动选择。
 * 更新数据文件时会先写入临时文件，下载成功后替换目标文件；失败时清理临时文件并保留已有文件。
 * 开启 debug packet 保存后，请求写为 `Q`、响应写为 `R` 的 `.msgpack` 文件，文件名包含时间戳、UUIDv7 和 API endpoint path（`/` 写为 `-`）；`DEBUG` 构建额外写 `.json`，文件名只包含时间戳和 `Q`/`R`，完整 canonical URL 写在 JSON 内容中。`packets/` 中超过一天的旧文件会在下次保存时清理，单个旧文件清理失败不会中断当前请求/响应分析。
 
@@ -36,10 +36,15 @@ UmamusumeResponseAnalyzer 是基于 Terminal.Gui 的本地 TUI 宿主。它接�
 
 # 插件仓库与 URACloud
 
-* `插件仓库` 从 `https://ura.shuise.net/api/Plugins` 拉取插件目录，并按配置中的服务器目标过滤插件。插件自身未声明 `Targets` 时视为所有目标可用。安装只处理用户选中的插件，不根据 manifest `Dependencies` 自动增加其它插件。
-* 仓库安装先将 ZIP 下载到 `Plugins/plugin-*.tmp`，按下述包契约及请求的 `Author`、`InternalName`、`Version` 校验后，才替换 `Plugins/<InternalName>.zip` 并尝试热重载；下载或校验失败会删除临时文件并保留现有 ZIP 和运行实例。宿主只扫描 `Plugins/` 顶层的 ZIP 包；不扫描独立 DLL 文件或子目录。
-* `InternalName` 按 `OrdinalIgnoreCase` 全局唯一；仓库目录出现重复名称时本次仓库操作失败，`Plugins/` 中名称冲突的包不会加载，并写入全局最近日志和 error notification。
-* URACloud 网页集成挂在本地 `/uracloud/*`。`/uracloud/status` 返回当前 URA 版本和已加载插件；`/uracloud/install` 只接受白名单 Origin（`https://ura.shuise.net` 或 `http://localhost:5173`）提交的 `{author, internalName, version}`，下载源固定为 URACloud 插件仓库，并且安装前必须在本机控制台确认。成功响应为 `{ok: true, installed, version}`，其中 `installed` 和 `version` 取自已校验 manifest。
+* Host **1.14.5.0** 使用 GitHub 来源协议，从 `https://ura.shuise.net/api/Plugins` 读取目录。正式版为默认通道，也可主动包含预发行版；来源以 repository ID 区分，版本选择使用 Release ID。同名来源可并列展示，本机同一 `InternalName`（OrdinalIgnoreCase）只能安装一个。
+* 网页与 Host 菜单共用安装流程：从 URACloud 取得描述、本机确认、下载、核对描述/ETag/SHA-256/完整 manifest、提交 ZIP 与来源记录、reload。ZIP 上限 64 MiB，临时文件位于 `Plugins/`。取消不下载 ZIP、不覆盖文件、不加载；并发安装被拒绝。
+* ZIP 落在 `Plugins/<InternalName>.zip`，来源记录在同名 `.source.json`，保存 repository/release/asset ID、SHA-256 和安装时 prerelease。记录提交失败会回滚 ZIP；安装与加载结果分别报告。进程在两个文件替换之间中断时，摘要不匹配会显示来源未知，须重新选择安装。宿主只扫描 `Plugins/` 顶层 ZIP。
+* 更新检查包括未加载或加载失败的 ZIP，固定跟随记录中的来源，并检查正式版。同数字版本的预发行转正式版、附件或 Release 变化也会提示。无记录或本地摘要不匹配时显示来源未知，不推测更新来源。
+* 未验证来源的确认框说明所有者身份尚未确认、插件将在本机执行代码，并显示 `owner/repository`。来源切换说明依赖该 InternalName 的插件也将使用新来源。验证表示身份关系，不表示代码审查。
+* 本地 `/uracloud/status` 返回已安装包、来源和加载状态；`/uracloud/install` 只接受白名单 Origin（`https://ura.shuise.net` 或 `http://localhost:5173`）的 `{repositoryId, releaseId}`。Host 自行读取描述；响应 `{ok, loaded, installed, error}` 区分安装成功与加载成功。
+* 包自身未声明 `Targets` 时视为所有目标可用；目录按配置目标过滤。安装只处理所选插件，不自动增加 manifest `Dependencies`。
+
+Host **1.14.5.0** selects GitHub sources and releases by numeric IDs. Both entry points require local confirmation and pin the descriptor and package bytes. Source records follow the installed ZIP hash; unknown sources require manual selection. Update checks include unloaded packages. Installation and loading success are reported separately; owner verification does not imply code review.
 
 # 插件开发 Plugin Development
 

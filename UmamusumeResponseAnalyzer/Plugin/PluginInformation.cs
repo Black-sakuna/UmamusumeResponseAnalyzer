@@ -9,8 +9,7 @@ namespace UmamusumeResponseAnalyzer.Plugin
         public string DisplayName { get; set; } = string.Empty;
         public string Description { get; set; } = string.Empty;
         public string Changelog { get; set; } = string.Empty;
-        // 服务器原样的版本字符串(可能带前导零,如 "2026.03.04")。下载 URL 必须用它原样:
-        // System.Version 会把 "2026.03.04" 归一成 "2026.3.4",拼出的下载地址与服务器不符 → 404 装不上。
+        // 保留 manifest 的原始版本字符串；Version 用于数字比较。
         [JsonProperty("Version")]
         public string RawVersion { get; set; } = string.Empty;
 

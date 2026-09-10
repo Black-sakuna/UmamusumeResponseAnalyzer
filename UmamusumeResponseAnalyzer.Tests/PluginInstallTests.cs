@@ -1,341 +1,235 @@
 using System.Net;
+using System.Net.Http.Headers;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using UmamusumeResponseAnalyzer.Plugin;
 using WatsonWebserver.Core;
 using WatsonWebserver.Lite;
 using Xunit;
 
-namespace UmamusumeResponseAnalyzer.Tests
+namespace UmamusumeResponseAnalyzer.Tests;
+
+[Collection("PluginReload")]
+public sealed class PluginInstallTests : IDisposable
 {
-    [Collection("PluginReload")]
-    public sealed class PluginInstallTests : IDisposable
+    readonly string tempDir = Path.Combine(Path.GetTempPath(), "ura-plugin-install-" + Guid.NewGuid().ToString("N"));
+    readonly string originalCwd = Directory.GetCurrentDirectory();
+    readonly Func<PluginRelease, CancellationToken, bool> originalConfirm = PluginRepository.ConfirmInstall;
+    readonly HttpClient originalHttp = ResourceUpdater.HttpClient;
+    readonly PackageHandler handler;
+    readonly byte[] package;
+    const string Name = "InstallFixture";
+
+    public PluginInstallTests()
     {
-        readonly string tempDir;
-        readonly string originalCwd;
-        readonly Func<string, string, string, CancellationToken, bool> originalConfirmInstall;
-        readonly HttpClient originalHttpClient;
-
-        public PluginInstallTests()
-        {
-            tempDir = Path.Combine(Path.GetTempPath(), "ura-plugin-install-" + Guid.NewGuid().ToString("N"));
-            Directory.CreateDirectory(tempDir);
-            Directory.CreateDirectory(Path.Combine(tempDir, "Plugins"));
-            originalCwd = Directory.GetCurrentDirectory();
-            originalConfirmInstall = WebInstallApi.ConfirmInstall;
-            originalHttpClient = ResourceUpdater.HttpClient;
-            PluginManager.ShutdownAsync().GetAwaiter().GetResult();
-            Directory.SetCurrentDirectory(tempDir);
-        }
-
-        public void Dispose()
-        {
-            try
-            {
-                PluginManager.ShutdownAsync().GetAwaiter().GetResult();
-            }
-            finally
-            {
-                WebInstallApi.ConfirmInstall = originalConfirmInstall;
-                if (!ReferenceEquals(ResourceUpdater.HttpClient, originalHttpClient))
-                {
-                    ResourceUpdater.HttpClient.Dispose();
-                    ResourceUpdater.HttpClient = originalHttpClient;
-                }
-                Directory.SetCurrentDirectory(originalCwd);
-                try { Directory.Delete(tempDir, recursive: true); } catch { }
-            }
-        }
-
-        [Fact]
-        public async Task WebInstall_RequiresLocalConfirmationBeforeDownload()
-        {
-            var confirmationToken = CancellationToken.None;
-            WebInstallApi.ConfirmInstall = (_, _, _, cancellationToken) =>
-            {
-                confirmationToken = cancellationToken;
-                return false;
-            };
-            var port = GetFreePort();
-            using var server = new WebserverLite(new WebserverSettings("127.0.0.1", port), ctx => ctx.Response.Send(string.Empty));
-            using var requests = new ServerRequestBarrier(TestContext.Current.CancellationToken);
-            WebInstallApi.Register(server, requests);
-            server.Start(TestContext.Current.CancellationToken);
-
-            using var client = new HttpClient();
-            using var request = new HttpRequestMessage(System.Net.Http.HttpMethod.Post, $"http://127.0.0.1:{port}/uracloud/install");
-            request.Headers.Add("Origin", "https://ura.shuise.net");
-            request.Content = new StringContent(
-                """{"author":"tester","internalName":"NoConfirm","version":"1.0.0"}""",
-                Encoding.UTF8,
-                "application/json");
-
-            using var response = await client.SendAsync(request, TestContext.Current.CancellationToken);
-
-            Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
-            Assert.False(File.Exists(Path.Combine(tempDir, "Plugins", "NoConfirm.zip")));
-            Assert.Equal(requests.Token, confirmationToken);
-        }
-
-        [Fact]
-        public async Task WebInstall_ValidPackageLoadsAndReturnsValidatedManifest()
-        {
-            const string pluginName = "WebInstallSuccess";
-            var package = CompilePackageBytes(pluginName, "2026.03.04");
-            ResourceUpdater.HttpClient = new HttpClient(new StubHttpMessageHandler(_ =>
-                new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(package) }));
-            WebInstallApi.ConfirmInstall = (_, _, _, _) => true;
-            var port = GetFreePort();
-            using var server = new WebserverLite(new WebserverSettings("127.0.0.1", port), ctx => ctx.Response.Send(string.Empty));
-            using var requests = new ServerRequestBarrier(TestContext.Current.CancellationToken);
-            WebInstallApi.Register(server, requests);
-            PluginManager.Init();
-
-            try
-            {
-                server.Start(TestContext.Current.CancellationToken);
-                using var client = new HttpClient();
-                using var request = CreateWebInstallRequest(port, pluginName, "2026.3.4");
-                using var response = await client.SendAsync(request, TestContext.Current.CancellationToken);
-                var body = JObject.Parse(await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
-
-                Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-                Assert.True(body.Value<bool>("ok"));
-                Assert.Equal(pluginName, body.Value<string>("installed"));
-                Assert.Equal("2026.03.04", body.Value<string>("version"));
-                Assert.NotNull(PluginManager.FindLoadedPlugin(pluginName));
-            }
-            finally
-            {
-                await PluginManager.ShutdownAsync();
-            }
-        }
-
-        [Fact]
-        public async Task ConcurrentInvalidWebInstallsKeepExistingZipAndRuntime()
-        {
-            const string pluginName = "WebInstallPreserve";
-            var installedPath = Path.Combine(tempDir, PluginRepository.InstallZipPath(pluginName));
-            PluginCompiler.CompilePackage(PluginSource, pluginName, installedPath);
-            var installedBytes = await File.ReadAllBytesAsync(installedPath, TestContext.Current.CancellationToken);
-            var invalidPackage = CompilePackageBytes("WrongWebInstallPlugin");
-            ResourceUpdater.HttpClient = new HttpClient(new StubHttpMessageHandler(_ =>
-                new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(invalidPackage) }));
-            WebInstallApi.ConfirmInstall = (_, _, _, _) => true;
-            var port = GetFreePort();
-            using var server = new WebserverLite(new WebserverSettings("127.0.0.1", port), ctx => ctx.Response.Send(string.Empty));
-            using var requests = new ServerRequestBarrier(TestContext.Current.CancellationToken);
-            WebInstallApi.Register(server, requests);
-            PluginManager.Init();
-            PluginManager.InitializeLoadedPlugins();
-            var loaded = Assert.Single(
-                PluginManager.SnapshotLoadedPlugins(),
-                plugin => PluginManager.InternalName(plugin) == pluginName);
-
-            try
-            {
-                server.Start(TestContext.Current.CancellationToken);
-                using var client = new HttpClient();
-                using var firstRequest = CreateWebInstallRequest(port, pluginName, "1.0.0");
-                using var secondRequest = CreateWebInstallRequest(port, pluginName, "1.0.0");
-                var firstResponseTask = client.SendAsync(firstRequest, TestContext.Current.CancellationToken);
-                var secondResponseTask = client.SendAsync(secondRequest, TestContext.Current.CancellationToken);
-                using var firstResponse = await firstResponseTask;
-                using var secondResponse = await secondResponseTask;
-
-                Assert.Equal(HttpStatusCode.InternalServerError, firstResponse.StatusCode);
-                Assert.Equal(HttpStatusCode.InternalServerError, secondResponse.StatusCode);
-                Assert.Equal(installedBytes, await File.ReadAllBytesAsync(installedPath, TestContext.Current.CancellationToken));
-                Assert.Same(loaded, PluginManager.FindLoadedPlugin(pluginName));
-                Assert.Empty(Directory.GetFiles(Path.Combine(tempDir, "Plugins"), "plugin-*.tmp"));
-            }
-            finally
-            {
-                await PluginManager.ShutdownAsync();
-            }
-        }
-
-        [Fact]
-        public async Task InstallPluginsAsync_RejectsDuplicateInternalNamesIgnoringCase()
-        {
-            var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-                PluginRepository.InstallPluginsAsync([
-                new() { Author = "author-a", InternalName = "SameName", RawVersion = "1.0.0" },
-                new() { Author = "author-b", InternalName = "samename", RawVersion = "1.0.0" },
-            ], TestContext.Current.CancellationToken));
-
-            Assert.Contains("InternalName 重复", error.Message);
-            Assert.False(File.Exists(Path.Combine(tempDir, "Plugins", "SameName.zip")));
-        }
-
-        [Fact]
-        public async Task InstallPluginsAsync_IsolatesEmptyVersionsAndDownloadFailures()
-        {
-            var package = CompilePackageBytes("Works");
-            ResourceUpdater.HttpClient = new HttpClient(new StubHttpMessageHandler(request =>
-            {
-                var path = request.RequestUri!.AbsolutePath;
-                if (path.EndsWith("/EmptyVersions/versions", StringComparison.Ordinal))
-                    return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("[]", Encoding.UTF8, "application/json") };
-                if (path.EndsWith("/FailedDownload/versions", StringComparison.Ordinal)
-                    || path.EndsWith("/Works/versions", StringComparison.Ordinal))
-                    return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("[{\"version\":\"1.0.0\"}]", Encoding.UTF8, "application/json") };
-                if (path.Contains("/FailedDownload/versions/", StringComparison.Ordinal))
-                    return new HttpResponseMessage(HttpStatusCode.InternalServerError);
-                if (path.Contains("/Works/versions/", StringComparison.Ordinal))
-                    return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(package) };
-                return new HttpResponseMessage(HttpStatusCode.NotFound);
-            }));
-
-            var installed = await PluginRepository.InstallPluginsAsync([
-                new() { Author = "Tests", InternalName = "EmptyVersions", RawVersion = "1.0.0" },
-                new() { Author = "Tests", InternalName = "FailedDownload", RawVersion = "1.0.0" },
-                new() { Author = "Tests", InternalName = "Works", RawVersion = "1.0.0" },
-            ], TestContext.Current.CancellationToken);
-
-            Assert.Equal(["Works"], installed);
-            Assert.False(File.Exists(Path.Combine(tempDir, "Plugins", "EmptyVersions.zip")));
-            Assert.False(File.Exists(Path.Combine(tempDir, "Plugins", "FailedDownload.zip")));
-            Assert.Equal(package, await File.ReadAllBytesAsync(Path.Combine(tempDir, "Plugins", "Works.zip"), TestContext.Current.CancellationToken));
-        }
-
-        [Fact]
-        public async Task DownloadPluginZipAsync_WhenCopyFails_KeepsExistingZipAndDeletesTempFile()
-        {
-            var existing = Path.Combine(tempDir, PluginRepository.InstallZipPath("KeepOld"));
-            await File.WriteAllTextAsync(existing, "old-zip", TestContext.Current.CancellationToken);
-            var url = StartOneShotHttpServer("partial", declaredLength: 100);
-
-            await Assert.ThrowsAnyAsync<Exception>(() =>
-                PluginRepository.DownloadPluginZipAsync(
-                    url,
-                    "Tests",
-                    "KeepOld",
-                    "1.0.0",
-                    TestContext.Current.CancellationToken));
-
-            Assert.Equal("old-zip", await File.ReadAllTextAsync(existing, TestContext.Current.CancellationToken));
-            Assert.Empty(Directory.GetFiles(Path.Combine(tempDir, "Plugins"), "plugin-*.tmp"));
-        }
-
-        [Theory]
-        [InlineData("malformed")]
-        [InlineData("identity")]
-        [InlineData("version")]
-        public async Task DownloadPluginZipAsync_InvalidPackageKeepsExistingZipAndDeletesTempFile(string invalidKind)
-        {
-            var existing = Path.Combine(tempDir, PluginRepository.InstallZipPath("KeepOld"));
-            var existingBytes = Encoding.UTF8.GetBytes("old-zip");
-            await File.WriteAllBytesAsync(existing, existingBytes, TestContext.Current.CancellationToken);
-            var package = invalidKind switch
-            {
-                "malformed" => Encoding.UTF8.GetBytes("not-a-zip"),
-                "identity" => CompilePackageBytes("WrongName"),
-                "version" => CompilePackageBytes("KeepOld", "2.0.0"),
-                _ => throw new ArgumentOutOfRangeException(nameof(invalidKind)),
-            };
-            ResourceUpdater.HttpClient = new HttpClient(new StubHttpMessageHandler(_ =>
-                new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(package) }));
-
-            await Assert.ThrowsAsync<InvalidDataException>(() =>
-                PluginRepository.DownloadPluginZipAsync(
-                    "https://example.invalid/plugin.zip",
-                    "Tests",
-                    "KeepOld",
-                    "1.0.0",
-                    TestContext.Current.CancellationToken));
-
-            Assert.Equal(existingBytes, await File.ReadAllBytesAsync(existing, TestContext.Current.CancellationToken));
-            Assert.Empty(Directory.GetFiles(Path.Combine(tempDir, "Plugins"), "plugin-*.tmp"));
-        }
-
-        [Fact]
-        public async Task DownloadPluginZipAsync_CleansStaleTempFiles()
-        {
-            var package = CompilePackageBytes("Fresh");
-            ResourceUpdater.HttpClient = new HttpClient(new StubHttpMessageHandler(_ =>
-                new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(package) }));
-            var stale = Path.Combine(tempDir, "Plugins", "plugin-stale.tmp");
-            await File.WriteAllTextAsync(stale, "stale", TestContext.Current.CancellationToken);
-            File.SetLastWriteTimeUtc(stale, DateTime.UtcNow.AddDays(-2));
-
-            var manifest = await PluginRepository.DownloadPluginZipAsync(
-                "https://example.invalid/plugin.zip",
-                "Tests",
-                "Fresh",
-                "1.0.0",
-                TestContext.Current.CancellationToken);
-
-            Assert.Equal("Fresh", manifest.InternalName);
-            Assert.Equal(package, await File.ReadAllBytesAsync(Path.Combine(tempDir, "Plugins", "Fresh.zip"), TestContext.Current.CancellationToken));
-            Assert.False(File.Exists(stale));
-        }
-
-        byte[] CompilePackageBytes(string internalName, string version = "1.0.0")
-        {
-            var packagePath = Path.Combine(tempDir, $"package-{Guid.NewGuid():N}.zip");
-            try
-            {
-                PluginCompiler.CompilePackage(PluginSource, internalName, packagePath, version: version);
-                return File.ReadAllBytes(packagePath);
-            }
-            finally
-            {
-                File.Delete(packagePath);
-            }
-        }
-
-        static HttpRequestMessage CreateWebInstallRequest(int port, string internalName, string version)
-        {
-            var request = new HttpRequestMessage(System.Net.Http.HttpMethod.Post, $"http://127.0.0.1:{port}/uracloud/install");
-            request.Headers.Add("Origin", "https://ura.shuise.net");
-            request.Content = new StringContent(
-                $$"""{"author":"Tests","internalName":"{{internalName}}","version":"{{version}}"}""",
-                Encoding.UTF8,
-                "application/json");
-            return request;
-        }
-
-        static int GetFreePort()
-        {
-            using var listener = new TcpListener(IPAddress.Loopback, 0);
-            listener.Start();
-            return ((IPEndPoint)listener.LocalEndpoint).Port;
-        }
-
-        static string StartOneShotHttpServer(string body, int declaredLength)
-        {
-            var listener = new TcpListener(IPAddress.Loopback, 0);
-            listener.Start();
-            var port = ((IPEndPoint)listener.LocalEndpoint).Port;
-            _ = Task.Run(async () =>
-            {
-                using var client = await listener.AcceptTcpClientAsync(TestContext.Current.CancellationToken);
-                await using var stream = client.GetStream();
-                var buffer = new byte[4096];
-                await stream.ReadAtLeastAsync(buffer, minimumBytes: 1, throwOnEndOfStream: false, cancellationToken: TestContext.Current.CancellationToken);
-                var header = $"HTTP/1.1 200 OK\r\nContent-Length: {declaredLength}\r\nConnection: close\r\n\r\n";
-                await stream.WriteAsync(Encoding.ASCII.GetBytes(header));
-                await stream.WriteAsync(Encoding.UTF8.GetBytes(body));
-                listener.Stop();
-            });
-            return $"http://127.0.0.1:{port}/plugin.zip";
-        }
-
-        sealed class StubHttpMessageHandler(Func<HttpRequestMessage, HttpResponseMessage> send) : HttpMessageHandler
-        {
-            protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
-                Task.FromResult(send(request));
-        }
-
-        const string PluginSource = """
-            using UmamusumeResponseAnalyzer.Plugin;
-
-            public sealed class TestPlugin : IPlugin
-            {
-                public void Initialize(IPluginContext context) { }
-            }
-            """;
+        Directory.CreateDirectory(tempDir);
+        Directory.CreateDirectory(Path.Combine(tempDir, "Plugins"));
+        PluginManager.ShutdownAsync().GetAwaiter().GetResult();
+        Directory.SetCurrentDirectory(tempDir);
+        var path = Path.Combine(tempDir, "fixture.zip");
+        PluginCompiler.CompilePackage(PluginCode, Name, path, version: "2026.03.04");
+        package = File.ReadAllBytes(path);
+        var manifest = PluginPackageValidator.Validate(path, false).Manifest;
+        handler = new PackageHandler(package, new(
+            new(1, "owner/repository", 7, "owner", "User", "https://github.com/owner/repository", false, null, null),
+            10, "release", "https://github.com/owner/repository/releases/10", false, 1, 100,
+            Convert.ToHexStringLower(SHA256.HashData(package)), manifest));
+        ResourceUpdater.HttpClient = new HttpClient(handler);
+        PluginRepository.ConfirmInstall = (_, _) => true;
+        PluginManager.Init();
+        PluginManager.InitializeLoadedPlugins();
     }
+
+    public void Dispose()
+    {
+        try { PluginManager.ShutdownAsync().GetAwaiter().GetResult(); }
+        finally
+        {
+            PluginRepository.ConfirmInstall = originalConfirm;
+            ResourceUpdater.HttpClient.Dispose();
+            ResourceUpdater.HttpClient = originalHttp;
+            Directory.SetCurrentDirectory(originalCwd);
+            Directory.Delete(tempDir, true);
+        }
+    }
+
+    [Fact]
+    public async Task LocalAndWebCancellationAndBusyStateNeverDownload()
+    {
+        using var entered = new ManualResetEventSlim();
+        using var finish = new ManualResetEventSlim();
+        PluginRepository.ConfirmInstall = (_, ct) => { entered.Set(); finish.Wait(ct); return false; };
+        var first = Task.Run(() => PluginRepository.InstallByReferenceAsync(1, 10, TestContext.Current.CancellationToken));
+        Assert.True(entered.Wait(TimeSpan.FromSeconds(5)));
+        try
+        {
+            var second = await PluginRepository.InstallByReferenceAsync(1, 10, TestContext.Current.CancellationToken);
+            Assert.False(second.Ok);
+            Assert.False(second.Loaded);
+        }
+        finally { finish.Set(); }
+        Assert.False((await first).Ok);
+        Assert.Equal(0, handler.Downloads);
+        Assert.Empty(Directory.GetFiles("Plugins"));
+
+        PluginRepository.ConfirmInstall = (_, _) => false;
+        using var requests = new ServerRequestBarrier(TestContext.Current.CancellationToken);
+        using var server = StartServer(requests, out var port);
+        using var client = new HttpClient();
+        using var request = WebRequest(port);
+        using var response = await client.SendAsync(request, TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal(0, handler.Downloads);
+        Assert.Empty(Directory.GetFiles("Plugins"));
+    }
+
+    [Fact]
+    public async Task WebInstallUsesNumericDescriptorAndSavesSourceBeforeLoading()
+    {
+        PluginRelease? confirmed = null;
+        PluginRepository.ConfirmInstall = (d, _) => { confirmed = d; return true; };
+        using var requests = new ServerRequestBarrier(TestContext.Current.CancellationToken);
+        using var server = StartServer(requests, out var port);
+        using var client = new HttpClient();
+        using var request = WebRequest(port);
+        using var response = await client.SendAsync(request, TestContext.Current.CancellationToken);
+        var body = JObject.Parse(await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.True(body.Value<bool>("ok"));
+        Assert.True(body.Value<bool>("loaded"));
+        Assert.Equal("owner/repository", confirmed!.Source.FullName);
+        Assert.Equal(Name, body.Value<string>("installed"));
+        Assert.Equal(handler.Descriptor.InstalledSource, PluginInstallStorage.ReadSource(PluginRepository.InstallZipPath(Name)));
+        Assert.NotNull(PluginManager.FindLoadedPlugin(Name));
+        var status = JObject.Parse(await client.GetStringAsync($"http://127.0.0.1:{port}/uracloud/status", TestContext.Current.CancellationToken));
+        Assert.Equal(1L, status["plugins"]![0]!["source"]!["repositoryId"]!.Value<long>());
+        Assert.True(status["plugins"]![0]!["loaded"]!.Value<bool>());
+        Assert.Equal(1, handler.Downloads);
+    }
+
+    [Fact]
+    public async Task DescriptorOrBytesChangingAbortsWithoutReplacingInstalledPackage()
+    {
+        var zip = PluginRepository.InstallZipPath(Name);
+        File.WriteAllBytes(zip, package);
+        var original = handler.Descriptor;
+        PluginRepository.ConfirmInstall = (_, _) => { handler.Descriptor = original with { AssetId = 101 }; return true; };
+        await Assert.ThrowsAsync<InvalidDataException>(() => PluginRepository.InstallByReferenceAsync(1, 10));
+        Assert.Equal(0, handler.Downloads);
+        PluginRepository.ConfirmInstall = (_, _) => true;
+        handler.Descriptor = original;
+        handler.Bytes = [1, 2, 3];
+        await Assert.ThrowsAsync<InvalidDataException>(() => PluginRepository.InstallByReferenceAsync(1, 10));
+        Assert.Equal(package, File.ReadAllBytes(zip));
+        Assert.Null(PluginInstallStorage.ReadSource(zip));
+        Assert.Empty(Directory.GetFiles("Plugins", "*.tmp"));
+        handler.Bytes = package;
+        handler.AfterDownload = () => handler.Descriptor = original with { Source = original.Source with { OwnerId = 9 } };
+        await Assert.ThrowsAsync<InvalidDataException>(() => PluginRepository.InstallByReferenceAsync(1, 10));
+        Assert.Equal(package, File.ReadAllBytes(zip));
+    }
+
+    [Fact]
+    public async Task SourceCommitFailureRollsBackZipAndLoadFailureRetainsAccurateRecord()
+    {
+        var zip = PluginRepository.InstallZipPath(Name);
+        var oldBytes = new byte[] { 4, 5, 6 };
+        File.WriteAllBytes(zip, oldBytes);
+        var sourcePath = PluginInstallStorage.SourcePath(zip);
+        Directory.CreateDirectory(sourcePath);
+        var error = await Record.ExceptionAsync(() => PluginRepository.InstallByReferenceAsync(1, 10));
+        Assert.True(error is IOException or UnauthorizedAccessException, error?.ToString());
+        Assert.Equal(oldBytes, File.ReadAllBytes(zip));
+        Assert.Null(PluginManager.FindLoadedPlugin(Name));
+        Directory.Delete(sourcePath);
+        File.Delete(zip);
+        var brokenPath = Path.Combine(tempDir, "broken.zip");
+        PluginCompiler.CompilePackage(PluginCode.Replace("{ }", "{ throw new System.InvalidOperationException(\"load failure\"); }"),
+            Name, brokenPath, version: "2026.03.04");
+        handler.Bytes = File.ReadAllBytes(brokenPath);
+        handler.Descriptor = handler.Descriptor with { Sha256 = Convert.ToHexStringLower(SHA256.HashData(handler.Bytes)) };
+        var result = await PluginRepository.InstallByReferenceAsync(1, 10);
+        Assert.True(result.Ok);
+        Assert.False(result.Loaded);
+        Assert.Equal(handler.Descriptor.InstalledSource, PluginInstallStorage.ReadSource(zip));
+        Assert.Null(PluginManager.FindLoadedPlugin(Name));
+    }
+
+    [Fact]
+    public async Task UpdatesCoverUnloadedPackagesAndUnknownSourcesAndSwitchesExplainDependencies()
+    {
+        var zip = PluginRepository.InstallZipPath(Name);
+        File.WriteAllBytes(zip, package);
+        File.WriteAllText(PluginInstallStorage.SourcePath(zip), JsonConvert.SerializeObject(handler.Descriptor.InstalledSource with { Prerelease = true }));
+        var updates = await PluginRepository.CheckForUpdatesAsync(TestContext.Current.CancellationToken);
+        Assert.Single(updates);
+        Assert.Equal(updates[0].CurrentVersion, updates[0].LatestVersion);
+        Assert.Null(PluginManager.FindLoadedPlugin(Name));
+        PluginCompiler.CompilePackage(PluginCode, "Dependent", Path.Combine("Plugins", "Dependent.zip"), dependencies: [Name]);
+        var switched = handler.Descriptor with { Source = handler.Descriptor.Source with { RepositoryId = 2, FullName = "fork/repository" } };
+        var message = PluginRepository.BuildInstallConfirmation(switched);
+        Assert.Contains("fork/repository", message);
+        Assert.Contains("Dependent", message);
+        Assert.Contains(Name, message);
+        Assert.Contains("URACloud", message);
+        Assert.False(switched.Source.Verified);
+        File.AppendAllText(zip, "locally changed");
+        Assert.Null(PluginInstallStorage.ReadSource(zip));
+        Assert.Empty(await PluginRepository.CheckForUpdatesAsync(TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => PluginRepository.InstallPluginsAsync([handler.Descriptor, switched]));
+    }
+
+    internal static WebserverLite StartServer(ServerRequestBarrier requests, out int port)
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        listener.Stop();
+        var server = new WebserverLite(new WebserverSettings("127.0.0.1", port), ctx => ctx.Response.Send(string.Empty));
+        WebInstallApi.Register(server, requests);
+        server.Start(TestContext.Current.CancellationToken);
+        return server;
+    }
+
+    static HttpRequestMessage WebRequest(int port)
+    {
+        var request = new HttpRequestMessage(System.Net.Http.HttpMethod.Post, $"http://127.0.0.1:{port}/uracloud/install");
+        request.Headers.Add("Origin", "https://ura.shuise.net");
+        request.Content = new StringContent("""{"repositoryId":1,"releaseId":10}""", Encoding.UTF8, "application/json");
+        return request;
+    }
+
+    sealed class PackageHandler(byte[] bytes, PluginRelease descriptor) : HttpMessageHandler
+    {
+        internal byte[] Bytes = bytes;
+        internal PluginRelease Descriptor = descriptor;
+        internal int Downloads;
+        internal Action? AfterDownload;
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (request.RequestUri!.AbsolutePath.EndsWith("/download"))
+            {
+                Downloads++;
+                Assert.Equal($"\"{Descriptor.AssetId}-{Descriptor.Sha256}\"", request.Headers.IfMatch.Single().Tag);
+                var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(Bytes) };
+                response.Headers.ETag = new EntityTagHeaderValue($"\"{Descriptor.AssetId}-{Descriptor.Sha256}\"");
+                AfterDownload?.Invoke();
+                return Task.FromResult(response);
+            }
+            var body = request.RequestUri.AbsolutePath.EndsWith("/Plugins")
+                ? JsonConvert.SerializeObject(new[] { Descriptor }) : JsonConvert.SerializeObject(Descriptor);
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body, Encoding.UTF8, "application/json") });
+        }
+    }
+
+    const string PluginCode = """
+        using UmamusumeResponseAnalyzer.Plugin;
+        public sealed class TestPlugin : IPlugin
+        {
+            public void Initialize(IPluginContext context) { }
+        }
+        """;
 }

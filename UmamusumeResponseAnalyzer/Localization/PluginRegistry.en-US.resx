@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <resheader name="resmimetype"><value>text/microsoft-resx</value></resheader>
+  <resheader name="version"><value>2.0</value></resheader>
+  <data name="Channel" xml:space="preserve"><value>Choose release channel</value></data>
+  <data name="Stable" xml:space="preserve"><value>Stable</value></data>
+  <data name="IncludePrerelease" xml:space="preserve"><value>Include prereleases</value></data>
+  <data name="Prerelease" xml:space="preserve"><value>Prerelease</value></data>
+  <data name="Empty" xml:space="preserve"><value>No available releases in the plugin registry.</value></data>
+  <data name="SelectPlugins" xml:space="preserve"><value>Select plugin sources to install</value></data>
+  <data name="SelectRelease" xml:space="preserve"><value>Select a release</value></data>
+  <data name="Cancel" xml:space="preserve"><value>Cancel</value></data>
+  <data name="Cancelled" xml:space="preserve"><value>Installation cancelled.</value></data>
+  <data name="Failed" xml:space="preserve"><value>Plugin registry operation failed</value></data>
+  <data name="Verified" xml:space="preserve"><value>Repository owner verified</value></data>
+  <data name="Unverified" xml:space="preserve"><value>Repository owner unverified</value></data>
+  <data name="InstalledLoaded" xml:space="preserve"><value>Installed and loaded</value></data>
+  <data name="InstalledNotLoaded" xml:space="preserve"><value>ZIP and source record saved, but loading did not succeed.</value></data>
+  <data name="UnknownSource" xml:space="preserve"><value>Source unknown; select a source manually.</value></data>
+  <data name="Confirm" xml:space="preserve"><value>Confirm plugin installation</value></data>
+  <data name="Source" xml:space="preserve"><value>Source</value></data>
+  <data name="UnverifiedWarning" xml:space="preserve"><value>URACloud has not confirmed this repository owner’s identity. This plugin will execute code on this computer.</value></data>
+  <data name="SwitchSource" xml:space="preserve"><value>Switch source: {0} → {1}. Other plugins depending on {2} will also use the new source.</value></data>
+  <data name="Dependents" xml:space="preserve"><value>Dependent plugins</value></data>
+  <data name="Busy" xml:space="preserve"><value>Another plugin installation is in progress. Try again after it finishes.</value></data>
+  <data name="DescriptorChanged" xml:space="preserve"><value>The installation descriptor or asset changed. Select and confirm again.</value></data>
+  <data name="NewVersion" xml:space="preserve"><value>New version</value></data>
+  <data name="Promoted" xml:space="preserve"><value>Promoted to stable</value></data>
+  <data name="PackageChanged" xml:space="preserve"><value>Asset or release changed at the same version</value></data>
+</root>

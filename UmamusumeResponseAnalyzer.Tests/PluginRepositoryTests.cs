@@ -8,7 +8,7 @@ namespace UmamusumeResponseAnalyzer.Tests
 {
     /// <summary>
     /// <see cref="PluginRepository.BuildCatalog"/> 的确定性单测——不依赖网络/Config。
-    /// 插件身份只由 InternalName 决定，并使用 OrdinalIgnoreCase 比较。
+    /// 目录来源由 repository ID 区分，本机插件身份使用 InternalName。
     /// </summary>
     public class PluginRepositoryTests
     {
@@ -22,129 +22,28 @@ namespace UmamusumeResponseAnalyzer.Tests
             Version = new(1, 0, 0),
         };
 
-        static readonly string[] NoFilter = [];
-        const string ApiBase = "https://ura.shuise.net/api/Plugins";
         const string PackageInternalName = "UmamusumeResponseAnalyzer";
-
         [Fact]
-        public void BuildCatalog_RejectsDuplicateInternalNamesIgnoringCase()
+        public void CatalogAndUpdatesKeepRepositoryAndReleaseIdentity()
         {
-            PluginInformation[] raw =
-            [
-                Info("离披", "StatisticsCollector", category: "数据收集"),
-                Info("URACloud-Tester", "statisticscollector", category: ""),
-            ];
-
-            var error = Assert.Throws<InvalidDataException>(() =>
-                PluginRepository.BuildCatalog(raw, NoFilter));
-
-            Assert.Contains("InternalName 重复", error.Message);
-            Assert.Contains("statisticscollector", error.Message);
+            var first = Release(1, Info("same author", "Same"));
+            var fork = Release(2, Info("same author", "same"));
+            var incompatible = Release(3, Info("author", "Other", targets: ["Komoe"]));
+            var catalog = PluginRepository.BuildCatalog([first, fork, incompatible], ["Cygames"]);
+            Assert.Equal([1L, 2L], catalog.Select(r => r.Source.RepositoryId));
+            Assert.Throws<InvalidDataException>(() => PluginRepository.BuildCatalog([first, first], []));
+            Assert.Throws<InvalidDataException>(() => PluginRepository.BuildCatalog([null!], []));
+            Assert.Null(PluginRepository.UpdateReason(first.Manifest.Version, first.InstalledSource, fork));
+            Assert.Null(PluginRepository.UpdateReason(first.Manifest.Version, first.InstalledSource, first));
+            Assert.NotNull(PluginRepository.UpdateReason(first.Manifest.Version, first.InstalledSource with { Prerelease = true }, first));
+            Assert.NotNull(PluginRepository.UpdateReason(first.Manifest.Version, first.InstalledSource with { AssetId = 99 }, first));
+            Assert.Null(PluginRepository.UpdateReason(new Version(2, 0), first.InstalledSource, first));
+            Assert.Equal(Path.Combine("Plugins", "Same.zip"), PluginRepository.InstallZipPath("Same"));
         }
 
-        [Fact]
-        public void BuildCatalog_BuildsDownloadUrlFromManifestAuthor()
-        {
-            PluginInformation[] raw = [Info("离披", "StatisticsCollector")];
-
-            var catalog = PluginRepository.BuildCatalog(raw, NoFilter);
-
-            Assert.Equal(
-                $"{ApiBase}/%E7%A6%BB%E6%8A%AB/StatisticsCollector/versions/1.0.0/download",
-                Assert.Single(catalog).DownloadUrl);
-        }
-
-        [Fact]
-        public void BuildCatalog_RejectsRowsMissingAuthorOrInternalName()
-        {
-            Assert.Throws<InvalidDataException>(() => PluginRepository.BuildCatalog([Info("", "HasNoAuthor")], NoFilter));
-            Assert.Throws<InvalidDataException>(() => PluginRepository.BuildCatalog([Info("HasNoName", "")], NoFilter));
-        }
-
-        [Fact]
-        public void BuildCatalog_RejectsNullEntries()
-        {
-            Assert.Throws<InvalidDataException>(() => PluginRepository.BuildCatalog([null!], NoFilter));
-        }
-
-        [Fact]
-        public void BuildCatalog_EmptyTargetsMeansAllServers_EvenWithFilterActive()
-        {
-            // 约定:插件 Targets 为空 = 支持所有服。即便用户设了目标过滤,空 Targets 也必须通过。
-            PluginInformation[] raw =
-            [
-                Info("a", "EmptyTargets", targets: []),
-                Info("a", "CygamesOnly", targets: ["Cygames"]),
-                Info("a", "KomoeOnly", targets: ["Komoe"]),
-            ];
-
-            var catalog = PluginRepository.BuildCatalog(raw, ["Cygames"]);
-
-            Assert.Contains(catalog, p => p.InternalName == "EmptyTargets");    // 空 = 全服,通过
-            Assert.Contains(catalog, p => p.InternalName == "CygamesOnly");     // 命中过滤
-            Assert.DoesNotContain(catalog, p => p.InternalName == "KomoeOnly"); // 不匹配,过滤掉
-        }
-
-        [Fact]
-        public void BuildCatalog_NoFilterReturnsEverythingRegardlessOfTargets()
-        {
-            PluginInformation[] raw =
-            [
-                Info("a", "P1", targets: ["Komoe"]),
-                Info("a", "P2", targets: []),
-            ];
-
-            var catalog = PluginRepository.BuildCatalog(raw, NoFilter);
-
-            Assert.Equal(2, catalog.Count);
-        }
-
-        [Fact]
-        public void InstallZipPath_PlacesZipUnderPluginsDir()
-        {
-            // 回归(URACloud 迁移引入):安装曾 ExtractToDirectory("./") 把插件解到 WORKING_DIRECTORY 根,
-            // 而 ScanAll 只扫 Plugins/ → 装了的插件永远扫不到、热重载/重启都不加载(实测复现)。
-            // 落地必须在 Plugins/ 下、且为 {InternalName}.zip(对齐 ScanAll 的 Plugins/*.zip 与本地开发 deploy)。
-            var path = PluginRepository.InstallZipPath("StatisticsCollector");
-
-            Assert.Equal(Path.Combine("Plugins", "StatisticsCollector.zip"), path);
-            // 关键不变量:父目录是 Plugins(不是 CWD 根),否则就是上面那个 bug
-            Assert.Equal("Plugins", Path.GetDirectoryName(path));
-        }
-
-        [Fact]
-        public void Bracketed_UsesLiteralBrackets()
-        {
-            Assert.Equal("[梦想杯剧本解析器]", PluginRepository.Bracketed("梦想杯剧本解析器"));
-            Assert.Equal("[a[x]]", PluginRepository.Bracketed("a[x]"));
-        }
-
-        [Fact]
-        public void BuildCatalog_DownloadUrl_PreservesRawVersionWithLeadingZeros()
-        {
-            // 回归(noVNC 实测):版本 "2026.03.04"(前导零)经 System.Version 归一会变 "2026.3.4",
-            // 拼出的下载 URL 与服务器(.../2026.03.04/download)不符 → 404 → 安装失败。
-            // 下载 URL 必须用服务器原样的 RawVersion;比较/排序仍用强类型 Version(前导零无所谓)。
-            var raw = new PluginInformation { Author = "URACloud-Tester", InternalName = "BreedersScenarioAnalyzer", RawVersion = "2026.03.04" };
-            Assert.Equal(new System.Version(2026, 3, 4), raw.Version);
-
-            var catalog = PluginRepository.BuildCatalog([raw], NoFilter);
-
-            Assert.Single(catalog);
-            Assert.Equal($"{ApiBase}/URACloud-Tester/BreedersScenarioAnalyzer/versions/2026.03.04/download", catalog[0].DownloadUrl);
-        }
-
-        [Theory]
-        [InlineData("")]
-        [InlineData("not-a-version")]
-        public void BuildCatalog_RejectsInvalidVersion(string rawVersion)
-        {
-            var plugin = Info("author", "InvalidVersion");
-            plugin.RawVersion = rawVersion;
-
-            Assert.Throws<InvalidDataException>(() => PluginRepository.BuildCatalog([plugin], NoFilter));
-            Assert.ThrowsAny<ArgumentException>(() => _ = plugin.Version);
-        }
+        static PluginRelease Release(long id, PluginInformation manifest) => new(
+            new(id, $"owner/repo{id}", id, "owner", "User", $"https://github.com/owner/repo{id}", false, null, null),
+            id * 10, "v1", $"https://github.com/owner/repo{id}/releases", false, 1, id * 100, new string('a', 64), manifest);
 
         [Fact]
         public void ValidatePackage_ReturnsStrictManifestMetadata()

@@ -1,0 +1,5 @@
+<Project>
+  <PropertyGroup>
+    <UraTestHostRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\..\..\'))</UraTestHostRoot>
+  </PropertyGroup>
+</Project>
