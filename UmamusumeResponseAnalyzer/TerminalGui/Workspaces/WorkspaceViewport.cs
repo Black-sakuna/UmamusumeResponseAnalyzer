@@ -124,6 +124,7 @@ internal sealed class WorkspaceViewport : View
             return;
         }
 
+        ReleaseMouseCapture(includeViewport: false);
         var focused = App?.TopRunnableView?.MostFocused;
         if (focused is not null && !Contains(focused))
             focused = null;
@@ -182,6 +183,7 @@ internal sealed class WorkspaceViewport : View
         List<Exception> errors = [];
         if (!disposed)
         {
+            ReleaseMouseCapture(includeViewport: true);
             disposed = true;
             var views = ownedViews.ToArray();
             var wrappers = layoutViews.ToArray();
@@ -351,6 +353,37 @@ internal sealed class WorkspaceViewport : View
         {
             foreach (var realized in workspacePanels.Values)
                 realized.View.SuperView?.Remove(realized.View);
+        }
+    }
+
+    void ReleaseMouseCapture(bool includeViewport)
+    {
+        var mouse = App?.Mouse;
+        if (mouse?.IsGrabbed() is not true)
+            return;
+
+        // Terminal.Gui 2.4.17 can retain a removed view's unfocused descendant grab.
+        // Check before detaching: descendants can lose their inherited App during removal.
+        bool HasCapture(View view)
+            => mouse.IsGrabbed(view) ||
+               view.SubViews.Any(HasCapture) ||
+               view.Margin?.View is { } margin && HasCapture(margin) ||
+               view.Border?.View is { } border && HasCapture(border) ||
+               view.Padding?.View is { } padding && HasCapture(padding);
+
+        bool HasRemovingCapture()
+            => includeViewport && HasCapture(this) ||
+               ownedViews.Any(HasCapture) || layoutViews.Any(HasCapture);
+
+        if (!HasRemovingCapture())
+            return;
+
+        mouse.UngrabMouse();
+        if (HasRemovingCapture())
+        {
+            throw new InvalidOperationException(
+                $"Workspace '{activeWorkspace.Title}' 无法解除待移除控件的鼠标捕获；已中止界面拆除。" +
+                " / Mouse capture remains in the view hierarchy; detachment aborted.");
         }
     }
 

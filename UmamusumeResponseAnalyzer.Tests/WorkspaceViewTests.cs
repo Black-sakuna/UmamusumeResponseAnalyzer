@@ -208,6 +208,285 @@ public sealed class WorkspaceViewTests
         GC.KeepAlive(tracked.Viewport);
     }
 
+    [Theory]
+    [InlineData("replace")]
+    [InlineData("remove-panel")]
+    [InlineData("invalidate")]
+    [InlineData("switch")]
+    [InlineData("remove-workspace")]
+    [InlineData("full-bleed")]
+    [InlineData("dispose")]
+    public async Task PanelTransitionsReleaseSliderBeforeDetachAndRestoreMouseRouting(string transition)
+    {
+        using var terminal = new TerminalGuiTestApp();
+        var workspace = new Workspace("Mouse capture");
+        var other = new Workspace("Other");
+        using var viewport = new WorkspaceViewport(workspace);
+        View? panel = null;
+        Button? focused = null;
+        ScrollSlider? slider = null;
+        var content = new WorkspaceContent(() =>
+        {
+            panel = new View { Height = 12 };
+            focused = new Button { Text = "FOCUS" };
+            slider = new ScrollSlider { X = 2, Y = 2, Width = 1, Height = 5 };
+            panel.Add(focused, slider);
+            return panel;
+        });
+        viewport.SetPanel(Panel(workspace, "main", "Main", content, 1));
+        viewport.Reconcile();
+        var originalPanel = panel!;
+        var originalSlider = slider!;
+        var originalFocus = focused!;
+        var receiver = new Button { Text = "RECEIVER", X = 50, Y = 1, MousePositionTracking = true };
+        var entered = false;
+        var wheeled = false;
+        receiver.MouseEnter += (_, _) => entered = true;
+        receiver.MouseEvent += (_, mouse) => wheeled |= mouse.Flags == MouseFlags.WheeledDown;
+        receiver.Accepted += (_, _) => receiver.Text = "CLICKED";
+        using var window = WindowWith(viewport, receiver);
+        var run = await StartAsync(terminal, window);
+        var mouse = terminal.Application.Mouse;
+        var releasedWhileAttached = false;
+        var panelDisposing = false;
+        originalPanel.Disposing += (_, _) => panelDisposing = true;
+        void Released(object? sender, ViewEventArgs args)
+        {
+            if (ReferenceEquals(args.View, originalSlider))
+                releasedWhileAttached = ReferenceEquals(originalSlider.App, terminal.Application) &&
+                    originalPanel.SuperView is not null && !panelDisposing;
+        }
+        mouse.UnGrabbedMouse += Released;
+        try
+        {
+            var pressPoint = await terminal.InvokeAsync(() =>
+            {
+                originalFocus.SetFocus();
+                return originalSlider.FrameToScreen().Location;
+            });
+            await terminal.InjectAsync(MouseAt(terminal, pressPoint, MouseFlags.LeftButtonPressed));
+            await terminal.WaitForAsync(() => mouse.IsGrabbed(originalSlider));
+            await terminal.InvokeAsync(() =>
+            {
+                Assert.Same(originalFocus, window.MostFocused);
+                switch (transition)
+                {
+                    case "replace":
+                        viewport.SetPanel(Panel(workspace, "main", "New", WorkspaceContent.Text("new"), 2));
+                        break;
+                    case "remove-panel":
+                        viewport.RemovePanel(workspace, "main");
+                        break;
+                    case "invalidate":
+                        viewport.InvalidatePanel(workspace, "main");
+                        break;
+                    case "switch":
+                        viewport.SetActiveWorkspace(other);
+                        break;
+                    case "remove-workspace":
+                        viewport.RemoveWorkspace(workspace, other);
+                        break;
+                    case "full-bleed":
+                        viewport.SetPanel(Panel(workspace, "full", "Full", WorkspaceContent.Text("full"), 2, fullBleed: true));
+                        break;
+                    case "dispose":
+                        viewport.Dispose();
+                        window.Remove(viewport);
+                        break;
+                    default:
+                        throw new ArgumentOutOfRangeException(nameof(transition));
+                }
+                if (transition != "dispose")
+                    viewport.Reconcile();
+                Assert.True(releasedWhileAttached);
+                Assert.False(mouse.IsGrabbed());
+            });
+
+            await terminal.InjectAsync(MouseAt(terminal, pressPoint, MouseFlags.LeftButtonReleased));
+            await terminal.MoveMouseAsync(new Point(79, 23));
+            var receiverPoint = await terminal.InvokeAsync(() => receiver.FrameToScreen().Location);
+            await terminal.MoveMouseAsync(receiverPoint);
+            await terminal.WaitForAsync(() => entered);
+            await terminal.InjectAsync(MouseAt(terminal, receiverPoint, MouseFlags.WheeledDown));
+            await terminal.WaitForAsync(() => wheeled);
+            await terminal.ClickAsync(receiverPoint);
+            await terminal.WaitForScreenAsync("CLICKED");
+        }
+        finally
+        {
+            mouse.UnGrabbedMouse -= Released;
+            await StopAsync(terminal, run);
+        }
+    }
+
+    [Theory]
+    [InlineData("panel")]
+    [InlineData("wrapper")]
+    [InlineData("margin")]
+    [InlineData("border-child")]
+    [InlineData("padding-child")]
+    public async Task RebuildReleasesCaptureInPanelAndLayoutAdornmentTrees(string owner)
+    {
+        using var terminal = new TerminalGuiTestApp();
+        var workspace = new Workspace("Adornment capture");
+        using var viewport = new WorkspaceViewport(workspace);
+        var panel = new View { Height = 10 };
+        var content = new WorkspaceContent(() => panel);
+        viewport.SetPanel(Panel(workspace, "main", "Main", content, 1));
+        viewport.Reconcile();
+        using var window = WindowWith(viewport);
+        var run = await StartAsync(terminal, window);
+        try
+        {
+            await terminal.InvokeAsync(() =>
+            {
+                var captured = owner switch
+                {
+                    "panel" => panel,
+                    "wrapper" => panel.SuperView!,
+                    "margin" => panel.Margin.GetOrCreateView(),
+                    "border-child" => panel.SuperView!.Border.GetOrCreateView(),
+                    "padding-child" => panel.Padding.GetOrCreateView(),
+                    _ => throw new ArgumentOutOfRangeException(nameof(owner))
+                };
+                if (owner.EndsWith("-child", StringComparison.Ordinal))
+                {
+                    var child = new View();
+                    captured.Add(child);
+                    captured = child;
+                }
+                var mouse = terminal.Application.Mouse;
+                mouse.GrabMouse(captured);
+                Assert.True(mouse.IsGrabbed(captured));
+                viewport.SetPanel(Panel(workspace, "main", "Renamed", content, 2));
+                viewport.Reconcile();
+                Assert.False(mouse.IsGrabbed());
+            });
+        }
+        finally
+        {
+            await StopAsync(terminal, run);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CancelledCaptureReleaseKeepsHierarchyIntactAndAllowsRetry(bool dispose)
+    {
+        using var terminal = new TerminalGuiTestApp();
+        var workspace = new Workspace("Cancelled release");
+        using var viewport = new WorkspaceViewport(workspace);
+        var panel = new View { Height = 10 };
+        var child = new View();
+        panel.Add(child);
+        viewport.SetPanel(Panel(workspace, "main", "Main", new(() => panel), 1));
+        viewport.Reconcile();
+        using var window = WindowWith(viewport);
+        var run = await StartAsync(terminal, window);
+        try
+        {
+            await terminal.InvokeAsync(() =>
+            {
+                var mouse = terminal.Application.Mouse;
+                var parent = panel.SuperView;
+                var layoutViews = viewport.SubViews.ToArray();
+                var disposing = false;
+                panel.Disposing += (_, _) => disposing = true;
+                mouse.GrabMouse(child);
+                void Cancel(object? sender, GrabMouseEventArgs args) => args.Cancel = true;
+                mouse.UnGrabbingMouse += Cancel;
+                if (!dispose)
+                    viewport.RemovePanel(workspace, "main");
+                Action change = dispose ? viewport.Dispose : viewport.Reconcile;
+                try
+                {
+                    var error = Assert.Throws<InvalidOperationException>(change);
+                    Assert.Contains("鼠标捕获", error.Message);
+                    Assert.Same(parent, panel.SuperView);
+                    Assert.Equal(layoutViews, viewport.SubViews);
+                    Assert.Same(terminal.Application, child.App);
+                    Assert.False(disposing);
+                    Assert.True(mouse.IsGrabbed(child));
+                }
+                finally
+                {
+                    mouse.UnGrabbingMouse -= Cancel;
+                }
+                change();
+                Assert.False(mouse.IsGrabbed());
+                Assert.True(disposing);
+                if (dispose)
+                    window.Remove(viewport);
+            });
+        }
+        finally
+        {
+            await StopAsync(terminal, run);
+        }
+    }
+
+    [Fact]
+    public async Task RedrawScrollResizeAndUnrelatedCapturesRemainIndependent()
+    {
+        using var terminal = new TerminalGuiTestApp();
+        var workspace = new Workspace("Keep capture");
+        using var viewport = new WorkspaceViewport(workspace);
+        var child = new View();
+        var panel = new View { Height = 60 };
+        panel.Add(child);
+        var content = new WorkspaceContent(() => panel);
+        viewport.SetPanel(Panel(workspace, "main", "Main", content, 1));
+        viewport.Reconcile();
+        var external = new View { X = 50, Width = 5, Height = 5 };
+        using var window = WindowWith(viewport, external);
+        var run = await StartAsync(terminal, window);
+        try
+        {
+            await terminal.InvokeAsync(() => terminal.Application.Mouse.GrabMouse(child));
+            await terminal.RedrawAsync();
+            await terminal.ResizeAsync(90, 30);
+            await terminal.InvokeAsync(() =>
+            {
+                var mouse = terminal.Application.Mouse;
+                viewport.Reconcile();
+                viewport.Navigate(Command.Start);
+                Assert.True(mouse.IsGrabbed(child));
+                mouse.UngrabMouse();
+                mouse.GrabMouse(external);
+                viewport.SetPanel(Panel(workspace, "main", "Renamed", content, 2));
+                viewport.Reconcile();
+                Assert.True(mouse.IsGrabbed(external));
+                mouse.UngrabMouse();
+
+                using var dialog = new Dialog { Width = 30, Height = 10 };
+                var dialogChild = new View();
+                dialog.Add(dialogChild);
+                var dialogSession = terminal.Application.Begin(dialog)!;
+                try
+                {
+                    mouse.GrabMouse(dialogChild);
+                    viewport.SetPanel(Panel(workspace, "main", "Behind modal", content, 3));
+                    viewport.Reconcile();
+                    Assert.True(mouse.IsGrabbed(dialogChild));
+                }
+                finally
+                {
+                    terminal.Application.End(dialogSession);
+                }
+                mouse.GrabMouse(external);
+                viewport.Dispose();
+                Assert.True(mouse.IsGrabbed(external));
+                mouse.UngrabMouse();
+                window.Remove(viewport);
+            });
+        }
+        finally
+        {
+            await StopAsync(terminal, run);
+        }
+    }
+
     [Fact]
     public void FactoriesRejectAttachedSharedAndReleasedViews()
     {
@@ -498,6 +777,13 @@ public sealed class WorkspaceViewTests
                     terminal,
                     dragTarget,
                     MouseFlags.LeftButtonPressed | MouseFlags.PositionReport));
+                await terminal.InvokeAsync(() =>
+                {
+                    Assert.True(terminal.Application.Mouse.IsGrabbed());
+                    viewport.SetPanel(Panel(alpha, "extra", "Extra", WorkspaceContent.Text("extra"), 2));
+                    viewport.Reconcile();
+                    Assert.True(terminal.Application.Mouse.IsGrabbed());
+                });
                 await terminal.InjectAsync(MouseAt(
                     terminal,
                     dragTarget,
