@@ -187,9 +187,9 @@ public sealed class LifecycleTeardownTests
         Config.Initialize();
         var callbackEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         using var releaseHandler = new ManualResetEventSlim();
-        var originalConfirmInstall = PluginRepository.ConfirmInstall;
+        var originalConfirmInstall = WebInstallApi.ConfirmInstall;
         var originalHttpClient = ResourceUpdater.HttpClient;
-        ResourceUpdater.HttpClient = new HttpClient(new DescriptorHandler());
+        ResourceUpdater.HttpClient = new HttpClient(new PluginInfoHandler());
         Task? request = null;
         Task? shutdown = null;
         Task? inlineShutdown = null;
@@ -199,7 +199,7 @@ public sealed class LifecycleTeardownTests
 
         try
         {
-            PluginRepository.ConfirmInstall = (_, cancellationToken) =>
+            WebInstallApi.ConfirmInstall = (_, cancellationToken) =>
             {
                 using var registration = cancellationToken.Register(() =>
                 {
@@ -253,7 +253,7 @@ public sealed class LifecycleTeardownTests
         finally
         {
             releaseHandler.Set();
-            PluginRepository.ConfirmInstall = originalConfirmInstall;
+            WebInstallApi.ConfirmInstall = originalConfirmInstall;
             ResourceUpdater.HttpClient.Dispose();
             ResourceUpdater.HttpClient = originalHttpClient;
             shutdown ??= Server.StopAsync();
@@ -278,15 +278,18 @@ public sealed class LifecycleTeardownTests
         }
     }
 
-    sealed class DescriptorHandler : HttpMessageHandler
+    sealed class PluginInfoHandler : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
-            var descriptor = new PluginRelease(new(1, "owner/repo", 1, "owner", "User", "https://github.com/owner/repo", false, null, null),
-                10, "tag", "https://github.com/owner/repo/releases", false, 1, 100, new string('a', 64),
-                new() { Author = "test", InternalName = "test", DisplayName = "test", RawVersion = "1.0.0" });
+            var plugin = new
+            {
+                source = new { repositoryId = 1 },
+                releaseId = 10,
+                manifest = new PluginInformation { Author = "test", InternalName = "test", DisplayName = "test", RawVersion = "1.0.0" }
+            };
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
-                { Content = new StringContent(JsonConvert.SerializeObject(descriptor)) });
+                { Content = new StringContent(JsonConvert.SerializeObject(plugin)) });
         }
     }
     static int GetFreePort()

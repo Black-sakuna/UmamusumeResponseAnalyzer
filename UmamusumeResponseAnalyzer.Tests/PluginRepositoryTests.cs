@@ -8,7 +8,7 @@ namespace UmamusumeResponseAnalyzer.Tests
 {
     /// <summary>
     /// <see cref="PluginRepository.BuildCatalog"/> 的确定性单测——不依赖网络/Config。
-    /// 目录来源由 repository ID 区分，本机插件身份使用 InternalName。
+    /// 按目标过滤目录，本机插件身份使用 InternalName。
     /// </summary>
     public class PluginRepositoryTests
     {
@@ -24,26 +24,16 @@ namespace UmamusumeResponseAnalyzer.Tests
 
         const string PackageInternalName = "UmamusumeResponseAnalyzer";
         [Fact]
-        public void CatalogAndUpdatesKeepRepositoryAndReleaseIdentity()
+        public void CatalogFiltersTargetsWithoutCollapsingSameNamePlugins()
         {
-            var first = Release(1, Info("same author", "Same"));
-            var fork = Release(2, Info("same author", "same"));
-            var incompatible = Release(3, Info("author", "Other", targets: ["Komoe"]));
+            var first = Info("same author", "Same");
+            var fork = Info("same author", "same");
+            var incompatible = Info("author", "Other", targets: ["Komoe"]);
             var catalog = PluginRepository.BuildCatalog([first, fork, incompatible], ["Cygames"]);
-            Assert.Equal([1L, 2L], catalog.Select(r => r.Source.RepositoryId));
-            Assert.Throws<InvalidDataException>(() => PluginRepository.BuildCatalog([first, first], []));
-            Assert.Throws<InvalidDataException>(() => PluginRepository.BuildCatalog([null!], []));
-            Assert.Null(PluginRepository.UpdateReason(first.Manifest.Version, first.InstalledSource, fork));
-            Assert.Null(PluginRepository.UpdateReason(first.Manifest.Version, first.InstalledSource, first));
-            Assert.NotNull(PluginRepository.UpdateReason(first.Manifest.Version, first.InstalledSource with { Prerelease = true }, first));
-            Assert.NotNull(PluginRepository.UpdateReason(first.Manifest.Version, first.InstalledSource with { AssetId = 99 }, first));
-            Assert.Null(PluginRepository.UpdateReason(new Version(2, 0), first.InstalledSource, first));
+            Assert.Equal([first, fork], catalog);
+            Assert.Equal([first, fork, incompatible], PluginRepository.BuildCatalog([first, fork, incompatible], []));
             Assert.Equal(Path.Combine("Plugins", "Same.zip"), PluginRepository.InstallZipPath("Same"));
         }
-
-        static PluginRelease Release(long id, PluginInformation manifest) => new(
-            new(id, $"owner/repo{id}", id, "owner", "User", $"https://github.com/owner/repo{id}", false, null, null),
-            id * 10, "v1", $"https://github.com/owner/repo{id}/releases", false, 1, id * 100, new string('a', 64), manifest);
 
         [Fact]
         public void ValidatePackage_ReturnsStrictManifestMetadata()

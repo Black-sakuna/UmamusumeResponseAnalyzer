@@ -5,7 +5,7 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>1.14.5.0</Version>
+		<Version>1.15.0.0</Version>
 		<PackageId>UmamusumeResponseAnalyzer</PackageId>
 		<PackageVersion>2026.9.2</PackageVersion>
 		<Description>UmamusumeResponseAnalyzer plugin compile-time API.</Description>

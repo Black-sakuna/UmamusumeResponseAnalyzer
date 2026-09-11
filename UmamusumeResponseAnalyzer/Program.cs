@@ -533,8 +533,8 @@ namespace UmamusumeResponseAnalyzer
                 foreach (var update in updates)
                 {
                     uiHost.Log(
-                        $"[URA] 插件 {update.DisplayName} 可更新: " +
-                        $"{update.CurrentVersion} -> {update.LatestVersion} ({update.Reason})",
+                        $"[URA] 插件 {update.DisplayName} 有新版本可用: " +
+                        $"{update.CurrentVersion} -> {update.LatestVersion}",
                         UiSeverity.Info);
                 }
             }
@@ -556,7 +556,7 @@ namespace UmamusumeResponseAnalyzer
             if (updates.Count == 1)
             {
                 var update = updates[0];
-                return $"插件 {update.DisplayName} 可更新: {update.CurrentVersion} -> {update.LatestVersion} ({update.Reason})";
+                return $"插件 {update.DisplayName} 有新版本: {update.CurrentVersion} -> {update.LatestVersion}";
             }
 
             var names = string.Join("、", updates.Take(3).Select(x => x.DisplayName));

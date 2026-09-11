@@ -1,6 +1,7 @@
 using Newtonsoft.Json;
 using Newtonsoft.Json.Serialization;
 using UmamusumeResponseAnalyzer.Plugin;
+using UmamusumeResponseAnalyzer.TerminalGui;
 using WatsonWebserver.Core;
 using WatsonWebserver.Lite;
 
@@ -15,6 +16,14 @@ internal static class WebInstallApi
         "http://localhost:5173",
     };
     static readonly JsonSerializerSettings JsonSettings = new() { ContractResolver = new CamelCasePropertyNamesContractResolver() };
+
+    internal static Func<PluginInformation, CancellationToken, bool> ConfirmInstall = (plugin, ct) =>
+        TerminalUi.Confirm(BuildInstallConfirmation(plugin), cancellationToken: ct);
+
+    internal static string BuildInstallConfirmation(PluginInformation plugin) =>
+        $"{PluginRepository.Text("Confirm")} {plugin.DisplayName} v{plugin.RawVersion}\n" +
+        $"{plugin.Author}/{plugin.InternalName}\n{plugin.RepositoryUrl}\n" +
+        PluginRepository.Text("ExecutionWarning");
 
     public static void Register(WebserverLite server, ServerRequestBarrier requests)
     {
@@ -50,14 +59,14 @@ internal static class WebInstallApi
     {
         cancellationToken.ThrowIfCancellationRequested();
         ApplyCors(ctx);
-        var plugins = PluginRepository.ReadInstalledPlugins().Select(p => new
+        var plugins = PluginManager.SnapshotPluginStatuses().Where(p => p.IsLoaded).Select(p => new
         {
-            author = p.Manifest?.Author,
-            internalName = p.Manifest?.InternalName ?? Path.GetFileNameWithoutExtension(p.Path),
-            version = p.Manifest?.RawVersion,
-            loaded = p.Manifest is not null && PluginManager.FindLoadedPlugin(p.Manifest.InternalName) is not null,
-            source = p.Source,
-            error = p.Error,
+            author = p.Author,
+            internalName = p.InternalName,
+            version = (p.Version ?? throw new InvalidOperationException($"已加载插件缺少版本: {p.InternalName}")).ToString(),
+            loaded = true,
+            source = (object?)null,
+            error = (string?)null,
         }).ToArray();
         return SendJson(ctx, 200, new
         {
@@ -87,8 +96,25 @@ internal static class WebInstallApi
         }
         try
         {
-            var result = await PluginRepository.InstallByReferenceAsync(request.RepositoryId, request.ReleaseId, cancellationToken);
-            await SendJson(ctx, result.Ok ? 200 : 409, result);
+            var plugin = await PluginRepository.GetPluginAsync(request.RepositoryId, request.ReleaseId, cancellationToken);
+            if (!ConfirmInstall(plugin, cancellationToken))
+            {
+                await SendJson(ctx, 409, new { ok = false, loaded = false, error = PluginRepository.Text("Cancelled") });
+                return;
+            }
+            var manifest = await PluginRepository.DownloadPluginZipAsync(plugin, cancellationToken);
+            // The ZIP is installed even when the subsequent reload fails or shutdown begins.
+            var loaded = false;
+            var error = (string?)null;
+            try
+            {
+                var result = (await PluginManager.ReloadPluginsAsync(manifest.InternalName)).Single();
+                loaded = result.Outcome == PluginManager.PluginLifecycleOutcome.Succeeded;
+                if (!loaded)
+                    error = PluginRepository.Text("InstalledNotLoaded");
+            }
+            catch (Exception ex) { error = ex.Message; }
+            await SendJson(ctx, 200, new { ok = true, loaded, installed = manifest.InternalName, error });
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception ex) { await SendJson(ctx, 500, new { ok = false, error = ex.Message }); }
